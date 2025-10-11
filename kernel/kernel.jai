@@ -273,7 +273,7 @@ kernel_entry :: () #no_context {
 
             text := "0123456789123456";
 
-            aes128_gcm_encrypt_stream_in_place(cast([]u8) text, key, .[0, 0, 0], .[]);
+            // aes128_gcm_encrypt_stream_in_place(cast([]u8) text, key, .[0, 0, 0], .[]);
 
             log("Ciphertext: %", cast([]u8) text);
         }
@@ -289,15 +289,15 @@ kernel_entry :: () #no_context {
         Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
         log("Sending DNS Query");
-        dns_query := transmit_dns_query(*net, "thinkpad");
+        dns_query := transmit_dns_query(*net, "google.com");
 
-        // Timeout(dns_query.complete, 60_000);
+        Timeout(dns_query.complete, 60_000);
         // assert(dns_query.answer != 0);
 
-        hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
-        // transmit_ping(*net, hardcoded_ip);
+        // hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
+        transmit_ping(*net, dns_query.answer);
 
-        connection := initiate_tcp_connection(*net, hardcoded_ip, 4443);
+        connection := initiate_tcp_connection(*net, dns_query.answer, 443);
 
         Timeout(connection.handshake_state == .COMPLETED, 60_000);
 

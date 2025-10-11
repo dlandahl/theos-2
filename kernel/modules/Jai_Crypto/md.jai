@@ -14,7 +14,8 @@ merkle_damgard :: (data: string, block_size: int) -> blocks: int, padded: string
     data_padded: string;
     // Structure: [data][guard][padding][length]. The +1 is for the guard byte.
     data_padded.count = data.count + 1 + padding_bytes + length_block;
-    data_padded.data = alloc(data_padded.count);
+    data_padded.data = talloc(data_padded.count);
+
     memset(data_padded.data, 0, data_padded.count);
     memcpy(data_padded.data, data.data, data.count);
 

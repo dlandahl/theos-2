@@ -91,7 +91,7 @@ compile_bootloader :: () -> success: bool {
         options.disable_redzone = true;
         options.llvm_options.target_system_triple = "x86_64-unknown-windows";
         options.use_custom_link_command = true;
-        options.entry_point_name = "EfiMain";
+        options.entry_point_name = "";
         options.dead_code_elimination = .ALL;
 
         new_path: [..] string;

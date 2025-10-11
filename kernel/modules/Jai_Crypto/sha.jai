@@ -264,6 +264,6 @@ shabase :: ($T: Type, data: string, initialization_vector: [8]T) -> [8]T {
         H[7] += h;
     }
 
-    free(data_padded);
+    // free(data_padded);
     return H;
 }

@@ -15,7 +15,7 @@ byte_swap_protocol_header :: (header: *$T) #modify {
             if array_find(it.notes, "DontByteswap") continue;
 
             if it.type.runtime_size < 2 {
-                // Don't need to byte-swap 1-byte fields.
+                // Don't need to byte-swap 1-byte fields, or void types.
                 continue;
             }
 
@@ -33,8 +33,12 @@ byte_swap_protocol_header :: (header: *$T) #modify {
               case .ARRAY;
                 tia := cast(*Type_Info_Array)it.type;
 
-                // Other array types will contain pointers, which shouldn't be in a network protocol struct.
+                // Other array types will contain pointers, which shouldn't be in a network packet header.
                 assert(tia.array_type == .FIXED);
+
+                if tia.element_type.runtime_size < 2 {
+                    continue;
+                }
 
                 print(*builder, "    for* header.%1 it.* = byte_swap(it.*);\n", it.name);
 
@@ -645,6 +649,7 @@ get :: (u24: *tls_u24) -> u32 {
     return result;
 }
 
+// We don't do an overload for this, because the #bake_constants at the top of the file don't resolve overloads.
 byte_swap_u24 :: (u24: tls_u24) -> tls_u24 {
     result: tls_u24;
     result[0] = u24[2];
@@ -690,14 +695,14 @@ Tls_Client_Hello :: struct {
     session_id: u8;
 
     num_cipher_suites: u16 #align 1;
-    cipher_suites: [2] Tls_Cipher_Suite #align 1;
+    cipher_suites: [1] Tls_Cipher_Suite #align 1;
 
     num_compression_methods: u8;
     compression_method: u8;
 
     extensions_length: u16 #align 1;
 
-    using extensions: struct {
+    extensions: struct {
         supported_groups: [14] u8;
         ec_points_format: [6] u8;
         signature_algorithms: [8] u8;
@@ -815,25 +820,21 @@ initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> s
     add_to_packet(*packet, record);
 
     hello: Tls_Client_Hello;
-    hello = .{
-        type                      = .CLIENT_HELLO,
-        client_version            = .TLS_1_2,
-        session_id                = 0,
-        num_cipher_suites         = size_of(type_of(hello.cipher_suites)),
-        num_compression_methods   = 1,
-        compression_method        = 0,
+    hello.type                      = .CLIENT_HELLO;
+    hello.client_version            = .TLS_1_2;
+    hello.session_id                = 0;
+    hello.num_cipher_suites         = size_of(type_of(hello.cipher_suites));
+    hello.num_compression_methods   = 1;
+    hello.compression_method        = 0;
 
-        extensions_length         = size_of(type_of(hello.extensions)),
+    hello.extensions_length         = size_of(type_of(hello.extensions));
+    hello.extensions.signature_algorithms      = .[0x0, 0xd, 0x0, 0x4, 0x0, 0x2, 0x4, 0x1];
+    hello.extensions.sct                       = .[0x0, 0x12, 0x0, 0x0];
+    hello.extensions.supported_groups          = .[0x0, 0xa, 0x0, 0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
+    hello.extensions.ec_points_format          = .[0x0, 0xb, 0x0, 0x2, 0x1, 0x0];
+    hello.extensions.renegotiation_info        = .[0xff, 0x1, 0x0, 0x1, 0x0];
 
-        signature_algorithms      = .[0x0, 0xd, 0x0, 0x4, 0x0, 0x2, 0x4, 0x1],
-        sct                       = .[0x0, 0x12, 0x0, 0x0],
-        supported_groups          = .[0x0, 0xa, 0x0, 0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19],
-        ec_points_format          = .[0x0, 0xb, 0x0, 0x2, 0x1, 0x0],
-        renegotiation_info        = .[0xff, 0x1, 0x0, 0x1, 0x0],
-    };
-
-    hello.cipher_suites[0] = .DHE_RSA_WITH_AES128_GCM_SHA256;
-    hello.cipher_suites[1] = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
+    hello.cipher_suites[0] = .ECDHE_RSA_WITH_AES128_CBC_SHA;
 
     set(*hello.length, size_of(Tls_Client_Hello) - 4);
 
@@ -1113,13 +1114,6 @@ commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Options_Builder) 
     add_to_packet(packet, cast(string)options.buffer);
 }
 
-dhcp_option_data_types :: struct {
-    code: Dhcp_Option_Code;
-    data_type: Type;
-}.[
-    .{ .REQUEST_IP, u32 },
-];
-
 
 // Todo: these three "transmit_dhcp_" routines are basically identical except for the Options.
 transmit_dhcp_discover :: (net: *Network_Connection) {
@@ -1384,7 +1378,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dns_Header)
-        + cast(u16) url.count + 6; // 6 because TYPE, CLASS, first label length, and zero terminator.
+        + cast(u16) url.count + 6; // 6 because TYPE, CLASS, first label length, and zero terminator. Todo: hardcoded
 
     ip := init_ip_header(net, .UDP, net.router_ip, ip_length);
     add_to_packet(*packet, ip);
