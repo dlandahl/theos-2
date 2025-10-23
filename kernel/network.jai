@@ -459,7 +459,7 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_f
 
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *Tcp_Connection {
 
-    port := FIRST_EPHEMERAL_PORT + cast(u16, rdtsc() & 0xfff);
+    port := allocate_port(net);
 
     log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
@@ -1384,7 +1384,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     add_to_packet(*packet, ip);
 
     udp: Udp_Header;
-    udp.source_port = allocate_port(net);
+    udp.source_port = net.dns_client_port;
     udp.destination_port = DNS_SERVER_PORT;
     udp.length = size_of(Udp_Header)
         + size_of(Dns_Header)
@@ -1633,6 +1633,7 @@ Network_Connection :: struct {
 
     // Todo: bucket array.
     dns_queries_in_flight: [..] Dns_Query;
+    dns_client_port: u16;
 
     tcp_connections: [..] Tcp_Connection;
     next_port: u16;
@@ -1652,15 +1653,13 @@ network_thread :: () {
     sleep(5, .seconds);
     log_category("Net");
 
+    time := get_monotonic_system_time();
+    random_seed(cast(S128)time);
+
     using net := *kernel_globals.net;
     next_port = FIRST_EPHEMERAL_PORT;
 
-    // Todo: replace with a call to random_seed when updating to a compiler version newer than 0.2.014
-    time := get_monotonic_system_time();
-    context.random_state.low = time.low | 1;
-    context.random_state.high = cast,no_check(u64) time.high;
-
-    LOG_ALL_RECEIVED_ETHERNET_PACKETS :: false;
+    dns_client_port = allocate_port(net);
 
     while true  {
         acquire(*spinlock);
@@ -1674,11 +1673,6 @@ network_thread :: () {
         for packets {
             eth := cast(*Ethernet_Header) it.data;
             byte_swap_protocol_header(eth);
-
-            if LOG_ALL_RECEIVED_ETHERNET_PACKETS {
-                push_print_style(mac_address_print_style);
-                log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
-            }
 
             if eth.ethertype == .ARP {
                 handle_arp(net, eth);
@@ -1698,7 +1692,7 @@ network_thread :: () {
             ip := cast(*Ipv4_Header) (eth + 1);
             byte_swap_protocol_header(ip);
 
-            assert(get(ip.*, .ihl) == 5);
+            // Todo: properly validate the IP packet (size, IHL, etc.)
 
             if ip.protocol == {
               case .ICMP;
@@ -1710,11 +1704,15 @@ network_thread :: () {
 
                 if udp.destination_port == DHCP_CLIENT_PORT {
                     handle_dhcp_packet(net, eth);
+                    continue;
                 }
 
-                if udp.source_port == DNS_SERVER_PORT {
+                if udp.destination_port == net.dns_client_port {
                     handle_dns_packet(net, eth);
+                    continue;
                 }
+
+                log("UDP packet for port % unhandled.\n", udp.destination_port);
 
               case .TCP;
                 handle_tcp_packet(net, eth);

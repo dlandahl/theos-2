@@ -216,7 +216,7 @@ kernel_entry :: () #no_context {
 
         rtc_init();
 
-        // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
+        // Get the time at the most recent second. Maybe we can use an interrupt to detect boot time more accurately.
         boot_calendar_time := rtc_get_calendar_time();
 
         // Don't use Basic.calendar_to_apollo, because it's OS specific
@@ -226,11 +226,9 @@ kernel_entry :: () #no_context {
 
         core_begin_multitasking();
 
-        // Todo: replace with a call to random_seed when updating to a compiler version newer than 0.2.014
-        // Todo: system time alone is too low entropy for an OS PRNG
+        // Todo: system time alone is too low entropy for OS random number generation.
         time := get_monotonic_system_time();
-        context.random_state.low = time.low | 1;
-        context.random_state.high = cast,no_check(u64) time.high;
+        random_seed(cast(S128)time);
 
         initialize_uacpi();
         find_all_pci_devices();
@@ -1190,6 +1188,7 @@ Recursive_Spinlock :: struct {
 acquire :: (lock: *Recursive_Spinlock) #no_context {
     if !kernel_globals.processor_cores.count {
         // It's too early in boot for recursive spinlocks to work.
+        // Just return to allow e.g. serial port to be accessed even while only the bootstrap core is running.
         return;
     }
 
@@ -1207,7 +1206,7 @@ acquire :: (lock: *Recursive_Spinlock) #no_context {
 
 release :: (lock: *Recursive_Spinlock) #no_context {
     if !kernel_globals.processor_cores.count {
-        // It's too early in boot for recursive spinlocks to work.
+        // See comment above
         return;
     }
 
