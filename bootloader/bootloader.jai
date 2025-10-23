@@ -258,7 +258,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
 
             // Translate page frame descriptor array address to virtual
-            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 14*0x20_0000 + offset);
+            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 15*0x20_0000 + offset);
             boot_data.page_directories_used = 15 + page_directories_needed;
         }
 
@@ -313,6 +313,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             if bd.memory_map_entries_used != 0 {
                 // If two regions are contiguous, just grow the previous one.
                 // Won't always coalesce perfectly because the firmware doesn't guarantee that memory map entries are sorted by address.
+                // Todo: we should sort it here and give the OS the sorted list. Keep everything tidy as early as possible.
 
                 last_region := *bd.memory_map[bd.memory_map_entries_used-1];
 
