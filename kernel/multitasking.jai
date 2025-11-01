@@ -66,11 +66,11 @@ core_begin_multitasking :: () {
     scheduler.current_task = allocate_task_info_struct();
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
     scheduler.current_task._context = *context;
+    scheduler.idle_task = scheduler.current_task;
 
-    if core.id != 0 {
-        scheduler.idle_task = scheduler.current_task;
-    } else {
+    if core.id == 0 {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
+
         idle :: () {
             while true {
                 #asm { hlt; }
@@ -81,26 +81,25 @@ core_begin_multitasking :: () {
         scheduler.idle_task = create_task(idle, 0x2000);
     }
 
-    {
-        // Enable Local APIC timer interrupts, or TSC deadline if available
 
-        lapic_timer: Apic_Lvt_Timer;
+    // Enable Local APIC timer interrupts, or TSC deadline if available
 
-        if kernel_globals.tsc_deadline_support {
-            set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
+    lapic_timer: Apic_Lvt_Timer;
 
-            delay := kernel_globals.tsc_frequency / 10;
-            write_msr(.TSC_DEADLINE, rdtsc() + delay);
-        } else {
-            write_apic_register(.TIC__TIMER_INITIAL, 0x0040_0000);
-            set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
-        }
+    if kernel_globals.tsc_deadline_support {
+        set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
 
-        set(*lapic_timer, .gate_index, kernel_globals.local_apic_timer_interrupt_gate);
-        set(*lapic_timer, .mask,       0);
-
-        write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
+        delay := kernel_globals.tsc_frequency / 10;
+        write_msr(.TSC_DEADLINE, rdtsc() + delay);
+    } else {
+        write_apic_register(.TIC__TIMER_INITIAL, 0x0040_0000);
+        set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
     }
+
+    set(*lapic_timer, .gate_index, kernel_globals.local_apic_timer_interrupt_gate);
+    set(*lapic_timer, .mask,       0);
+
+    write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
 }
 
 put_task_on_core :: (task: *Task_Info, core: *X64_Core) {

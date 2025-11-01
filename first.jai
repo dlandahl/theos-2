@@ -237,7 +237,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
 
             if phase.phase == .TYPECHECKED_ALL_WE_CAN {
                 for found_interrupts {
-                    add_build_string(tprint("int__% :: () #foreign Interrupts;", it), workspace);
+                    add_build_string(tprint("isr__% :: () #foreign Interrupts;", it), workspace);
                 }
 
                 array_reset(*found_interrupts);
@@ -457,10 +457,10 @@ END;
 INTERRUPT_STUB_FORMAT :: #string END
 
 extern %1
-global int__%1
+global isr__%1
 
 align 0x8
-int__%1:
+isr__%1:
     cli
     push_all
 

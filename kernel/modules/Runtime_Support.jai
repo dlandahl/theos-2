@@ -102,7 +102,10 @@ runtime_support_default_logger :: (message: string, data: *void, info: Log_Info)
         } else {
             write_string(message, to_standard_error = to_standard_error);
         }
+
+        return;
     }
+
     kernel_default_logger(message, data, info);
 }
 

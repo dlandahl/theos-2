@@ -135,7 +135,7 @@ initialize_apic :: () {
         assert(0xfee0_0000 == physical);
 
         virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
-        map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        map_page(virtual, physical, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
         kernel_globals.apic = cast(*void) virtual;
     }
@@ -152,15 +152,15 @@ initialize_apic :: () {
     #insert #run,host -> string {
         builder: String_Builder;
         for 0..31 {
-            print(*builder, "register_interrupt_gate(int__default_isa_fault_handler_%1, %1, true);\n", it);
+            print(*builder, "register_interrupt_gate(isr__default_isa_fault_handler_%1, %1, true);\n", it);
         }
         return builder_to_string(*builder);
     };
 
-    register_interrupt_gate(int__breakpoint_handler,            3,  true);
-    register_interrupt_gate(int__general_protection_fault,      13, true);
-    register_interrupt_gate(int__page_fault,                    14, true);
-    register_interrupt_gate(int__simd_floating_point_exception, 19, true);
+    register_interrupt_gate(isr__breakpoint_handler,            3,  true);
+    register_interrupt_gate(isr__general_protection_fault,      13, true);
+    register_interrupt_gate(isr__page_fault,                    14, true);
+    register_interrupt_gate(isr__simd_floating_point_exception, 19, true);
 
     //
     // Iterate interrupt controller structures
@@ -198,7 +198,7 @@ initialize_apic :: () {
             ioapic_ics := cast(*Ics_Io_Apic) ics;
 
             virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
-            map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+            map_page(virtual, ioapic_ics.address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
             kernel_globals.io_apic = cast(*u32) virtual;
 
@@ -212,7 +212,7 @@ initialize_apic :: () {
     }
 
     timer_gate := allocate_interrupt_gate();
-    register_interrupt_gate(int__local_apic_timer_interrupt, timer_gate);
+    register_interrupt_gate(isr__local_apic_timer_interrupt, timer_gate);
 
     // Store this, to be able to configure the APIC timer of all cores to use the same interrupt handler.
     // In the future we might not need the APIC timer if we only support CPUs with the TSC deadline feature.
@@ -849,7 +849,7 @@ init_uacpi_interrupt_handlers :: () {
     #insert #run,host -> string {
         builder: String_Builder;
         for 0..7 {
-            print(*builder, "register_interrupt_gate(int__handle_uacpi_irq_%1, first_irq_handler_gate_index + %1);\n", it);
+            print(*builder, "register_interrupt_gate(isr__handle_uacpi_irq_%1, first_irq_handler_gate_index + %1);\n", it);
         }
         return builder_to_string(*builder);
     };

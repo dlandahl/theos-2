@@ -510,7 +510,7 @@ init_processor_core :: () {
     {
         // Spurious interrupts
 
-        register_interrupt_gate(int__spurious_interrupt, 0xff);
+        register_interrupt_gate(isr__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
     }

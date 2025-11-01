@@ -147,6 +147,17 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
 }
 
 
+busy_wait :: (microseconds: s64) {
+    start := get_kernel_timestamp();
+    end   := start + microseconds_to_apollo(microseconds);
+
+    assert(end >= start);
+
+    while get_kernel_timestamp() < end #asm {
+        pause;
+    }
+}
+
 
 // CMOS Real Time Clock (RTC)
 
@@ -334,7 +345,7 @@ initialize_hpet :: () {
     assert(acpi_table.address_space == .MAIN_MEMORY);
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-    map_page(virtual, acpi_table.base_address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+    map_page(virtual, acpi_table.base_address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     offset_in_page := acpi_table.base_address % 0x1000;
     hpet.base_address = xx (virtual + offset_in_page);
@@ -358,8 +369,8 @@ initialize_hpet :: () {
     t0_gate := cast(u32) allocate_interrupt_gate();
     t1_gate := cast(u32) allocate_interrupt_gate();
 
-    register_interrupt_gate(int__hpet_timer0_interrupt, t0_gate);
-    register_interrupt_gate(int__hpet_timer1_interrupt, t1_gate);
+    register_interrupt_gate(isr__hpet_timer0_interrupt, t0_gate);
+    register_interrupt_gate(isr__hpet_timer1_interrupt, t1_gate);
 
     // Get INTI2/8 redirection entry. The numbers 2 and 8 come from the legacy replacement routing.
     // Todo: need to detect if there is an interrupt source override in the MADT.
@@ -509,19 +520,6 @@ initialize_tsc :: () {
     kernel_globals.tsc_frequency = calibrate_tsc();
 }
 
-
-busy_wait :: (microseconds: s64) {
-    start := get_kernel_timestamp();
-    end   := start + microseconds_to_apollo(microseconds);
-
-    assert(end >= start);
-
-    while get_kernel_timestamp() < end #asm {
-        pause;
-    }
-}
-
-
 calibrate_tsc :: () -> hz: u64 {
     verbose := false;
 
@@ -540,7 +538,7 @@ calibrate_tsc :: () -> hz: u64 {
 
     if eax != 0 {
         frequency := ecx * (ebx / eax);
-        if verbose log("TSC Frequency is % (eax=0x15)", frequency);
+        if verbose log("TSC Frequency is % (CPUID eax=0x15)", frequency);
         return frequency;
     }
 
@@ -555,7 +553,7 @@ calibrate_tsc :: () -> hz: u64 {
     if eax != 0 {
         // It looks like this value is not too accurate. Manual calibration might be better.
         frequency := eax * 1_000_000;
-        if verbose log("TSC Frequency is % (eax=0x16)", frequency);
+        if verbose log("TSC Frequency is % (CPUID eax=0x16)", frequency);
         return frequency;
     }
 
@@ -565,11 +563,15 @@ calibrate_tsc :: () -> hz: u64 {
     hpet := kernel_globals.high_precision_timer;
 
     calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
+
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
     max_error := 500_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
     delta: [3] int;
+
+    // HPET is off-chip and therefore high latency (1-2us), but it doesn't look like there's a better alternative.
+    // Good PDF about OS timekeeping: www.vmware.com/docs/vmware_timekeeping "Timekeeping in VMware Virtual Machines".
 
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
@@ -578,11 +580,15 @@ calibrate_tsc :: () -> hz: u64 {
 
         counter_start := counter_register.*;
         tsc0 := rdtsc();
+        tsc1: u64;
 
-        tsc1: type_of(tsc0);
-
+        // Todo: it might be best to write the timing loop in assembly, to get the most accurate measurement.
+        // Should also write some code to measure the accuracy we're getting. But then again, maybe none of this will be needed on newer microarchitectures, which are the only ones we care about.
         while true {
             counter_now := counter_register.*;
+
+            // rdtsc() is a macro, will not generate a procedure call.
+            // But we may want to get rid of the SHL and OR.
             tsc1 = rdtsc();
 
             if counter_now - counter_start > ticks_per_calibration_run {

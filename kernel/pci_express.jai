@@ -612,10 +612,10 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
-    enabled := enable_msi_or_msi_x(device, int__i8254x_interrupt);
+    enabled := enable_msi_or_msi_x(device, isr__i8254x_interrupt);
 
     if enabled == .NONE {
-        success := register_legacy_pci_interrupt(device, int__i8254x_interrupt);
+        success := register_legacy_pci_interrupt(device, isr__i8254x_interrupt);
         if !success {
             log_error("Failed to set up interrupt.");
             bluescreen();
@@ -1015,9 +1015,9 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     parse_pci_capability_list(device);
 
-    // enabled := enable_msi_or_msi_x(device, int__nvme_interrupt);
+    // enabled := enable_msi_or_msi_x(device, isr__nvme_interrupt);
     // assert(enabled == .MSI_X);
-    register_legacy_pci_interrupt(device, int__nvme_interrupt);
+    register_legacy_pci_interrupt(device, isr__nvme_interrupt);
 
     // Mask out the admin queue interrupt. Just spin on the phase bit for now
     // device.msi_x_table[0].vector_control |= .MASK;
@@ -1264,7 +1264,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
-    enable_msi_or_msi_x(device, int__ahci_interrupt);
+    enable_msi_or_msi_x(device, isr__ahci_interrupt);
 
     bar := read_base_address_register(device, bar_index = 5);
     if !bar.base {
