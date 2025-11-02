@@ -27,13 +27,16 @@ get :: bitfield_get;
 X64_Core :: struct {
     task_state_segment: Tss_With_Iopb #align 0x80;
 
-    // Align to cache block so no extra memory accesses are required on context switch
+    // Align to cache block so no extra memory accesses are required on context switch.
     global_descriptor_table: Global_Descriptor_Table #align 64;
 
     local_apic_id: u32;
     id: int; // ID 0 is the bootstrap core.
 
     scheduler: Scheduler;
+
+    preempt_disable_count: int;
+    irqs_disabled: bool;
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
@@ -334,7 +337,7 @@ set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
  
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        acquire(*kernel_globals.serial_port_spinlock);
+        flags := acquire(*kernel_globals.serial_port_spinlock);
 
         write_string("Assertion failure");
         if message.count {
@@ -342,7 +345,7 @@ set_global_context_callbacks :: () #no_context {
         }
         write_string("\n");
 
-        release(*kernel_globals.serial_port_spinlock);
+        release(*kernel_globals.serial_port_spinlock, flags);
 
         bluescreen(location);
         return true;
@@ -545,7 +548,7 @@ bluescreen :: (loc := #caller_location) #no_context {
 
         if lock.lock && lock.held_by_core == core.id {
             lock.recursion_count = 0;
-            release(lock);
+            release(lock, 0);
         }
     }
 
@@ -1123,9 +1126,9 @@ serial_out :: (data: string) #no_context {
 }
 
 kernel_write_string :: (text: string) #no_context {
-    acquire(*kernel_globals.serial_port_spinlock);
+    flags := acquire(*kernel_globals.serial_port_spinlock);
     serial_out(text);
-    release(*kernel_globals.serial_port_spinlock);
+    release(*kernel_globals.serial_port_spinlock, flags);
 
     draw_text(text);
 }
@@ -1145,9 +1148,41 @@ memory_fence :: () #expand {
 
 
 
+// Todo: should programatically detect when these don't get paired up correctly.
+
+disable_preemption :: () #no_context {
+    core := get_current_core();
+    core.preempt_disable_count += 1;
+    memory_fence();
+}
+
+enable_preemption :: () #no_context {
+    memory_fence();
+    core := get_current_core();
+    core.preempt_disable_count -= 1;
+}
+
+
+
+get_rflags :: () -> X64_Flags #foreign Interrupts;
+
+disable_interrupts :: () -> X64_Flags #no_context {
+    flags := get_rflags();
+    #asm { cli; }
+    return flags;
+}
+
+enable_interrupts :: (flags: X64_Flags) #no_context {
+    if flags & .IF__interrupt {
+        #asm { sti; }
+    }
+}
+
+
+
 Spinlock :: #type,distinct u32;
 
-acquire :: (lock: *Spinlock) #no_context {
+acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
     carry: u8 = 1;
 
     while carry {
@@ -1162,18 +1197,24 @@ acquire :: (lock: *Spinlock) #no_context {
     }
 
     memory_fence();
+
+    // Todo: for now, spinlocks disable all interrupts. Really, if the same spinlock will not be used
+    // from interrupt handlers, we only need to disable preemption.
+    return disable_interrupts();
 }
 
-release :: (lock: *Spinlock) #no_context {
+release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
     memory_fence();
 
     if !lock.* bluescreen();
     lock.* = 0;
+
+    enable_interrupts(flags);
 }
 
 Scoped_Acquire :: (lock: *Spinlock) #expand {
-    acquire(lock);
-    `defer release(lock);
+    flags := acquire(lock);
+    `defer release(lock, flags);
 }
 
 
@@ -1185,26 +1226,27 @@ Recursive_Spinlock :: struct {
     recursion_count: int;
 }
 
-acquire :: (lock: *Recursive_Spinlock) #no_context {
+acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
     if !kernel_globals.processor_cores.count {
         // It's too early in boot for recursive spinlocks to work.
         // Just return to allow e.g. serial port to be accessed even while only the bootstrap core is running.
-        return;
+        return 0;
     }
 
     core := get_current_core();
 
     if lock.lock && lock.held_by_core == core.id {
         lock.recursion_count += 1;
-        return;
+        return get_rflags();
     }
 
-    acquire(*lock.lock);
+    flags := acquire(*lock.lock);
 
     lock.held_by_core = core.id;
+    return flags;
 }
 
-release :: (lock: *Recursive_Spinlock) #no_context {
+release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
     if !kernel_globals.processor_cores.count {
         // See comment above
         return;
@@ -1219,12 +1261,12 @@ release :: (lock: *Recursive_Spinlock) #no_context {
         return;
     }
 
-    release(*lock.lock);
+    release(*lock.lock, flags);
 }
 
 Scoped_Acquire :: (lock: *Recursive_Spinlock) #expand {
-    acquire(lock);
-    `defer release(lock);
+    flags := acquire(lock);
+    `defer release(lock, flags);
 }
 
 

@@ -247,7 +247,8 @@ startup_application_processors :: () {
 
         // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
         // Maybe if processors could use their APIC ID to find their stack memory it would be faster.
-        // Todo: Maybe this needs a timeout in case a core fails to start
+        // Todo: Maybe this needs a timeout in case a core fails to start.
+        // Todo: This disables interrupts, which is silly because the lock will be released on a different core.
         acquire(*ap_startup_spinlock);
 
         stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + 0x1_0000;
@@ -278,7 +279,7 @@ ap_startup_spinlock: Spinlock;
 
 ap_entry_point :: () #c_call {
 
-    release(*ap_startup_spinlock);
+    release(*ap_startup_spinlock, 0);
 
     push_context {
         init_processor_core();
@@ -925,9 +926,9 @@ uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call 
         locator.slot_index -= 1;
 
         lock := bucket_array_find_pointer(*spinlock_storage, locator);
-        acquire(lock);
+        flags := acquire(lock);
 
-        return 0; // Todo, think about interrupts. This may currently cause deadlocks.
+        return cast,trunc(uacpi_cpu_flags) flags;
     }
 }
 
@@ -941,7 +942,7 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
         locator.slot_index -= 1;
 
         lock := bucket_array_find_pointer(*spinlock_storage, locator);
-        release(lock);
+        release(lock, cast(X64_Flags) flags);
     }
 }
 

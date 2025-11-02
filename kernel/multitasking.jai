@@ -200,7 +200,7 @@ new_task_start :: () #no_context {
     push_context {
         core := get_current_core();
 
-        release(*core.scheduler.spinlock);
+        release(*core.scheduler.spinlock, 0);
 
         task := core.scheduler.current_task;
         task._context = *context;
@@ -276,21 +276,21 @@ acquire_mutex :: (mutex: *Mutex) {
     core := get_current_core();
     current_task := core.scheduler.current_task;
 
-    acquire(*mutex.spinlock);
+    flags := acquire(*mutex.spinlock);
 
     if mutex.held_by == null {
         assert(queue_is_empty(mutex.queue));
 
         mutex.held_by = current_task;
 
-        release(*mutex.spinlock);
+        release(*mutex.spinlock, flags);
         return;
     }
 
     queue_push(*mutex.queue, current_task);
     current_task.waiting_for_mutex = true;
 
-    release(*mutex.spinlock);
+    release(*mutex.spinlock, flags);
     yield();
 }
 
@@ -456,8 +456,13 @@ local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
         write_msr(.TSC_DEADLINE, rdtsc() + delay);
     }
 
+    core := get_current_core();
+    if core.preempt_disable_count > 0 {
+        return;
+    }
+
     if stack.cs == .RING0_CODE {
-        // Don't preempt the kernel.
+        // Todo: never preempting the kernel for now.
         return;
     }
 

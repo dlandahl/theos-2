@@ -501,6 +501,9 @@ update_tcp_connection :: (net: *Network_Connection, con: *Tcp_Connection) {
     }
 }
 
+// Implementation of TCP that might give clues about how to improve this horrible code:
+// https://github.com/d-levin/simple-tcp/blob/master/transport.c
+
 handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     Tcp_Packet :: struct {
@@ -1662,7 +1665,7 @@ network_thread :: () {
     dns_client_port = allocate_port(net);
 
     while true  {
-        acquire(*spinlock);
+        flags := acquire(*spinlock);
 
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);
@@ -1722,7 +1725,7 @@ network_thread :: () {
             }
         }
 
-        release(*spinlock);
+        release(*spinlock, flags);
 
         sleep(5, .milliseconds);
     }

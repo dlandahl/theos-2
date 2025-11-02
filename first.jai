@@ -438,6 +438,14 @@ enter_user_mode:
     o64 sysret
 
 
+global get_rflags
+align 0x10
+get_rflags:
+    pushfq
+    pop rax
+    ret
+
+
 global init_segment_registers
 align 0x10
 init_segment_registers:
