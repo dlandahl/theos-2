@@ -36,7 +36,6 @@ X64_Core :: struct {
     scheduler: Scheduler;
 
     preempt_disable_count: int;
-    irqs_disabled: bool;
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
@@ -70,6 +69,7 @@ Kernel_Globals :: struct {
     add_task_info_struct_spinlock: Spinlock;
 
     processor_cores: [] X64_Core;
+    bootstrap_core_initialized: bool;
 
     apic: *void;
     io_apic: *u32;
@@ -110,7 +110,7 @@ Kernel_Globals :: struct {
 
 kernel_globals: Kernel_Globals;
 
-Interrupts :: #library,no_dll "../.build/interrupts";
+Assembly :: #library,no_dll "../.build/assembly";
 
 #program_export
 kernel_entry :: () #no_context {
@@ -312,14 +312,14 @@ kernel_entry :: () #no_context {
         #asm { sti; }
 
         while true {
-            yield();
+            schedule_tasks();
             #asm { hlt; }
         }
     }
 }
 
 #program_export
-simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
+floating_point_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
     mxcsr: Mxcsr;
     pmxcsr := *mxcsr;
 
@@ -472,7 +472,7 @@ init_processor_core :: () {
             0x0f, 0x00, 0xd8        // ltr ax
         ];
 
-        init_segment_registers :: () #foreign Interrupts;
+        init_segment_registers :: () #foreign Assembly;
         init_segment_registers();
     }
 
@@ -500,7 +500,7 @@ init_processor_core :: () {
         write_msr(.STAR__syscall_segment, star);
         write_msr(.SFMASK__syscall_flags, 0);
 
-        syscall_entry :: () #foreign Interrupts;
+        syscall_entry :: () #foreign Assembly;
         write_msr(.LSTAR__syscall_address, bit_cast(syscall_entry, u64));
 
         EFER_SCE__syscall_enable :: 1;
@@ -1098,6 +1098,8 @@ find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
 serial_out :: (data: string) #no_context {
     COM1 :: 0x3f8;
 
+    Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+
     for data {
         for 1..10_0000 {
             status: u8;
@@ -1126,10 +1128,7 @@ serial_out :: (data: string) #no_context {
 }
 
 kernel_write_string :: (text: string) #no_context {
-    flags := acquire(*kernel_globals.serial_port_spinlock);
     serial_out(text);
-    release(*kernel_globals.serial_port_spinlock, flags);
-
     draw_text(text);
 }
 
@@ -1144,6 +1143,15 @@ store_fence :: () #expand {
 
 memory_fence :: () #expand {
     #asm { mfence; }
+}
+
+
+
+fetch_add :: (value: *int, add: int) -> int {
+    #asm {
+        lock_xadd [value], add;
+    }
+    return add;
 }
 
 
@@ -1164,7 +1172,7 @@ enable_preemption :: () #no_context {
 
 
 
-get_rflags :: () -> X64_Flags #foreign Interrupts;
+get_rflags :: () -> X64_Flags #foreign Assembly;
 
 disable_interrupts :: () -> X64_Flags #no_context {
     flags := get_rflags();
@@ -1172,7 +1180,7 @@ disable_interrupts :: () -> X64_Flags #no_context {
     return flags;
 }
 
-enable_interrupts :: (flags: X64_Flags) #no_context {
+restore_interrupts :: (flags: X64_Flags) #no_context {
     if flags & .IF__interrupt {
         #asm { sti; }
     }
@@ -1183,6 +1191,10 @@ enable_interrupts :: (flags: X64_Flags) #no_context {
 Spinlock :: #type,distinct u32;
 
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
+    // Todo: for now, spinlocks disable all IRQs. Really, if the same spinlock will not be used
+    // from interrupt handlers, we only need to disable preemption.
+    flags := disable_interrupts();
+
     carry: u8 = 1;
 
     while carry {
@@ -1198,9 +1210,7 @@ acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
 
     memory_fence();
 
-    // Todo: for now, spinlocks disable all interrupts. Really, if the same spinlock will not be used
-    // from interrupt handlers, we only need to disable preemption.
-    return disable_interrupts();
+    return flags;
 }
 
 release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
@@ -1209,7 +1219,7 @@ release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
     if !lock.* bluescreen();
     lock.* = 0;
 
-    enable_interrupts(flags);
+    restore_interrupts(flags);
 }
 
 Scoped_Acquire :: (lock: *Spinlock) #expand {
@@ -1227,7 +1237,7 @@ Recursive_Spinlock :: struct {
 }
 
 acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
-    if !kernel_globals.processor_cores.count {
+    if !kernel_globals.bootstrap_core_initialized {
         // It's too early in boot for recursive spinlocks to work.
         // Just return to allow e.g. serial port to be accessed even while only the bootstrap core is running.
         return 0;
@@ -1247,7 +1257,7 @@ acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
 }
 
 release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
-    if !kernel_globals.processor_cores.count {
+    if !kernel_globals.bootstrap_core_initialized {
         // See comment above
         return;
     }

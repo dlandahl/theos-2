@@ -130,8 +130,8 @@ _memcmp :: (a: *void, b: *void, count: u64) -> s16 #c_call {
         cld;
         
         count === c;
-        a === si;
-        b === di;
+        a     === si;
+        b     === di;
         repe_cmps.b b, a, count;
     }
 

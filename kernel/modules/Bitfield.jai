@@ -46,8 +46,8 @@ bitfield_set :: (bitfield: *$B, flag: $F, value: s64, $loc := #caller_location, 
     // Don't dereference the pointer twice to mask out and set the new value.
     // Can make a difference when the pointer directly refers to a memory-mapped hardware register.
     temp := bitfield.*;
-    temp &= cast,no_check(B, ~bit_mask);
-    temp |= cast,no_check(B, value << bit_offset);
+    temp &= cast,no_check(B) ~bit_mask;
+    temp |= cast,no_check(B) (value << bit_offset);
     bitfield.* = temp;
 }
 
@@ -57,8 +57,8 @@ bitfield_get :: (bitfield: $B, flag: $F, $loc := #caller_location, $call := #cal
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     value := bitfield;
-    value &=  xx bit_mask;
-    value >>= xx bit_offset;
+    value &=  cast,no_check(B) bit_mask;
+    value >>= cast,no_check(B) bit_offset;
     return cast(F.loose) value;
 }
 

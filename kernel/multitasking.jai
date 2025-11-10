@@ -74,7 +74,7 @@ core_begin_multitasking :: () {
         idle :: () {
             while true {
                 #asm { hlt; }
-                yield();
+                schedule_tasks();
             }
         }
 
@@ -149,7 +149,9 @@ pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
     return idle_task;
 }
 
-yield :: () {
+yield :: schedule_tasks; // Yielding execution is no different from calling into the scheduler on the current core, to see if something else is ready to run.
+
+schedule_tasks :: () {
     core := get_current_core();
     scheduler := *core.scheduler;
 
@@ -189,7 +191,7 @@ yield :: () {
     core.task_state_segment.rsp[0] = next.kernel_stack;
     scheduler.current_task = next;
 
-    context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Interrupts;
+    context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
     context_switch(current, next);
 }
 
@@ -214,6 +216,30 @@ new_task_start :: () #no_context {
         // Todo: remove the task from the scheduler properly
     }
 }
+
+#program_export
+scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+
+    if kernel_globals.tsc_deadline_support {
+        delay := kernel_globals.tsc_frequency / 10;
+        write_msr(.TSC_DEADLINE, rdtsc() + delay);
+    }
+
+    core := get_current_core();
+    if core.preempt_disable_count > 0 {
+        return;
+    }
+
+    if stack.cs == .RING0_CODE {
+        // Todo: never preempting the kernel for now.
+        return;
+    }
+
+    push_context {
+        schedule_tasks();
+    }
+} @InterruptRoutine
 
 
 
@@ -313,6 +339,8 @@ release_mutex :: (mutex: *Mutex) {
 
         queue_push(*next.on_core.scheduler.waiting_to_run, next);
         mutex.held_by = next;
+
+        // Todo: IPI to wake/preempt the other core.
     }
 }
 
@@ -374,7 +402,7 @@ print_from_user_mode :: (format: string, args: .. Any) {
 }
 
 #program_export
-syscall_handler :: (data: *Syscall_Stack) #c_call {
+syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
 
     if data.rax == {
@@ -412,7 +440,7 @@ get_kernel_stack :: () -> *void #c_call {
     return core.scheduler.current_task.kernel_stack;
 }
 
-enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Interrupts;
+enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
 
 
 
@@ -446,33 +474,8 @@ task_do_work_in_ring_3 :: () #c_call {
     }
 }
 
-
 #program_export
-local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
-
-    if kernel_globals.tsc_deadline_support {
-        delay := kernel_globals.tsc_frequency / 10;
-        write_msr(.TSC_DEADLINE, rdtsc() + delay);
-    }
-
-    core := get_current_core();
-    if core.preempt_disable_count > 0 {
-        return;
-    }
-
-    if stack.cs == .RING0_CODE {
-        // Todo: never preempting the kernel for now.
-        return;
-    }
-
-    push_context {
-        yield();
-    }
-} @InterruptRoutine
-
-#program_export
-spurious_interrupt :: (stack: Interrupt_Stack()) #c_call {
+spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
     write_string("Spurious...\n");
 } @InterruptRoutine
 

@@ -149,6 +149,8 @@ initialize_apic :: () {
 
     init_processor_core();
 
+    kernel_globals.bootstrap_core_initialized = true;
+
     #insert #run,host -> string {
         builder: String_Builder;
         for 0..31 {
@@ -160,7 +162,7 @@ initialize_apic :: () {
     register_interrupt_gate(isr__breakpoint_handler,            3,  true);
     register_interrupt_gate(isr__general_protection_fault,      13, true);
     register_interrupt_gate(isr__page_fault,                    14, true);
-    register_interrupt_gate(isr__simd_floating_point_exception, 19, true);
+    register_interrupt_gate(isr__floating_point_exception,      19, true);
 
     //
     // Iterate interrupt controller structures
@@ -212,10 +214,9 @@ initialize_apic :: () {
     }
 
     timer_gate := allocate_interrupt_gate();
-    register_interrupt_gate(isr__local_apic_timer_interrupt, timer_gate);
+    register_interrupt_gate(isr__scheduling_timer_interrupt, timer_gate);
 
-    // Store this, to be able to configure the APIC timer of all cores to use the same interrupt handler.
-    // In the future we might not need the APIC timer if we only support CPUs with the TSC deadline feature.
+    // Store this, to be able to configure the APIC timer (or TSC deadline) of all cores to use the same interrupt handler, which is done in core_begin_multitasking.
     kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
 
     kernel_globals.tasks.allocator = context.allocator;
@@ -289,7 +290,7 @@ ap_entry_point :: () #c_call {
         #asm { sti; }
 
         while true {
-            yield();
+            schedule_tasks();
             #asm { hlt; }
         }
     }
@@ -345,7 +346,7 @@ default_isa_fault_handler_%1 :: (stack: *void) #c_call {
 END;
 
 #program_export
-breakpoint_handler :: (stack: *Interrupt_Stack(false)) #c_call {
+breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
     push_context {
         context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 0;
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
@@ -360,7 +361,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack(false)) #c_call {
 } @InterruptRoutine
 
 #program_export
-page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
+page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     push_context,defer_pop;
 
     Scoped_Acquire(*kernel_globals.serial_port_spinlock);
@@ -399,7 +400,7 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
 } @InterruptRoutineWithErrorCode
 
 #program_export
-general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
+general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = true)) #c_call {
     push_context {
         Scoped_Acquire(*kernel_globals.serial_port_spinlock);
 

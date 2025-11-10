@@ -1011,14 +1011,14 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
     using packet := cast(*Dhcp_Packet) eth_;
 
     if udp.length < size_of(Dhcp_Message) + size_of(Udp_Header) {
-        log_error("Bad DHCP packet, too small.");
+        log_error("DHCP packet too small.");
         return;
     }
 
     byte_swap_protocol_header(*dhcp);
 
     if dhcp.magic != Dhcp_Message.MAGIC {
-        log_error("Bad DHCP packet, magic doesn't match.");
+        log_error("DHCP packet magic doesn't match.");
         return;
     }
 
@@ -1288,8 +1288,8 @@ handle_icmp_packet :: (net: *Network_Connection, eth: *Ethernet_Header) {
             if it.id == icmp.data {
                 time := get_monotonic_time();
 
-                delta_us := to_milliseconds(time - it.sent_at);
-                log("Ping % = %ms", format_ip(it.destination_ip), delta_us);
+                delta_ms := to_milliseconds(time - it.sent_at);
+                log("Ping % = %ms", format_ip(it.destination_ip), delta_ms);
 
                 remove it;
                 break;

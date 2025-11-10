@@ -16,6 +16,10 @@
 
 #run,stallable main();
 
+kernel_only := false;
+use_codex   := false;
+compiler_performance_report := false;
+
 main :: () {
     set_build_options_dc(.{ do_output = false });
 
@@ -51,11 +55,12 @@ main :: () {
         return;
     }
 
-    kernel_only := false;
     args := get_build_options().compile_time_command_line;
 
     for args if it == {
         case "kernel_only"; kernel_only = true;
+        case "perf";        compiler_performance_report = true;
+        case "codex";       use_codex = true;
         case; log_error("Command line argument not understood: %", it);
     }
 
@@ -66,7 +71,7 @@ main :: () {
         exit(1);
     }
 
-    if !compile_kernel(kernel_only) {
+    if !compile_kernel() {
         log_error("Failed to compile the kernel.\n");
         exit(1);
     }
@@ -146,7 +151,7 @@ compile_bootloader :: () -> success: bool {
     return success;
 }
 
-compile_kernel :: (kernel_only: bool) -> success: bool {
+compile_kernel :: () -> success: bool {
     if !kernel_only {
         log("Assembling AP Startup Code");
 
@@ -165,10 +170,20 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
     log("Compiling kernel");
     workspace := compiler_create_workspace("Kernel");
 
+
     plugins: [..] *Metaprogram_Plugin;
-    to_create: Plugin_To_Create;
-    to_create.name = "Codex";
-    init_plugins(.[to_create], *plugins, workspace);
+    to_create: [..] Plugin_To_Create;
+
+    if use_codex {
+        array_add(*to_create, Plugin_To_Create.{ name = "Codex" });
+    }
+
+    if compiler_performance_report {
+        array_add(*to_create, Plugin_To_Create.{ name = "Performance_Report" });
+    }
+
+    init_plugins(to_create, *plugins, workspace);
+
 
     {
         options := get_build_options(workspace);
@@ -181,8 +196,9 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
 
-        // Sometimes, setting up the stack trace node upon entering a procedure currently causes null pointer dereferences.
-        options.stack_trace = false;
+        options.llvm_options.bitcode_optimization_setting = .O1;
+        options.llvm_options.machine_code_optimization_setting = .NONE;
+        options.llvm_options.command_line = .["", "--code-model=kernel", "--relocation-model=pic", "--mxcoff-roptr"];
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");
@@ -195,7 +211,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
     intercept_flags := Intercept_Flags.SKIP_ALL & ~.SKIP_PROCEDURE_HEADERS;
     for plugins if it.before_intercept it.before_intercept(it, *intercept_flags);
 
-    compiler_begin_intercept(workspace, 0);
+    compiler_begin_intercept(workspace, intercept_flags & ~.DO_PERFORMANCE_REPORT_RUNS);
 
     for plugins if it.add_source it.add_source(it);
 
@@ -237,7 +253,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
 
             if phase.phase == .TYPECHECKED_ALL_WE_CAN {
                 for found_interrupts {
-                    add_build_string(tprint("isr__% :: () #foreign Interrupts;", it), workspace);
+                    add_build_string(tprint("isr__% :: () #foreign Assembly;", it), workspace);
                 }
 
                 array_reset(*found_interrupts);
@@ -247,8 +263,8 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
                 if !kernel_only {
                     log("Assembling interrupt routines");
 
-                    write_entire_file(".build/interrupts.asm", builder_to_string(*interrupt_assembly));
-                    command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64");
+                    write_entire_file(".build/assembly.asm", builder_to_string(*interrupt_assembly));
+                    command := break_command_into_strings("nasm .build/assembly.asm -o .build/assembly.so -f elf64");
 
                     // Generate assembly wrappers for interrupts handlers using metaprogramming
                     result := run_command(.. command);

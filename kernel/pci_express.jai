@@ -660,8 +660,6 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     mac.rah = nic.RAH__receive_address_high;
     nic.mac_address = mac.array;
 
-    #asm { sti; }
-
     {
         push_print_style(mac_address_print_style);
         log("MAC address: %", nic.mac_address);

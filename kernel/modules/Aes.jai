@@ -142,7 +142,7 @@ aes128_cbc_decrypt_block :: (ctx: *AES128_CBC_Context, block: *i128) {
 
 
 
-#run {
+#if false #run {
     #import "Basic";
 
     print("%\n", PLAINTEXT.count.(float) / 16);
@@ -172,7 +172,6 @@ aes128_cbc_decrypt_block :: (ctx: *AES128_CBC_Context, block: *i128) {
 
         print("%", decrypted);
     }
-}
 
 PLAINTEXT :: #string,cr END
 Some say the world will end in fire,
@@ -185,6 +184,8 @@ To say that for destruction ice
 Is also great
 And would suffice.
 END;
+
+}
 
 
 

@@ -431,7 +431,7 @@ hpet_restart :: () {
 }
 
 #program_export
-hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
+hpet_timer0_interrupt :: (data: *Interrupt_Stack_Frame()) #c_call {
     using kernel_globals.high_precision_timer;
 
     sequence_write(*seq_lock, #code {
@@ -443,7 +443,7 @@ hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
 } @InterruptRoutine
 
 #program_export
-hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
+hpet_timer1_interrupt :: (data: *Interrupt_Stack_Frame()) #c_call {
     using kernel_globals.high_precision_timer;
     timers[1].counter += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
@@ -576,7 +576,7 @@ calibrate_tsc :: () -> hz: u64 {
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
     for 1..100 {
-        #asm { cli; }
+        flags := disable_interrupts();
 
         counter_start := counter_register.*;
         tsc0 := rdtsc();
@@ -596,7 +596,7 @@ calibrate_tsc :: () -> hz: u64 {
             }
         }
 
-        #asm { sti; }
+        restore_interrupts(flags);
 
         delta[2] = delta[1];
         delta[1] = delta[0];
