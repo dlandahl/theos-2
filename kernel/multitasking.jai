@@ -138,7 +138,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
 }
 
 pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
-    if !queue_is_empty(*waiting_to_run) {
+    if !queue_is_empty(waiting_to_run) {
         return queue_pop(*waiting_to_run);
     }
 
@@ -329,7 +329,7 @@ release_mutex :: (mutex: *Mutex) {
     assert(mutex.held_by == current_task);
     mutex.held_by = null;
 
-    if !queue_is_empty(*mutex.queue) {
+    if !queue_is_empty(mutex.queue) {
         next := queue_pop(*mutex.queue);
         Scoped_Acquire(*next.on_core.scheduler.spinlock);
 

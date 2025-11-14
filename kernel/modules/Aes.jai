@@ -223,7 +223,7 @@ aes128_gcm_encrypt_stream :: (data: []u8, encryption_key: i128, initialization_v
 
     encrypt_stream_counter_xor(data, key_schedule, counter0);
 
-    auth := ghash(hash_key, additional_authenticated_data, data);
+    auth := ghash(hash_key, data, additional_authenticated_data);
 
     aes128_encrypt_block(*counter0, key_schedule);
 
@@ -242,7 +242,7 @@ aes128_gcm_decrypt_stream :: (data: []u8, encryption_key: i128, initialization_v
     tag_block := counter0;
     aes128_encrypt_block(*tag_block, key_schedule);
 
-    auth := ghash(hash_key, additional_authenticated_data, data);
+    auth := ghash(hash_key, data, additional_authenticated_data);
 
     if tag_block ^ auth != authentication_tag {
         return false;
@@ -255,7 +255,7 @@ aes128_gcm_decrypt_stream :: (data: []u8, encryption_key: i128, initialization_v
 
 #scope_module
 
-gcm_inc32 :: (counter: *i128) {
+inc32 :: (counter: *i128) {
     #asm {
         mov.32 n:, [counter + 12];
         bswap.32 n;
@@ -332,7 +332,7 @@ ghash_internal :: (hash_key: i128, accumulator: *i128, data: []u8) {
     }
 }
 
-ghash :: (hash_key: i128, additional_authenticated_data: []u8, ciphertext: []u8) -> i128 {
+ghash :: (hash_key: i128, ciphertext: []u8, additional_authenticated_data: []u8) -> i128 {
     accumulator: i128;
 
     ghash_internal(hash_key, *accumulator, additional_authenticated_data);
@@ -358,7 +358,7 @@ get_counter0 :: (hash_key: i128, iv: []u8) -> i128 {
         return counter0;
     }
 
-    return ghash(hash_key, .[], iv);
+    return ghash(hash_key, iv, .[]);
 }
 
 encrypt_stream_counter_xor :: (buffer: []u8, key_schedule: [11]i128, counter0: i128) {
@@ -366,7 +366,7 @@ encrypt_stream_counter_xor :: (buffer: []u8, key_schedule: [11]i128, counter0: i
     counter := counter0;
 
     for 0..buffer.count/16-1 {
-        gcm_inc32(*counter);
+        inc32(*counter);
 
         key := counter;
         aes128_encrypt_block(*key, key_schedule);
@@ -378,16 +378,16 @@ encrypt_stream_counter_xor :: (buffer: []u8, key_schedule: [11]i128, counter0: i
     remaining := buffer.count % 16;
 
     if remaining > 0 {
-        gcm_inc32(*counter);
+        inc32(*counter);
+
         key := counter;
         aes128_encrypt_block(*key, key_schedule);
 
         offset := buffer.count - remaining;
 
-        block: i128;
-        memcpy(block.bytes.data, buffer.data + offset, remaining);
-        block ^= key;
-        memcpy(buffer.data + offset, block.bytes.data, remaining);
+        for 0..remaining-1 {
+            buffer[offset + it] ^= key.bytes[it];
+        }
     }
 }
 
@@ -499,27 +499,27 @@ aes128_gcm_nist_test :: () {
         auth_tag := aes128_gcm_encrypt_stream(plaintext, secret_key, iv, aad);
 
         if cast(string)auth_tag.bytes != cast(string)expected_auth_tag {
-            print("Fail: auth tag does not match in test case % - got %\n", it_index + 1, auth_tag.bytes);
+            print("Fail: auth tag does not match in test case %\n", it_index + 1);
             all_passed = false;
         }
 
         if cast(string)plaintext != cast(string)expected_ciphertext {
-            print("Fail: ciphertext does not match in test case %.\n", it_index + 1);
+            print("Fail: ciphertext does not match in test case %\n", it_index + 1);
             all_passed = false;
         }
 
         authenticated := aes128_gcm_decrypt_stream(plaintext, secret_key, iv, aad, auth_tag);
 
         if !authenticated {
-            print("Fail: authentication failed in test case %.\n", it_index + 1);
+            print("Fail: authentication failed in test case %\n", it_index + 1);
             all_passed = false;
         }
 
         if cast(string)plaintext != cast(string)parse(it.plaintext) {
-            print("Fail: roundtrip failed in test case %.\n", it_index + 1);
+            print("Fail: roundtrip failed in test case %\n", it_index + 1);
             all_passed = false;
         }
     }
 
-    if all_passed print("All tests passed.\n");
+    if all_passed print("All tests passed\n");
 }

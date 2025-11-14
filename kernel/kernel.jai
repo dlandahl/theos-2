@@ -258,55 +258,13 @@ kernel_entry :: () #no_context {
             }
         }
 
-        if false {
-            push_print_style().default_format_int.base = 16;
+        for *core: processor_cores {
+            if core.id == 0 continue;
 
-            if !aes128_check_intel_instruction_set_support() {
-                bluescreen();
+            for 1..4 {
+                task := create_task(task_do_work);
+                put_task_on_core(task, core);
             }
-
-            key: i128;
-            key.bytes = .[0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
-                          0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
-
-            key_schedule := aes128_expand_key(key);
-            for key_schedule log("%\n", it.bytes);
-
-            text := "0123456789123456";
-
-            // aes128_gcm_encrypt_stream_in_place(cast([]u8) text, key, .[0, 0, 0], .[]);
-
-            log("Ciphertext: %", cast([]u8) text);
-        }
-
-        network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
-
-        if network_adapter_initialized {
-            task := create_task(network_thread);
-            put_task_on_core(task, *processor_cores[1]);
-        }
-
-        log("Waiting for DHCP handshake.");
-        Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
-
-        log("Sending DNS Query");
-        dns_query := transmit_dns_query(*net, "google.com");
-
-        Timeout(dns_query.complete, 60_000);
-        // assert(dns_query.answer != 0);
-
-        // hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
-        transmit_ping(*net, dns_query.answer);
-
-        connection := initiate_tcp_connection(*net, dns_query.answer, 443);
-
-        Timeout(connection.handshake_state == .COMPLETED, 60_000);
-
-        tls := initiate_tls_connection(*net, connection);
-
-        if false {
-            request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-            transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
         }
 
         #asm { sti; }
@@ -315,6 +273,40 @@ kernel_entry :: () #no_context {
             schedule_tasks();
             #asm { hlt; }
         }
+    }
+}
+
+network_test :: () {
+    using kernel_globals;
+
+    network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
+
+    if network_adapter_initialized {
+        task := create_task(network_thread);
+        put_task_on_core(task, *processor_cores[1]);
+    }
+
+    log("Waiting for DHCP handshake.");
+    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
+
+    log("Sending DNS Query");
+    dns_query := transmit_dns_query(*net, "google.com");
+
+    Timeout(dns_query.complete, 60_000);
+    // assert(dns_query.answer != 0);
+
+    // hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
+    transmit_ping(*net, dns_query.answer);
+
+    connection := initiate_tcp_connection(*net, dns_query.answer, 443);
+
+    Timeout(connection.handshake_state == .COMPLETED, 60_000);
+
+    tls := initiate_tls_connection(*net, connection);
+
+    if false {
+        request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+        transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
     }
 }
 
@@ -963,7 +955,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
                 }
 
                 blocks.count += 1;
-                for#v2< it_index+2 .. blocks.count-1 {
+                for< it_index+2 .. blocks.count-1 {
                     blocks[it] = blocks[it-1];
                 }
 

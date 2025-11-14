@@ -21,7 +21,7 @@ merkle_damgard :: (data: string, block_size: int) -> blocks: int, padded: string
 
     data_padded[data.count] = 0b10000000; // Start padding with guard byte
 
-    for #v2 < 0..length_block-1 {
+    for < 0..length_block-1 {
         idx := data.count+padding_bytes+(length_block-it);
         if it*8 < 64 { // TODO: This is a workaround for a pre-beta Jai issue
                        // where shifts by more than word-length loops back.
