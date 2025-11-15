@@ -313,7 +313,7 @@ galois_multiply :: (x: i128, y: i128) -> i128 {
 ghash_internal :: (hash_key: i128, accumulator: *i128, data: []u8) {
 
     for 0..data.count/16-1 {
-        block := (.*) (cast(*i128) data.data + it);
+        block := (cast(*i128) data.data + it).*;
         block = byteswap_i128(block);
 
         accumulator.* ^= block;
@@ -323,11 +323,10 @@ ghash_internal :: (hash_key: i128, accumulator: *i128, data: []u8) {
     remaining := data.count % 16;
 
     if remaining > 0 {
-        block: i128;
-        memcpy(block.bytes.data, data.data + data.count - remaining, remaining);
-        block = byteswap_i128(block);
+        for 0..remaining-1 {
+            accumulator.bytes[16 - remaining + it] ^= data[data.count - it - 1];
+        }
 
-        accumulator.* ^= block;
         accumulator.* = galois_multiply(accumulator.*, hash_key);
     }
 }

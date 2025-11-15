@@ -481,6 +481,13 @@ initialize_uacpi :: () {
     }, null);
 
     if uacpi_finalize_gpe_initialization() != .OK bluescreen();
+
+    uacpi := *kernel_globals.uacpi_state;
+    uacpi.work_thread = create_task(uacpi.work_thread_proc, name="uACPI Worker");
+
+    // Note: according to uACPI kernel_api.h, work items should be done on CPU0 due to firmware bugs.
+    cpu0 := *kernel_globals.processor_cores[0];
+    put_task_on_core(uacpi.work_thread, cpu0);
 }
 
 //
@@ -497,6 +504,39 @@ Uacpi_State :: struct {
     irq_contexts_used: int;
 
     spinlock_storage: Bucket_Array(Spinlock, 16, always_iterate_by_pointer=true);
+
+    Work_Item :: struct {
+        type: uacpi_work_type;
+        handler: uacpi_work_handler;
+        ctx: uacpi_handle;
+    }
+
+    work_queue: Queue(Work_Item);
+    work_queue_spinlock: Spinlock;
+    work_thread: *Task_Info;
+
+    work_thread_proc :: () {
+        using kernel_globals.uacpi_state;
+
+        // uACPI uses thread local storage.
+        tls := get_4k_page() + DIRECT_MAPPING_BASE;
+        #asm FSGSBASE { wrfsbase tls; }
+
+        while true {
+            flags := acquire(*work_queue_spinlock);
+
+            while !queue_is_empty(work_queue) {
+                item := queue_pop(*work_queue);
+
+                release(*work_queue_spinlock, flags);
+                item.handler(item.ctx);
+                flags = acquire(*work_queue_spinlock);
+            }
+
+            release(*work_queue_spinlock, flags);
+            yield_execution();
+        }
+    }
 }
 
 #import "Uacpi";
@@ -897,8 +937,7 @@ uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
         // ucapi_handle is *void, Bucket_Locator is two 32-bit integers. We can store the locator using the pointer value.
         #assert size_of(uacpi_handle) >= size_of(Bucket_Locator);
 
-        handle: uacpi_handle;
-        memcpy(*handle, *locator, 8);
+        handle := bit_cast(locator, uacpi_handle);
 
         return handle;
     }
@@ -909,8 +948,7 @@ uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
     using kernel_globals.uacpi_state;
 
     push_context {
-        locator: Bucket_Locator;
-        memcpy(*locator, *handle, 8);
+        locator := bit_cast(handle, Bucket_Locator);
         locator.slot_index -= 1;
 
         bucket_array_remove(*spinlock_storage, locator);
@@ -922,8 +960,7 @@ uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call 
     using kernel_globals.uacpi_state;
 
     push_context {
-        locator: Bucket_Locator;
-        memcpy(*locator, *handle, 8);
+        locator := bit_cast(handle, Bucket_Locator);
         locator.slot_index -= 1;
 
         lock := bucket_array_find_pointer(*spinlock_storage, locator);
@@ -938,8 +975,7 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
     using kernel_globals.uacpi_state;
 
     push_context {
-        locator: Bucket_Locator;
-        memcpy(*locator, *handle, 8);
+        locator := bit_cast(handle, Bucket_Locator);
         locator.slot_index -= 1;
 
         lock := bucket_array_find_pointer(*spinlock_storage, locator);
@@ -947,17 +983,40 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
     }
 }
 
-#program_export uacpi_kernel_schedule_work :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_schedule_work\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handler, ctx: uacpi_handle) -> uacpi_status #c_call {
+    using kernel_globals.uacpi_state;
+
+    item: Work_Item;
+    item.type = type;
+    item.handler = handler;
+    item.ctx = ctx;
+
+    push_context {
+        Scoped_Acquire(*work_queue_spinlock);
+        queue_push(*work_queue, item);
+    }
+
+    return .OK;
 }
 
-#program_export uacpi_kernel_wait_for_work_completion :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_wait_for_work_completion\"\n");
-    bluescreen();
-}
+#program_export
+uacpi_kernel_wait_for_work_completion :: () #c_call {
+    using kernel_globals.uacpi_state;
 
-#program_export __popcountdi2 :: () {
-    write_string("uACPI kernel call: \"__popcountdi2\"\n");
-    bluescreen();
+    push_context {
+        while true {
+
+            {
+                Scoped_Acquire(*work_queue_spinlock);
+
+                if queue_is_empty(work_queue) {
+                    break;
+                }
+            }
+
+            // Todo: actually schedule things properly. This thread should probably get priority once the queue is empty. And it should probably yield specifically to the thread that's gonna fulfill the work queue items.
+            yield_execution();
+        }
+    }
 }

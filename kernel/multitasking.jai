@@ -9,6 +9,7 @@ Task_Info :: struct {
     xsave: Xsave_Area #align 16;
 
     id: int;
+    name: string;
 
     entry_point: ();
 
@@ -42,16 +43,33 @@ Scheduler :: struct {
     last_task_switch_timestamp: Apollo_Time;
 }
 
-allocate_task_info_struct :: () -> *Task_Info {
+lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags {
+    // We need to dereference on_core to lock a task, but it can be stale by the time we
+    // get the lock. In practice it should almost always work the first time.
+
+    while true {
+        core := task.on_core;
+
+        flags := acquire(*core.scheduler.spinlock);
+
+        if task.on_core == core {
+            return flags;
+        }
+
+        release(*core.scheduler.spinlock, flags);
+    }
+
+    return 0;
+}
+
+allocate_task_info :: () -> *Task_Info {
     using kernel_globals;
 
-    Scoped_Acquire(*add_task_info_struct_spinlock);
+    Scoped_Acquire(*task_info_storage_spinlock);
 
     locator, task := bucket_array_add(*tasks, .{});
     task.id = next_task_id;
     next_task_id += 1;
-
-    log("Created task id %\n", task.id);
 
     return task;
 }
@@ -61,11 +79,14 @@ core_begin_multitasking :: () {
     core := get_current_core();
     scheduler := *core.scheduler;
 
+    flags := acquire(*scheduler.spinlock);
+
     queue_reserve(*scheduler.waiting_to_run, 256);
 
-    scheduler.current_task = allocate_task_info_struct();
+    scheduler.current_task = allocate_task_info();
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
     scheduler.current_task._context = *context;
+    scheduler.current_task.name = "Idle";
     scheduler.idle_task = scheduler.current_task;
 
     if core.id == 0 {
@@ -78,11 +99,15 @@ core_begin_multitasking :: () {
             }
         }
 
-        scheduler.idle_task = create_task(idle, 0x2000);
+        scheduler.idle_task = create_task(idle, 0x2000, name = "Idle");
+        scheduler.current_task.name = "Kernel Main";
     }
 
+    release(*scheduler.spinlock, flags);
 
-    // Enable Local APIC timer interrupts, or TSC deadline if available
+
+
+    // Enable scheduling clock - either LAPIC or preferably TSC Deadline.
 
     lapic_timer: Apic_Lvt_Timer;
 
@@ -103,15 +128,21 @@ core_begin_multitasking :: () {
 }
 
 put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
+    // A weird procedure because tasks are never not associated with a core unless they have never run yet. So we could just put tasks on the core they were created from, and let the caller move them before waking them. That way on_core is never null on any Task_Info we deal with outside of create_task.
+
     scheduler := *core.scheduler;
     Scoped_Acquire(*scheduler.spinlock);
+
+    if task.on_core != null {
+        bluescreen();
+    }
 
     task.on_core = core;
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL) -> *Task_Info {
-    new_task := allocate_task_info_struct();
+create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "") -> *Task_Info {
+    new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     new_task.kernel_stack = alloc(kernel_stack_size) + kernel_stack_size;
@@ -133,6 +164,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
     new_task.rsp = cast(*void) stack;
     new_task.xsave.mxcsr = mxcsr;
     new_task.entry_point = entry_point;
+    new_task.name = name;
 
     return new_task;
 }
@@ -149,7 +181,7 @@ pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
     return idle_task;
 }
 
-yield :: schedule_tasks; // Yielding execution is no different from calling into the scheduler on the current core, to see if something else is ready to run.
+yield_execution :: schedule_tasks; // Yielding is no different from calling into the scheduler on the current core, to see if something else is ready to run.
 
 schedule_tasks :: () {
     core := get_current_core();
@@ -210,7 +242,7 @@ new_task_start :: () #no_context {
         task.entry_point();
 
         while true {
-            yield();
+            schedule_tasks();
         }
 
         // Todo: remove the task from the scheduler properly
@@ -287,7 +319,7 @@ sleep_until :: (time: Apollo_Time) {
         }
     }
 
-    yield();
+    yield_execution();
 }
 
 
@@ -317,7 +349,7 @@ acquire_mutex :: (mutex: *Mutex) {
     current_task.waiting_for_mutex = true;
 
     release(*mutex.spinlock, flags);
-    yield();
+    yield_execution();
 }
 
 release_mutex :: (mutex: *Mutex) {
@@ -331,6 +363,8 @@ release_mutex :: (mutex: *Mutex) {
 
     if !queue_is_empty(mutex.queue) {
         next := queue_pop(*mutex.queue);
+
+        // Todo race
         Scoped_Acquire(*next.on_core.scheduler.spinlock);
 
         assert(next.waiting_for_mutex);
@@ -407,7 +441,7 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
     if data.rax == {
       case 1;
-        yield();
+        yield_execution();
 
       case 2;
         data.rax = cast(u64) get_current_core();

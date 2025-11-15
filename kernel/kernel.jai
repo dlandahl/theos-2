@@ -66,7 +66,7 @@ Kernel_Globals :: struct {
 
     tasks: Bucket_Array(Task_Info, 128, always_iterate_by_pointer=true);
     next_task_id: int;
-    add_task_info_struct_spinlock: Spinlock;
+    task_info_storage_spinlock: Spinlock;
 
     processor_cores: [] X64_Core;
     bootstrap_core_initialized: bool;
@@ -262,7 +262,7 @@ kernel_entry :: () #no_context {
             if core.id == 0 continue;
 
             for 1..4 {
-                task := create_task(task_do_work);
+                task := create_task(task_do_work, name = "Do Work");
                 put_task_on_core(task, core);
             }
         }
@@ -282,7 +282,7 @@ network_test :: () {
     network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
 
     if network_adapter_initialized {
-        task := create_task(network_thread);
+        task := create_task(network_thread, name = "Network Thread");
         put_task_on_core(task, *processor_cores[1]);
     }
 
