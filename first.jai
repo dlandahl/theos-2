@@ -196,9 +196,9 @@ compile_kernel :: () -> success: bool {
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
 
-        options.llvm_options.bitcode_optimization_setting = .O1;
+        options.llvm_options.bitcode_optimization_setting = .O0;
         options.llvm_options.machine_code_optimization_setting = .NONE;
-        options.llvm_options.command_line = .["", "--code-model=kernel", "--relocation-model=pic", "--mxcoff-roptr"];
+        options.llvm_options.command_line = .["", "--code-model=large", "--relocation-model=pic", "--mxcoff-roptr"];
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");
@@ -447,9 +447,9 @@ syscall_entry:
 global enter_user_mode
 align 0x10
 enter_user_mode:
-    mov rsp, rdx
-    mov rcx, rsi
-    mov r11, rdi
+    mov rsp, rsi
+    mov rcx, rdi
+    mov r11, rdx
 
     o64 sysret
 

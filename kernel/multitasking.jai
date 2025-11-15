@@ -160,6 +160,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
 
     stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
     stack.return_address = cast(*void) new_task_start;
+    stack.flags = 0;
 
     new_task.rsp = cast(*void) stack;
     new_task.xsave.mxcsr = mxcsr;
@@ -435,6 +436,23 @@ print_from_user_mode :: (format: string, args: .. Any) {
     }
 }
 
+allocate_from_user_mode :: (size: int) -> *void {
+    syscall_number := 5;
+
+    buffer: *void;
+
+    #asm SYSCALL_SYSRET {
+        rax: gpr === a;
+        mov rax, syscall_number;
+        size === b;
+
+        syscall c:, _11:, rax, size;
+        mov buffer, rax;
+    }
+
+    return buffer;
+}
+
 #program_export
 syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
@@ -458,6 +476,11 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
         s.count = cast(s64) data.rbx;
         s.data  = cast(*u8) data.rdx;
         write_string(s);
+
+      case 5;
+        bytes := cast(s64) data.rbx;
+        buffer := alloc(bytes);
+        data.rax = cast(u64) buffer;
 
       case;
         write_string("Invalid syscall parameter.\n");
@@ -490,11 +513,25 @@ task_do_work :: () {
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {
+        context.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+            // Cannot call into the normal allocator as it will use a spinlock, which will disable interrupts, which user mode is not allowed to do.
+
+            if mode != .ALLOCATE && mode != .RESIZE return null;
+
+            buffer := allocate_from_user_mode(size);
+
+            if mode == .RESIZE && old_memory != null {
+                memcpy(buffer, old_memory, old_size);
+            }
+
+            return buffer;
+        }
+
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
 
         while true {
-            print_from_user_mode("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
+            print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
 
             for 1..15_000_000 {
                 #asm { pause; }

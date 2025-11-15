@@ -159,6 +159,7 @@ initialize_apic :: () {
         return builder_to_string(*builder);
     };
 
+    register_interrupt_gate(isr__debug_exception,               1,  true);
     register_interrupt_gate(isr__breakpoint_handler,            3,  true);
     register_interrupt_gate(isr__general_protection_fault,      13, true);
     register_interrupt_gate(isr__page_fault,                    14, true);
@@ -339,11 +340,50 @@ default_isa_fault_handler_%1 :: (stack: *void) #c_call {
 
     write_string("Something bad happened (%1) on core ");
     write_number(core.id);
+    write_string(" running thread ");
+    write_string(core.scheduler.current_task.name);
     write_string("\n");
 
     bluescreen();
 } @InterruptRoutine
 END;
+
+#program_export
+debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
+    push_context {
+
+        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+
+        core := get_current_core();
+        task := core.scheduler.current_task;
+
+        print("Debug exception on core %, running thread \"%\"\n", core.id, task.name);
+
+        print("RIP: 0x%\n", stack.ip);
+        print("RSP: 0x%\n", stack.sp);
+        print("SS: %\n", stack.ss);
+        print("CS: %\n", stack.cs);
+
+        DR6 :: enum_flags u64 {
+            breakpoint_0_hit;
+            breakpoint_1_hit;
+            breakpoint_2_hit;
+            breakpoint_3_hit;
+
+            dr_access :: 1 << 13;
+            single_step;
+            hardware_task_switch;
+            outside_rtm_region;
+        }
+
+        dr6: DR6;
+        #asm { get_dr6 dr6; }
+        stack_dr6 := dr6;
+        print("DR6 flags: %\n", stack_dr6);
+
+        bluescreen();
+    }
+} @InterruptRoutine
 
 #program_export
 breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
@@ -354,7 +394,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
 
         Scoped_Acquire(*kernel_globals.serial_port_spinlock);
 
-        print("Breakpoint hit. Context:\n%", stack.*);
+        print("\nBreakpoint hit. Context:\n%", stack.*);
     }
 
     bluescreen();
@@ -369,7 +409,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     core := get_current_core();
     task := core.scheduler.current_task;
 
-    print("Page Fault (On core %, running thread %)\n", core.id, task.id);
+    print("\nPage Fault (On core %, running thread \"%\")\n", core.id, task.name);
 
     _cr2: u64;
     #asm { get_cr2 _cr2; }
@@ -407,7 +447,7 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
         core := get_current_core();
         task := core.scheduler.current_task;
 
-        print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
+        print("\nGeneral Protection Fault    (On core %, running thread \"%\")\n", core.id, task.name);
 
         push_print_style().default_format_int.base = 16;
         print("RIP: 0x%\n", stack.ip);
@@ -1019,4 +1059,10 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
             yield_execution();
         }
     }
+}
+
+// Todo: Why does uacpi need this?
+#program_export
+__popcountdi2 :: (a: s32) -> s32 #c_call {
+    return popcount(a);
 }

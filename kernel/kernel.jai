@@ -258,14 +258,22 @@ kernel_entry :: () #no_context {
             }
         }
 
+
+
+        thread_index := 1;
+
         for *core: processor_cores {
             if core.id == 0 continue;
 
             for 1..4 {
-                task := create_task(task_do_work, name = "Do Work");
+                task := create_task(task_do_work, user_stack_size = 0x4000, name = tprint("Do Work %", thread_index));
                 put_task_on_core(task, core);
+
+                thread_index += 1;
             }
         }
+
+
 
         #asm { sti; }
 
@@ -514,7 +522,7 @@ init_processor_core :: () {
 bluescreen :: (loc := #caller_location) #no_context {
     #asm { cli; }
 
-    write_string("Bluescreen!\n");
+    write_string("\nBluescreen!\n");
 
     core := get_current_core();
     task := core.scheduler.current_task;
@@ -541,6 +549,14 @@ bluescreen :: (loc := #caller_location) #no_context {
         if lock.lock && lock.held_by_core == core.id {
             lock.recursion_count = 0;
             release(lock, 0);
+        }
+    }
+
+    using kernel_globals.framebuffer;
+
+    for y: 0..y_resolution-1 {
+        for x: 0..x_resolution-1 {
+            buffer[x + y * stride] |= 0xff;
         }
     }
 
