@@ -105,6 +105,8 @@ core_begin_multitasking :: () {
 
     release(*scheduler.spinlock, flags);
 
+    core.online = true;
+
 
 
     // Enable scheduling clock - either LAPIC or preferably TSC Deadline.
@@ -182,7 +184,7 @@ pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
     return idle_task;
 }
 
-yield_execution :: schedule_tasks; // Yielding is no different from calling into the scheduler on the current core, to see if something else is ready to run.
+yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
     core := get_current_core();
@@ -250,6 +252,8 @@ new_task_start :: () #no_context {
     }
 }
 
+DISABLE_KERNEL_PREEMPTION :: false;
+
 #program_export
 scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
@@ -264,8 +268,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
         return;
     }
 
-    if stack.cs == .RING0_CODE {
-        // Todo: never preempting the kernel for now.
+    if stack.cs == .RING0_CODE && DISABLE_KERNEL_PREEMPTION {
         return;
     }
 
@@ -326,7 +329,7 @@ sleep_until :: (time: Apollo_Time) {
 
 
 Mutex :: struct {
-    spinlock: Spinlock;
+    spinlock: Recursive_Spinlock; // Recursive to support trylock.
     held_by: *Task_Info;
     queue: Queue(*Task_Info);
 }
@@ -357,29 +360,48 @@ release_mutex :: (mutex: *Mutex) {
     core := get_current_core();
     current_task := core.scheduler.current_task;
 
-    Scoped_Acquire(*mutex.spinlock);
+    flags := acquire(*mutex.spinlock);
 
     assert(mutex.held_by == current_task);
     mutex.held_by = null;
 
-    if !queue_is_empty(mutex.queue) {
-        next := queue_pop(*mutex.queue);
-
-        // Todo race
-        Scoped_Acquire(*next.on_core.scheduler.spinlock);
-
-        assert(next.waiting_for_mutex);
-
-        next.waiting_for_mutex = false;
-
-        queue_push(*next.on_core.scheduler.waiting_to_run, next);
-        mutex.held_by = next;
-
-        // Todo: IPI to wake/preempt the other core.
+    if queue_is_empty(mutex.queue) {
+        release(*mutex.spinlock, flags);
+        return;
     }
+
+    next := queue_pop(*mutex.queue);
+    mutex.held_by = next;
+
+    release(*mutex.spinlock, flags);
+
+    flags = lock_scheduler_for_task(next);
+
+    assert(next.waiting_for_mutex);
+    next.waiting_for_mutex = false;
+
+    queue_push(*next.on_core.scheduler.waiting_to_run, next);
+
+    release(*next.on_core.scheduler.spinlock, flags);
+
+    // Todo: IPI to wake/preempt the other core.
+}
+
+trylock_mutex :: (mutex: *Mutex) -> bool {
+    core := get_current_core();
+
+    Scoped_Acquire(*mutex.spinlock);
+
+    if mutex.held_by == null {
+        acquire_mutex(mutex);
+        return true;
+    }
+
+    return false;
 }
 
 
+// In the future we should generate these using metaprogramming, from a table.
 
 yield_from_user_mode :: () #no_context {
     syscall_number := 1;
@@ -453,6 +475,36 @@ allocate_from_user_mode :: (size: int) -> *void {
     return buffer;
 }
 
+trylock_from_user_mode :: (mutex: *Mutex) -> bool {
+    if mutex.held_by != null return false;
+
+    syscall_number := 6;
+
+    success: u64;
+
+    #asm SYSCALL_SYSRET {
+        rax: gpr === a;
+        mov rax, syscall_number;
+        mutex === b;
+
+        syscall c:, _11:, rax, mutex;
+        mov success, rax;
+    }
+
+    return success > 0;
+}
+
+unlock_from_user_mode :: (mutex: *Mutex) {
+    syscall_number := 7;
+
+    #asm SYSCALL_SYSRET {
+        syscall_number === a;
+        mutex          === b;
+
+        syscall c:, _11:, syscall_number, mutex;
+    }
+}
+
 #program_export
 syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
@@ -482,6 +534,14 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
         buffer := alloc(bytes);
         data.rax = cast(u64) buffer;
 
+      case 6;
+        mutex := cast(*Mutex) data.rbx;
+        data.rax = cast(u64) trylock_mutex(mutex);
+
+      case 7;
+        mutex := cast(*Mutex) data.rbx;
+        release_mutex(mutex);
+        
       case;
         write_string("Invalid syscall parameter.\n");
         write_nonnegative_number(data.rax);
@@ -510,6 +570,8 @@ task_do_work :: () {
     enter_user_mode(entry_point, user_stack);
 }
 
+ring_3_work_mutex: Mutex;
+
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {
@@ -533,8 +595,14 @@ task_do_work_in_ring_3 :: () #c_call {
         while true {
             print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
 
-            for 1..15_000_000 {
+            for 1..1_500_000 {
                 #asm { pause; }
+            }
+
+            if trylock_from_user_mode(*ring_3_work_mutex) {
+                print_from_user_mode("Thread \"%\" got the mutex - holding for one second.\n", thread.name);
+                sleep_from_user_mode(seconds_to_apollo(1));
+                unlock_from_user_mode(*ring_3_work_mutex);
             }
 
             ms := rdtsc() % 10000;
@@ -561,6 +629,9 @@ Queue :: struct (Item_Type: Type) {
 }
 
 queue_push :: (using queue: *Queue) -> *queue.Item_Type {
+    if !items.allocated {
+        queue_reserve(queue, 8);
+    }
 
     item := *items[tail];
     tail += 1;
@@ -573,7 +644,7 @@ queue_push :: (using queue: *Queue) -> *queue.Item_Type {
         old_count := items.allocated;
 
         items.count = items.allocated + 1;
-        maybe_grow(cast(*Resizable_Array) *queue.items, size_of(queue.Item_Type));
+        maybe_grow(cast(*Resizable_Array) *items, size_of(Item_Type));
         items.count = items.allocated;
 
         memcpy(
@@ -607,8 +678,8 @@ queue_push :: (using queue: *Queue, item: queue.Item_Type) {
 }
 
 queue_reserve :: (using queue: *Queue, capacity: int) {
-    array_reserve(*queue.items, capacity);
-    queue.items.count = queue.items.allocated;
+    array_reserve(*items, capacity);
+    items.count = items.allocated;
 }
 
 queue_length :: (using queue: Queue) -> int {

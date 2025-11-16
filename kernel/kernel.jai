@@ -36,6 +36,8 @@ X64_Core :: struct {
     scheduler: Scheduler;
 
     preempt_disable_count: int;
+
+    online: bool; // The core has called core_begin_multitasking, so we can put threads on it.
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
@@ -160,8 +162,28 @@ kernel_entry :: () #no_context {
     large_page_allocator.lru_least = LRU_TAIL;
     large_page_allocator.lru_most  = LRU_TAIL;
 
-    large_page := allocate_large_page();
-    init_block_allocator(*physical_block_allocator, large_page, 0x20_0000, 0x10);
+    // Todo: improve this allocator.
+
+    for region: memory_map {
+        if !it_index continue;
+        region_size := region.pages * 4096;
+
+        if region_size >= 0x100_0000 && region.type == .FREE {
+            first_page := region.address / 0x20_0000;
+
+            for first_page..first_page+16 {
+                large_pages[it].state = .RESERVED;
+            }
+
+            init_block_allocator(*physical_block_allocator, region.address, 0x100_0000, 0x10);
+            break;
+        }
+    }
+
+    if physical_block_allocator.base_address == 0 {
+        write_string("Could not find enough memory for the kernel...\n");
+        while true #asm { cli; hlt; }
+    }
 
 
     push_context {
@@ -238,7 +260,13 @@ kernel_entry :: () #no_context {
 
         startup_application_processors();
 
-        for* pci_devices {
+        for *core: processor_cores {
+            while !core.online pause();
+        }
+
+        if false for* pci_devices {
+            #asm { sti; }
+
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
                     // case 0x8; init_nvme_controller(it);
@@ -248,7 +276,6 @@ kernel_entry :: () #no_context {
 
             if it.class_code == .NETWORK && it.subclass == 0x0 {
                 kernel_globals.net.adapter = init_i8254x(it);
-                #asm { sti; }
             }
 
             if it.class_code == .MULTIMEDIA {
@@ -258,22 +285,19 @@ kernel_entry :: () #no_context {
             }
         }
 
-
-
         thread_index := 1;
 
         for *core: processor_cores {
             if core.id == 0 continue;
 
             for 1..4 {
-                task := create_task(task_do_work, user_stack_size = 0x4000, name = tprint("Do Work %", thread_index));
+                name := tprint("Do Work %:%", core.id, thread_index);
+                task := create_task(task_do_work, kernel_stack_size = 0x8_0000, user_stack_size = 0x8_0000, name = name);
                 put_task_on_core(task, core);
 
                 thread_index += 1;
             }
         }
-
-
 
         #asm { sti; }
 

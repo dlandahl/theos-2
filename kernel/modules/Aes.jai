@@ -450,8 +450,6 @@ test_cases :: Aes128_NIST_Test_Case.[
     },
 ];
 
-#run aes128_gcm_nist_test();
-
 aes128_gcm_nist_test :: () {
     #import "Basic";
 

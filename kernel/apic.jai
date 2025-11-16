@@ -568,9 +568,13 @@ Uacpi_State :: struct {
             while !queue_is_empty(work_queue) {
                 item := queue_pop(*work_queue);
 
+                log("Beginning uACPI work item.\n");
+
                 release(*work_queue_spinlock, flags);
                 item.handler(item.ctx);
                 flags = acquire(*work_queue_spinlock);
+
+                log("uACPI work item completed.\n");
             }
 
             release(*work_queue_spinlock, flags);
@@ -1047,12 +1051,12 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
     push_context {
         while true {
 
-            {
-                Scoped_Acquire(*work_queue_spinlock);
+            flags := acquire(*work_queue_spinlock);
+            empty := queue_is_empty(work_queue);
+            release(*work_queue_spinlock, flags);
 
-                if queue_is_empty(work_queue) {
-                    break;
-                }
+            if empty {
+                break;
             }
 
             // Todo: actually schedule things properly. This thread should probably get priority once the queue is empty. And it should probably yield specifically to the thread that's gonna fulfill the work queue items.

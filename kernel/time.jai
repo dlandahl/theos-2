@@ -567,7 +567,7 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 1_000_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
+    max_error := 500_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
     delta: [3] int;
 
     // HPET is off-chip and therefore high latency (1-2us), but it doesn't look like there's a better alternative.
