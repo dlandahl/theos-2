@@ -936,7 +936,7 @@ acpi_gas :: struct {
     register_bit_width:  uacpi_u8;
     register_bit_offset: uacpi_u8;
     access_size:         uacpi_u8;
-    address:             uacpi_u64 #align 4;
+    address:             uacpi_u64 #align 1;
 }
 
 acpi_rsdp :: struct {
@@ -944,36 +944,40 @@ acpi_rsdp :: struct {
     checksum:          uacpi_u8;
     oemid:             [6] uacpi_char;
     revision:          uacpi_u8;
-    rsdt_addr:         uacpi_u32;
-    length:            uacpi_u32;
-    xsdt_addr:         uacpi_u64;
+    rsdt_addr:         uacpi_u32 #align 1;
+    length:            uacpi_u32 #align 1; // vvvv available if .revision >= 2.0 only
+    xsdt_addr:         uacpi_u64 #align 1;
     extended_checksum: uacpi_u8;
     rsvd:              [3] uacpi_u8;
 }
 
 acpi_sdt_hdr :: struct {
     signature:        [4] uacpi_char;
-    length:           uacpi_u32;
+    length:           uacpi_u32 #align 1;
     revision:         uacpi_u8;
     checksum:         uacpi_u8;
     oemid:            [6] uacpi_char;
     oem_table_id:     [8] uacpi_char;
-    oem_revision:     uacpi_u32;
-    creator_id:       uacpi_u32;
-    creator_revision: uacpi_u32;
+    oem_revision:     uacpi_u32 #align 1;
+    creator_id:       uacpi_u32 #align 1;
+    creator_revision: uacpi_u32 #align 1;
 }
 
 acpi_rsdt :: struct {
     hdr:     acpi_sdt_hdr;
-//     entries: *uacpi_u32;// Incomplete array in C (zero-sized)
+//     entries: *uacpi_u32 #align 1;// Incomplete array in C (zero-sized)
 }
 
 acpi_xsdt :: struct {
     hdr:     acpi_sdt_hdr;
-//     entries: *uacpi_u64 #align 4;// Incomplete array in C (zero-sized)
+//     entries: *uacpi_u64 #align 1;// Incomplete array in C (zero-sized)
 }
 
 acpi_entry_hdr :: struct {
+    /*
+    * - acpi_madt_entry_type for the APIC table
+    * - acpi_srat_entry_type for the SRAT table
+    */
     type:   uacpi_u8;
     length: uacpi_u8;
 }
@@ -1013,8 +1017,8 @@ acpi_madt_entry_type :: enum s32 {
 
 acpi_madt :: struct {
     hdr:                                acpi_sdt_hdr;
-    local_interrupt_controller_address: uacpi_u32;
-    flags:                              uacpi_u32;
+    local_interrupt_controller_address: uacpi_u32 #align 1;
+    flags:                              uacpi_u32 #align 1;
 //     entries:                            *acpi_entry_hdr;// Incomplete array in C (zero-sized)
 }
 
@@ -1022,29 +1026,29 @@ acpi_madt_lapic :: struct {
     hdr:   acpi_entry_hdr;
     uid:   uacpi_u8;
     id:    uacpi_u8;
-    flags: uacpi_u32;
+    flags: uacpi_u32 #align 1;
 }
 
 acpi_madt_ioapic :: struct {
     hdr:      acpi_entry_hdr;
     id:       uacpi_u8;
     rsvd:     uacpi_u8;
-    address:  uacpi_u32;
-    gsi_base: uacpi_u32;
+    address:  uacpi_u32 #align 1;
+    gsi_base: uacpi_u32 #align 1;
 }
 
 acpi_madt_interrupt_source_override :: struct {
     hdr:    acpi_entry_hdr;
     bus:    uacpi_u8;
     source: uacpi_u8;
-    gsi:    uacpi_u32;
-    flags:  uacpi_u16;
+    gsi:    uacpi_u32 #align 1;
+    flags:  uacpi_u16 #align 1;
 }
 
 acpi_madt_nmi_source :: struct {
     hdr:   acpi_entry_hdr;
-    flags: uacpi_u16;
-    gsi:   uacpi_u32;
+    flags: uacpi_u16 #align 1;
+    gsi:   uacpi_u32 #align 1;
 }
 
 acpi_madt_lapic_nmi :: struct {
@@ -1056,16 +1060,16 @@ acpi_madt_lapic_nmi :: struct {
 
 acpi_madt_lapic_address_override :: struct {
     hdr:     acpi_entry_hdr;
-    rsvd:    uacpi_u16;
-    address: uacpi_u64 #align 4;
+    rsvd:    uacpi_u16 #align 1;
+    address: uacpi_u64 #align 1;
 }
 
 acpi_madt_iosapic :: struct {
     hdr:      acpi_entry_hdr;
     id:       uacpi_u8;
     rsvd:     uacpi_u8;
-    gsi_base: uacpi_u32;
-    address:  uacpi_u64;
+    gsi_base: uacpi_u32 #align 1;
+    address:  uacpi_u64 #align 1;
 }
 
 acpi_madt_lsapic :: struct {
@@ -1074,124 +1078,124 @@ acpi_madt_lsapic :: struct {
     id:         uacpi_u8;
     eid:        uacpi_u8;
     reserved:   [3] uacpi_u8;
-    flags:      uacpi_u32;
-    uid:        uacpi_u32;
+    flags:      uacpi_u32 #align 1;
+    uid:        uacpi_u32 #align 1;
 //     uid_string: *uacpi_char;// Incomplete array in C (zero-sized)
 }
 
 acpi_madt_platform_interrupt_source :: struct {
     hdr:            acpi_entry_hdr;
-    flags:          uacpi_u16;
+    flags:          uacpi_u16 #align 1;
     type:           uacpi_u8;
     processor_id:   uacpi_u8;
     processor_eid:  uacpi_u8;
     iosapic_vector: uacpi_u8;
-    gsi:            uacpi_u32;
-    platform_flags: uacpi_u32;
+    gsi:            uacpi_u32 #align 1;
+    platform_flags: uacpi_u32 #align 1;
 }
 
 acpi_madt_x2apic :: struct {
     hdr:   acpi_entry_hdr;
-    rsvd:  uacpi_u16;
-    id:    uacpi_u32;
-    flags: uacpi_u32;
-    uid:   uacpi_u32;
+    rsvd:  uacpi_u16 #align 1;
+    id:    uacpi_u32 #align 1;
+    flags: uacpi_u32 #align 1;
+    uid:   uacpi_u32 #align 1;
 }
 
 acpi_madt_x2apic_nmi :: struct {
     hdr:      acpi_entry_hdr;
-    flags:    uacpi_u16;
-    uid:      uacpi_u32;
+    flags:    uacpi_u16 #align 1;
+    uid:      uacpi_u32 #align 1;
     lint:     uacpi_u8;
     reserved: [3] uacpi_u8;
 }
 
 acpi_madt_gicc :: struct {
     hdr:                       acpi_entry_hdr;
-    rsvd0:                     uacpi_u16;
-    interface_number:          uacpi_u32;
-    acpi_id:                   uacpi_u32;
-    flags:                     uacpi_u32;
-    parking_protocol_version:  uacpi_u32;
-    perf_interrupt_gsiv:       uacpi_u32;
-    parked_address:            uacpi_u64;
-    address:                   uacpi_u64;
-    gicv:                      uacpi_u64;
-    gich:                      uacpi_u64;
-    vgic_maitenante_interrupt: uacpi_u32;
-    gicr_base_address:         uacpi_u64 #align 4;
-    mpidr:                     uacpi_u64 #align 4;
+    rsvd0:                     uacpi_u16 #align 1;
+    interface_number:          uacpi_u32 #align 1;
+    acpi_id:                   uacpi_u32 #align 1;
+    flags:                     uacpi_u32 #align 1;
+    parking_protocol_version:  uacpi_u32 #align 1;
+    perf_interrupt_gsiv:       uacpi_u32 #align 1;
+    parked_address:            uacpi_u64 #align 1;
+    address:                   uacpi_u64 #align 1;
+    gicv:                      uacpi_u64 #align 1;
+    gich:                      uacpi_u64 #align 1;
+    vgic_maitenante_interrupt: uacpi_u32 #align 1;
+    gicr_base_address:         uacpi_u64 #align 1;
+    mpidr:                     uacpi_u64 #align 1;
     power_efficiency_class:    uacpi_u8;
     rsvd1:                     uacpi_u8;
-    spe_overflow_interrupt:    uacpi_u16;
-    trbe_interrupt:            uacpi_u16;
+    spe_overflow_interrupt:    uacpi_u16 #align 1;
+    trbe_interrupt:            uacpi_u16 #align 1;
 }
 
 acpi_madt_gicd :: struct {
     hdr:                acpi_entry_hdr;
-    rsvd0:              uacpi_u16;
-    id:                 uacpi_u32;
-    address:            uacpi_u64;
-    system_vector_base: uacpi_u32;
+    rsvd0:              uacpi_u16 #align 1;
+    id:                 uacpi_u32 #align 1;
+    address:            uacpi_u64 #align 1;
+    system_vector_base: uacpi_u32 #align 1;
     gic_version:        uacpi_u8;
     reserved1:          [3] uacpi_u8;
 }
 
 acpi_madt_gic_msi_frame :: struct {
     hdr:       acpi_entry_hdr;
-    rsvd:      uacpi_u16;
-    id:        uacpi_u32;
-    address:   uacpi_u64;
-    flags:     uacpi_u32;
-    spi_count: uacpi_u16;
-    spi_base:  uacpi_u16;
+    rsvd:      uacpi_u16 #align 1;
+    id:        uacpi_u32 #align 1;
+    address:   uacpi_u64 #align 1;
+    flags:     uacpi_u32 #align 1;
+    spi_count: uacpi_u16 #align 1;
+    spi_base:  uacpi_u16 #align 1;
 }
 
 acpi_madt_gicr :: struct {
     hdr:     acpi_entry_hdr;
-    rsvd:    uacpi_u16;
-    address: uacpi_u64 #align 4;
-    length:  uacpi_u32;
+    rsvd:    uacpi_u16 #align 1;
+    address: uacpi_u64 #align 1;
+    length:  uacpi_u32 #align 1;
 }
 
 acpi_madt_gic_its :: struct {
     hdr:     acpi_entry_hdr;
-    rsvd0:   uacpi_u16;
-    id:      uacpi_u32;
-    address: uacpi_u64;
-    rsvd1:   uacpi_u32;
+    rsvd0:   uacpi_u16 #align 1;
+    id:      uacpi_u32 #align 1;
+    address: uacpi_u64 #align 1;
+    rsvd1:   uacpi_u32 #align 1;
 }
 
 acpi_madt_multiprocessor_wakeup :: struct {
     hdr:             acpi_entry_hdr;
-    mailbox_version: uacpi_u16;
-    rsvd:            uacpi_u32;
-    mailbox_address: uacpi_u64;
+    mailbox_version: uacpi_u16 #align 1;
+    rsvd:            uacpi_u32 #align 1;
+    mailbox_address: uacpi_u64 #align 1;
 }
 
 acpi_madt_core_pic :: struct {
     hdr:     acpi_entry_hdr;
     version: uacpi_u8;
-    acpi_id: uacpi_u32 #align 3;
-    id:      uacpi_u32 #align 3;
-    flags:   uacpi_u32 #align 3;
+    acpi_id: uacpi_u32 #align 1;
+    id:      uacpi_u32 #align 1;
+    flags:   uacpi_u32 #align 1;
 }
 
 acpi_madt_lio_pic :: struct {
     hdr:                    acpi_entry_hdr;
     version:                uacpi_u8;
-    address:                uacpi_u64 #align 3;
+    address:                uacpi_u64 #align 1;
     size:                   uacpi_u16 #align 1;
     cascade_vector:         uacpi_u16 #align 1;
-    cascade_vector_mapping: uacpi_u64 #align 7;
+    cascade_vector_mapping: uacpi_u64 #align 1;
 }
 
 acpi_madt_ht_pic :: struct {
     hdr:            acpi_entry_hdr;
     version:        uacpi_u8;
-    address:        uacpi_u64 #align 3;
+    address:        uacpi_u64 #align 1;
     size:           uacpi_u16 #align 1;
-    cascade_vector: uacpi_u64 #align 5;
+    cascade_vector: uacpi_u64 #align 1;
 }
 
 acpi_madt_eio_pic :: struct {
@@ -1199,21 +1203,21 @@ acpi_madt_eio_pic :: struct {
     version:        uacpi_u8;
     cascade_vector: uacpi_u8;
     node:           uacpi_u8;
-    node_map:       uacpi_u64 #align 5;
+    node_map:       uacpi_u64 #align 1;
 }
 
 acpi_madt_msi_pic :: struct {
     hdr:     acpi_entry_hdr;
     version: uacpi_u8;
-    address: uacpi_u64 #align 3;
-    start:   uacpi_u32 #align 3;
-    count:   uacpi_u32 #align 3;
+    address: uacpi_u64 #align 1;
+    start:   uacpi_u32 #align 1;
+    count:   uacpi_u32 #align 1;
 }
 
 acpi_madt_bio_pic :: struct {
     hdr:         acpi_entry_hdr;
     version:     uacpi_u8;
-    address:     uacpi_u64 #align 3;
+    address:     uacpi_u64 #align 1;
     size:        uacpi_u16 #align 1;
     hardware_id: uacpi_u16 #align 1;
     gsi_base:    uacpi_u16 #align 1;
@@ -1222,7 +1226,7 @@ acpi_madt_bio_pic :: struct {
 acpi_madt_lpc_pic :: struct {
     hdr:            acpi_entry_hdr;
     version:        uacpi_u8;
-    address:        uacpi_u64 #align 3;
+    address:        uacpi_u64 #align 1;
     size:           uacpi_u16 #align 1;
     cascade_vector: uacpi_u16 #align 1;
 }
@@ -1231,21 +1235,21 @@ acpi_madt_rintc :: struct {
     hdr:         acpi_entry_hdr;
     version:     uacpi_u8;
     rsvd:        uacpi_u8;
-    flags:       uacpi_u32;
-    hart_id:     uacpi_u64;
-    uid:         uacpi_u32;
-    ext_intc_id: uacpi_u32;
-    address:     uacpi_u64;
-    size:        uacpi_u32;
+    flags:       uacpi_u32 #align 1;
+    hart_id:     uacpi_u64 #align 1;
+    uid:         uacpi_u32 #align 1;
+    ext_intc_id: uacpi_u32 #align 1;
+    address:     uacpi_u64 #align 1;
+    size:        uacpi_u32 #align 1;
 }
 
 acpi_madt_imsic :: struct {
     hdr:               acpi_entry_hdr;
     version:           uacpi_u8;
     rsvd:              uacpi_u8;
-    flags:             uacpi_u32;
-    num_ids:           uacpi_u16;
-    num_guest_ids:     uacpi_u16;
+    flags:             uacpi_u32 #align 1;
+    num_ids:           uacpi_u16 #align 1;
+    num_guest_ids:     uacpi_u16 #align 1;
     guest_index_bits:  uacpi_u8;
     hart_index_bits:   uacpi_u8;
     group_index_bits:  uacpi_u8;
@@ -1256,26 +1260,26 @@ acpi_madt_aplic :: struct {
     hdr:           acpi_entry_hdr;
     version:       uacpi_u8;
     id:            uacpi_u8;
-    flags:         uacpi_u32;
-    hardware_id:   uacpi_u64;
-    idc_count:     uacpi_u16;
-    sources_count: uacpi_u16;
-    gsi_base:      uacpi_u32;
-    address:       uacpi_u64;
-    size:          uacpi_u32;
+    flags:         uacpi_u32 #align 1;
+    hardware_id:   uacpi_u64 #align 1;
+    idc_count:     uacpi_u16 #align 1;
+    sources_count: uacpi_u16 #align 1;
+    gsi_base:      uacpi_u32 #align 1;
+    address:       uacpi_u64 #align 1;
+    size:          uacpi_u32 #align 1;
 }
 
 acpi_madt_plic :: struct {
     hdr:           acpi_entry_hdr;
     version:       uacpi_u8;
     id:            uacpi_u8;
-    hardware_id:   uacpi_u64 #align 4;
-    sources_count: uacpi_u16;
-    max_priority:  uacpi_u16;
-    flags:         uacpi_u32;
-    size:          uacpi_u32;
-    address:       uacpi_u64;
-    gsi_base:      uacpi_u32;
+    hardware_id:   uacpi_u64 #align 1;
+    sources_count: uacpi_u16 #align 1;
+    max_priority:  uacpi_u16 #align 1;
+    flags:         uacpi_u32 #align 1;
+    size:          uacpi_u32 #align 1;
+    address:       uacpi_u64 #align 1;
+    gsi_base:      uacpi_u32 #align 1;
 }
 
 acpi_srat_entry_type :: enum s32 {
@@ -1291,8 +1295,8 @@ acpi_srat_entry_type :: enum s32 {
 
 acpi_srat :: struct {
     hdr:     acpi_sdt_hdr;
-    rsvd0:   uacpi_u32;
-    rsvd1:   uacpi_u64;
+    rsvd0:   uacpi_u32 #align 1;
+    rsvd1:   uacpi_u64 #align 1;
 //     entries: *acpi_entry_hdr;// Incomplete array in C (zero-sized)
 }
 
@@ -1300,90 +1304,90 @@ acpi_srat_processor_affinity :: struct {
     hdr:                   acpi_entry_hdr;
     proximity_domain_low:  uacpi_u8;
     id:                    uacpi_u8;
-    flags:                 uacpi_u32;
+    flags:                 uacpi_u32 #align 1;
     eid:                   uacpi_u8;
     proximity_domain_high: [3] uacpi_u8;
-    clock_domain:          uacpi_u32;
+    clock_domain:          uacpi_u32 #align 1;
 }
 
 acpi_srat_memory_affinity :: struct {
     hdr:              acpi_entry_hdr;
-    proximity_domain: uacpi_u32 #align 2;
-    rsvd0:            uacpi_u16;
-    address:          uacpi_u64;
-    length:           uacpi_u64;
-    rsvd1:            uacpi_u32;
-    flags:            uacpi_u32;
-    rsdv2:            uacpi_u64;
+    proximity_domain: uacpi_u32 #align 1;
+    rsvd0:            uacpi_u16 #align 1;
+    address:          uacpi_u64 #align 1;
+    length:           uacpi_u64 #align 1;
+    rsvd1:            uacpi_u32 #align 1;
+    flags:            uacpi_u32 #align 1;
+    rsdv2:            uacpi_u64 #align 1;
 }
 
 acpi_srat_x2apic_affinity :: struct {
     hdr:              acpi_entry_hdr;
-    rsvd0:            uacpi_u16;
-    proximity_domain: uacpi_u32;
-    id:               uacpi_u32;
-    flags:            uacpi_u32;
-    clock_domain:     uacpi_u32;
-    rsvd1:            uacpi_u32;
+    rsvd0:            uacpi_u16 #align 1;
+    proximity_domain: uacpi_u32 #align 1;
+    id:               uacpi_u32 #align 1;
+    flags:            uacpi_u32 #align 1;
+    clock_domain:     uacpi_u32 #align 1;
+    rsvd1:            uacpi_u32 #align 1;
 }
 
 acpi_srat_gicc_affinity :: struct {
     hdr:              acpi_entry_hdr;
-    proximity_domain: uacpi_u32 #align 2;
-    uid:              uacpi_u32 #align 2;
-    flags:            uacpi_u32 #align 2;
-    clock_domain:     uacpi_u32 #align 2;
+    proximity_domain: uacpi_u32 #align 1;
+    uid:              uacpi_u32 #align 1;
+    flags:            uacpi_u32 #align 1;
+    clock_domain:     uacpi_u32 #align 1;
 }
 
 acpi_srat_gic_its_affinity :: struct {
     hdr:              acpi_entry_hdr;
-    proximity_domain: uacpi_u32 #align 2;
-    rsvd:             uacpi_u16;
-    id:               uacpi_u32;
+    proximity_domain: uacpi_u32 #align 1;
+    rsvd:             uacpi_u16 #align 1;
+    id:               uacpi_u32 #align 1;
 }
 
 acpi_srat_generic_affinity :: struct {
     hdr:              acpi_entry_hdr;
     rsvd0:            uacpi_u8;
     handle_type:      uacpi_u8;
-    proximity_domain: uacpi_u32;
+    proximity_domain: uacpi_u32 #align 1;
     handle:           [16] uacpi_u8;
-    flags:            uacpi_u32;
-    rsvd1:            uacpi_u32;
+    flags:            uacpi_u32 #align 1;
+    rsvd1:            uacpi_u32 #align 1;
 }
 
 acpi_srat_rintc_affinity :: struct {
     hdr:              acpi_entry_hdr;
-    rsvd:             uacpi_u16;
-    proximity_domain: uacpi_u32;
-    uid:              uacpi_u32;
-    flags:            uacpi_u32;
-    clock_domain:     uacpi_u32;
+    rsvd:             uacpi_u16 #align 1;
+    proximity_domain: uacpi_u32 #align 1;
+    uid:              uacpi_u32 #align 1;
+    flags:            uacpi_u32 #align 1;
+    clock_domain:     uacpi_u32 #align 1;
 }
 
 acpi_slit :: struct {
     hdr:            acpi_sdt_hdr;
-    num_localities: uacpi_u64 #align 4;
+    num_localities: uacpi_u64 #align 1;
 //     matrix:         *uacpi_u8;// Incomplete array in C (zero-sized)
 }
 
 acpi_gtdt :: struct {
     hdr:                   acpi_sdt_hdr;
-    cnt_control_base:      uacpi_u64 #align 4;
-    rsvd:                  uacpi_u32;
-    el1_secure_gsiv:       uacpi_u32;
-    el1_secure_flags:      uacpi_u32;
-    el1_non_secure_gsiv:   uacpi_u32;
-    el1_non_secure_flags:  uacpi_u32;
-    el1_virtual_gsiv:      uacpi_u32;
-    el1_virtual_flags:     uacpi_u32;
-    el2_gsiv:              uacpi_u32;
-    el2_flags:             uacpi_u32;
-    cnt_read_base:         uacpi_u64;
-    platform_timer_count:  uacpi_u32;
-    platform_timer_offset: uacpi_u32;
-    el2_virtual_gsiv:      uacpi_u32;
-    el2_virtual_flags:     uacpi_u32;
+    cnt_control_base:      uacpi_u64 #align 1;
+    rsvd:                  uacpi_u32 #align 1;
+    el1_secure_gsiv:       uacpi_u32 #align 1;
+    el1_secure_flags:      uacpi_u32 #align 1;
+    el1_non_secure_gsiv:   uacpi_u32 #align 1;
+    el1_non_secure_flags:  uacpi_u32 #align 1;
+    el1_virtual_gsiv:      uacpi_u32 #align 1;
+    el1_virtual_flags:     uacpi_u32 #align 1;
+    el2_gsiv:              uacpi_u32 #align 1;
+    el2_flags:             uacpi_u32 #align 1;
+    cnt_read_base:         uacpi_u64 #align 1;
+    platform_timer_count:  uacpi_u32 #align 1;
+    platform_timer_offset: uacpi_u32 #align 1;
+    el2_virtual_gsiv:      uacpi_u32 #align 1; // revision >= 3
+    el2_virtual_flags:     uacpi_u32 #align 1;
 }
 
 acpi_gtdt_entry_type :: enum s32 {
@@ -1399,53 +1403,53 @@ acpi_gtdt_entry_hdr :: struct {
 acpi_gtdt_timer :: struct {
     hdr:          acpi_gtdt_entry_hdr;
     rsvd:         uacpi_u8;
-    cnt_ctl_base: uacpi_u64 #align 4;
-    timer_count:  uacpi_u32;
-    timer_offset: uacpi_u32;
+    cnt_ctl_base: uacpi_u64 #align 1;
+    timer_count:  uacpi_u32 #align 1;
+    timer_offset: uacpi_u32 #align 1;
 }
 
 acpi_gtdt_timer_entry :: struct {
     frame_number:   uacpi_u8;
     rsvd:           [3] uacpi_u8;
-    cnt_base:       uacpi_u64 #align 4;
-    el0_cnt_base:   uacpi_u64 #align 4;
-    physical_gsiv:  uacpi_u32;
-    physical_flags: uacpi_u32;
-    virtual_gsiv:   uacpi_u32;
-    virtual_flags:  uacpi_u32;
-    common_flags:   uacpi_u32;
+    cnt_base:       uacpi_u64 #align 1;
+    el0_cnt_base:   uacpi_u64 #align 1;
+    physical_gsiv:  uacpi_u32 #align 1;
+    physical_flags: uacpi_u32 #align 1;
+    virtual_gsiv:   uacpi_u32 #align 1;
+    virtual_flags:  uacpi_u32 #align 1;
+    common_flags:   uacpi_u32 #align 1;
 }
 
 acpi_gtdt_watchdog :: struct {
     hdr:           acpi_gtdt_entry_hdr;
     rsvd:          uacpi_u8;
-    refresh_frame: uacpi_u64 #align 4;
-    control_frame: uacpi_u64 #align 4;
-    gsiv:          uacpi_u32;
-    flags:         uacpi_u32;
+    refresh_frame: uacpi_u64 #align 1;
+    control_frame: uacpi_u64 #align 1;
+    gsiv:          uacpi_u32 #align 1;
+    flags:         uacpi_u32 #align 1;
 }
 
 // Forward-declared to avoid including the entire acpi.h here
 acpi_fadt :: struct {
     hdr:                        acpi_sdt_hdr;
-    firmware_ctrl:              uacpi_u32;
-    dsdt:                       uacpi_u32;
+    firmware_ctrl:              uacpi_u32 #align 1;
+    dsdt:                       uacpi_u32 #align 1;
     int_model:                  uacpi_u8;
     preferred_pm_profile:       uacpi_u8;
-    sci_int:                    uacpi_u16;
-    smi_cmd:                    uacpi_u32;
+    sci_int:                    uacpi_u16 #align 1;
+    smi_cmd:                    uacpi_u32 #align 1;
     acpi_enable:                uacpi_u8;
     acpi_disable:               uacpi_u8;
     s4bios_req:                 uacpi_u8;
     pstate_cnt:                 uacpi_u8;
-    pm1a_evt_blk:               uacpi_u32;
-    pm1b_evt_blk:               uacpi_u32;
-    pm1a_cnt_blk:               uacpi_u32;
-    pm1b_cnt_blk:               uacpi_u32;
-    pm2_cnt_blk:                uacpi_u32;
-    pm_tmr_blk:                 uacpi_u32;
-    gpe0_blk:                   uacpi_u32;
-    gpe1_blk:                   uacpi_u32;
+    pm1a_evt_blk:               uacpi_u32 #align 1;
+    pm1b_evt_blk:               uacpi_u32 #align 1;
+    pm1a_cnt_blk:               uacpi_u32 #align 1;
+    pm1b_cnt_blk:               uacpi_u32 #align 1;
+    pm2_cnt_blk:                uacpi_u32 #align 1;
+    pm_tmr_blk:                 uacpi_u32 #align 1;
+    gpe0_blk:                   uacpi_u32 #align 1;
+    gpe1_blk:                   uacpi_u32 #align 1;
     pm1_evt_len:                uacpi_u8;
     pm1_cnt_len:                uacpi_u8;
     pm2_cnt_len:                uacpi_u8;
@@ -1454,10 +1458,10 @@ acpi_fadt :: struct {
     gpe1_blk_len:               uacpi_u8;
     gpe1_base:                  uacpi_u8;
     cst_cnt:                    uacpi_u8;
-    p_lvl2_lat:                 uacpi_u16;
-    p_lvl3_lat:                 uacpi_u16;
-    flush_size:                 uacpi_u16;
-    flush_stride:               uacpi_u16;
+    p_lvl2_lat:                 uacpi_u16 #align 1;
+    p_lvl3_lat:                 uacpi_u16 #align 1;
+    flush_size:                 uacpi_u16 #align 1;
+    flush_stride:               uacpi_u16 #align 1;
     duty_offset:                uacpi_u8;
     duty_width:                 uacpi_u8;
     day_alrm:                   uacpi_u8;
@@ -1465,24 +1469,24 @@ acpi_fadt :: struct {
     century:                    uacpi_u8;
     iapc_boot_arch:             uacpi_u16 #align 1;
     rsvd:                       uacpi_u8;
-    flags:                      uacpi_u32;
-    reset_reg:                  acpi_gas #align 4;
+    flags:                      uacpi_u32 #align 1;
+    reset_reg:                  acpi_gas;
     reset_value:                uacpi_u8;
     arm_boot_arch:              uacpi_u16 #align 1;
     fadt_minor_verison:         uacpi_u8;
-    x_firmware_ctrl:            uacpi_u64 #align 4;
-    x_dsdt:                     uacpi_u64 #align 4;
-    x_pm1a_evt_blk:             acpi_gas #align 4;
+    x_firmware_ctrl:            uacpi_u64 #align 1;
+    x_dsdt:                     uacpi_u64 #align 1;
+    x_pm1a_evt_blk:             acpi_gas;
     x_pm1b_evt_blk:             acpi_gas;
-    x_pm1a_cnt_blk:             acpi_gas #align 4;
+    x_pm1a_cnt_blk:             acpi_gas;
     x_pm1b_cnt_blk:             acpi_gas;
-    x_pm2_cnt_blk:              acpi_gas #align 4;
+    x_pm2_cnt_blk:              acpi_gas;
     x_pm_tmr_blk:               acpi_gas;
-    x_gpe0_blk:                 acpi_gas #align 4;
+    x_gpe0_blk:                 acpi_gas;
     x_gpe1_blk:                 acpi_gas;
-    sleep_control_reg:          acpi_gas #align 4;
+    sleep_control_reg:          acpi_gas;
     sleep_status_reg:           acpi_gas;
-    hypervisor_vendor_identity: uacpi_u64 #align 4;
+    hypervisor_vendor_identity: uacpi_u64 #align 1;
 }
 
 acpi_facs :: struct {
@@ -1500,22 +1504,22 @@ acpi_facs :: struct {
 }
 
 acpi_mcfg_allocation :: struct {
-    address:   uacpi_u64;
-    segment:   uacpi_u16;
+    address:   uacpi_u64 #align 1;
+    segment:   uacpi_u16 #align 1;
     start_bus: uacpi_u8;
     end_bus:   uacpi_u8;
-    rsvd:      uacpi_u32;
+    rsvd:      uacpi_u32 #align 1;
 }
 
 acpi_mcfg :: struct {
     hdr:     acpi_sdt_hdr;
-    rsvd:    uacpi_u64 #align 4;
-//     entries: *acpi_mcfg_allocation #align 4;// Incomplete array in C (zero-sized)
+    rsvd:    uacpi_u64 #align 1;
+//     entries: *acpi_mcfg_allocation;// Incomplete array in C (zero-sized)
 }
 
 acpi_hpet :: struct {
     hdr:            acpi_sdt_hdr;
-    block_id:       uacpi_u32;
+    block_id:       uacpi_u32 #align 1;
     address:        acpi_gas;
     number:         uacpi_u8;
     min_clock_tick: uacpi_u16 #align 1;
@@ -1534,25 +1538,25 @@ acpi_ssdt :: struct {
 
 acpi_ecdt :: struct {
     hdr:        acpi_sdt_hdr;
-    ec_control: acpi_gas #align 4;
+    ec_control: acpi_gas;
     ec_data:    acpi_gas;
-    uid:        uacpi_u32;
+    uid:        uacpi_u32 #align 1;
     gpe_bit:    uacpi_u8;
 //     ec_id:      *uacpi_char;// Incomplete array in C (zero-sized)
 }
 
 acpi_rhct_hdr :: struct {
-    type:     uacpi_u16;
-    length:   uacpi_u16;
-    revision: uacpi_u16;
+    type:     uacpi_u16 #align 1;
+    length:   uacpi_u16 #align 1;
+    revision: uacpi_u16 #align 1;
 }
 
 acpi_rhct :: struct {
     hdr:                acpi_sdt_hdr;
-    flags:              uacpi_u32;
-    timebase_frequency: uacpi_u64;
-    node_count:         uacpi_u32;
-    nodes_offset:       uacpi_u32;
+    flags:              uacpi_u32 #align 1;
+    timebase_frequency: uacpi_u64 #align 1;
+    node_count:         uacpi_u32 #align 1;
+    nodes_offset:       uacpi_u32 #align 1;
 //     entries:            *acpi_rhct_hdr;// Incomplete array in C (zero-sized)
 }
 
@@ -1565,7 +1569,7 @@ acpi_rhct_entry_type :: enum s32 {
 
 acpi_rhct_isa_string :: struct {
     hdr:    acpi_rhct_hdr;
-    length: uacpi_u16;
+    length: uacpi_u16 #align 1;
 //     isa:    *uacpi_u8;// Incomplete array in C (zero-sized)
 }
 
@@ -1591,9 +1595,9 @@ acpi_rhct_mmu :: struct {
 
 acpi_rhct_hart_info :: struct {
     hdr:          acpi_rhct_hdr;
-    offset_count: uacpi_u16;
-    uid:          uacpi_u32;
-//     offsets:      *uacpi_u32;// Incomplete array in C (zero-sized)
+    offset_count: uacpi_u16 #align 1;
+    uid:          uacpi_u32 #align 1;
+//     offsets:      *uacpi_u32 #align 1;// Incomplete array in C (zero-sized)
 }
 
 /*
@@ -1628,8 +1632,8 @@ acpi_resource_end_dependent :: struct {
 acpi_resource_io :: struct {
     common:      acpi_small_item;
     information: uacpi_u8;
-    minimum:     uacpi_u16;
-    maximum:     uacpi_u16;
+    minimum:     uacpi_u16 #align 1;
+    maximum:     uacpi_u16 #align 1;
     alignment:   uacpi_u8;
     length:      uacpi_u8;
 }
@@ -1665,10 +1669,10 @@ acpi_large_item :: struct {
 acpi_resource_memory24 :: struct {
     common:      acpi_large_item;
     information: uacpi_u8;
-    minimum:     uacpi_u16;
-    maximum:     uacpi_u16;
-    alignment:   uacpi_u16;
-    length:      uacpi_u16;
+    minimum:     uacpi_u16 #align 1;
+    maximum:     uacpi_u16 #align 1;
+    alignment:   uacpi_u16 #align 1;
+    length:      uacpi_u16 #align 1;
 }
 
 acpi_resource_vendor_defined_type1 :: struct {
@@ -1679,17 +1683,17 @@ acpi_resource_vendor_defined_type1 :: struct {
 acpi_resource_memory32 :: struct {
     common:      acpi_large_item;
     information: uacpi_u8;
-    minimum:     uacpi_u32;
-    maximum:     uacpi_u32;
-    alignment:   uacpi_u32;
-    length:      uacpi_u32;
+    minimum:     uacpi_u32 #align 1;
+    maximum:     uacpi_u32 #align 1;
+    alignment:   uacpi_u32 #align 1;
+    length:      uacpi_u32 #align 1;
 }
 
 acpi_resource_fixed_memory32 :: struct {
     common:      acpi_large_item;
     information: uacpi_u8;
-    address:     uacpi_u32;
-    length:      uacpi_u32;
+    address:     uacpi_u32 #align 1;
+    length:      uacpi_u32 #align 1;
 }
 
 acpi_resource_address :: struct {
@@ -1701,41 +1705,41 @@ acpi_resource_address :: struct {
 
 acpi_resource_address64 :: struct {
     common:             acpi_resource_address;
-    granularity:        uacpi_u64 #align 6;
-    minimum:            uacpi_u64 #align 6;
-    maximum:            uacpi_u64 #align 6;
-    translation_offset: uacpi_u64 #align 6;
-    length:             uacpi_u64 #align 6;
+    granularity:        uacpi_u64 #align 1;
+    minimum:            uacpi_u64 #align 1;
+    maximum:            uacpi_u64 #align 1;
+    translation_offset: uacpi_u64 #align 1;
+    length:             uacpi_u64 #align 1;
 }
 
 acpi_resource_address32 :: struct {
     common:             acpi_resource_address;
-    granularity:        uacpi_u32 #align 2;
-    minimum:            uacpi_u32 #align 2;
-    maximum:            uacpi_u32 #align 2;
-    translation_offset: uacpi_u32 #align 2;
-    length:             uacpi_u32 #align 2;
+    granularity:        uacpi_u32 #align 1;
+    minimum:            uacpi_u32 #align 1;
+    maximum:            uacpi_u32 #align 1;
+    translation_offset: uacpi_u32 #align 1;
+    length:             uacpi_u32 #align 1;
 }
 
 acpi_resource_address16 :: struct {
     common:             acpi_resource_address;
-    granularity:        uacpi_u16;
-    minimum:            uacpi_u16;
-    maximum:            uacpi_u16;
-    translation_offset: uacpi_u16;
-    length:             uacpi_u16;
+    granularity:        uacpi_u16 #align 1;
+    minimum:            uacpi_u16 #align 1;
+    maximum:            uacpi_u16 #align 1;
+    translation_offset: uacpi_u16 #align 1;
+    length:             uacpi_u16 #align 1;
 }
 
 acpi_resource_address64_extended :: struct {
     common:             acpi_resource_address;
     revision_id:        uacpi_u8;
     rsvd:               uacpi_u8;
-    granularity:        uacpi_u64;
-    minimum:            uacpi_u64;
-    maximum:            uacpi_u64;
-    translation_offset: uacpi_u64;
-    length:             uacpi_u64;
-    attributes:         uacpi_u64;
+    granularity:        uacpi_u64 #align 1;
+    minimum:            uacpi_u64 #align 1;
+    maximum:            uacpi_u64 #align 1;
+    translation_offset: uacpi_u64 #align 1;
+    length:             uacpi_u64 #align 1;
+    attributes:         uacpi_u64 #align 1;
 }
 
 acpi_resource_extended_irq :: struct {
@@ -1751,7 +1755,7 @@ acpi_resource_generic_register :: struct {
     bit_width:        uacpi_u8;
     bit_offset:       uacpi_u8;
     access_size:      uacpi_u8;
-    address:          uacpi_u64 #align 7;
+    address:          uacpi_u64 #align 1;
 }
 
 acpi_resource_gpio_connection :: struct {
@@ -1761,9 +1765,9 @@ acpi_resource_gpio_connection :: struct {
     general_flags:      uacpi_u16 #align 1;
     connection_flags:   uacpi_u16 #align 1;
     pull_configuration: uacpi_u8;
-    drive_strength:     uacpi_u16;
-    debounce_timeout:   uacpi_u16;
-    pin_table_offset:   uacpi_u16;
+    drive_strength:     uacpi_u16 #align 1;
+    debounce_timeout:   uacpi_u16 #align 1;
+    pin_table_offset:   uacpi_u16 #align 1;
     source_index:       uacpi_u8;
     source_offset:      uacpi_u16 #align 1;
     vendor_data_offset: uacpi_u16 #align 1;
@@ -1778,18 +1782,18 @@ acpi_resource_serial :: struct {
     flags:                     uacpi_u8;
     type_specific_flags:       uacpi_u16 #align 1;
     type_specific_revision_id: uacpi_u8;
-    type_data_length:          uacpi_u16;
+    type_data_length:          uacpi_u16 #align 1;
 }
 
 acpi_resource_serial_i2c :: struct {
     common:           acpi_resource_serial;
-    connection_speed: uacpi_u32;
-    slave_address:    uacpi_u16;
+    connection_speed: uacpi_u32 #align 1;
+    slave_address:    uacpi_u16 #align 1;
 }
 
 acpi_resource_serial_spi :: struct {
     common:           acpi_resource_serial;
-    connection_speed: uacpi_u32;
+    connection_speed: uacpi_u32 #align 1;
     data_bit_length:  uacpi_u8;
     phase:            uacpi_u8;
     polarity:         uacpi_u8;
@@ -1798,9 +1802,9 @@ acpi_resource_serial_spi :: struct {
 
 acpi_resource_serial_uart :: struct {
     common:        acpi_resource_serial;
-    baud_rate:     uacpi_u32;
-    rx_fifo:       uacpi_u16;
-    tx_fifo:       uacpi_u16;
+    baud_rate:     uacpi_u32 #align 1;
+    rx_fifo:       uacpi_u16 #align 1;
+    tx_fifo:       uacpi_u16 #align 1;
     parity:        uacpi_u8;
     lines_enabled: uacpi_u8;
 }
@@ -1812,44 +1816,44 @@ acpi_resource_serial_csi2 :: struct {
 acpi_resource_pin_function :: struct {
     common:             acpi_large_item;
     revision_id:        uacpi_u8;
-    flags:              uacpi_u16;
+    flags:              uacpi_u16 #align 1;
     pull_configuration: uacpi_u8;
     function_number:    uacpi_u16 #align 1;
     pin_table_offset:   uacpi_u16 #align 1;
     source_index:       uacpi_u8;
-    source_offset:      uacpi_u16;
-    vendor_data_offset: uacpi_u16;
-    vendor_data_length: uacpi_u16;
+    source_offset:      uacpi_u16 #align 1;
+    vendor_data_offset: uacpi_u16 #align 1;
+    vendor_data_length: uacpi_u16 #align 1;
 }
 
 acpi_resource_pin_configuration :: struct {
     common:             acpi_large_item;
     revision_id:        uacpi_u8;
-    flags:              uacpi_u16;
+    flags:              uacpi_u16 #align 1;
     type:               uacpi_u8;
-    value:              uacpi_u32 #align 3;
+    value:              uacpi_u32 #align 1;
     pin_table_offset:   uacpi_u16 #align 1;
     source_index:       uacpi_u8;
-    source_offset:      uacpi_u16;
-    vendor_data_offset: uacpi_u16;
-    vendor_data_length: uacpi_u16;
+    source_offset:      uacpi_u16 #align 1;
+    vendor_data_offset: uacpi_u16 #align 1;
+    vendor_data_length: uacpi_u16 #align 1;
 }
 
 acpi_resource_pin_group :: struct {
     common:              acpi_large_item;
     revision_id:         uacpi_u8;
-    flags:               uacpi_u16;
-    pin_table_offset:    uacpi_u16;
-    source_lable_offset: uacpi_u16;
-    vendor_data_offset:  uacpi_u16;
-    vendor_data_length:  uacpi_u16;
+    flags:               uacpi_u16 #align 1;
+    pin_table_offset:    uacpi_u16 #align 1;
+    source_lable_offset: uacpi_u16 #align 1;
+    vendor_data_offset:  uacpi_u16 #align 1;
+    vendor_data_length:  uacpi_u16 #align 1;
 }
 
 acpi_resource_pin_group_function :: struct {
     common:              acpi_large_item;
     revision_id:         uacpi_u8;
-    flags:               uacpi_u16;
-    function:            uacpi_u16;
+    flags:               uacpi_u16 #align 1;
+    function:            uacpi_u16 #align 1;
     source_index:        uacpi_u8;
     source_offset:       uacpi_u16 #align 1;
     source_lable_offset: uacpi_u16 #align 1;
@@ -1860,22 +1864,22 @@ acpi_resource_pin_group_function :: struct {
 acpi_resource_pin_group_configuration :: struct {
     common:              acpi_large_item;
     revision_id:         uacpi_u8;
-    flags:               uacpi_u16;
+    flags:               uacpi_u16 #align 1;
     type:                uacpi_u8;
-    value:               uacpi_u32 #align 3;
+    value:               uacpi_u32 #align 1;
     source_index:        uacpi_u8;
-    source_offset:       uacpi_u16;
-    source_lable_offset: uacpi_u16;
-    vendor_data_offset:  uacpi_u16;
-    vendor_data_length:  uacpi_u16;
+    source_offset:       uacpi_u16 #align 1;
+    source_lable_offset: uacpi_u16 #align 1;
+    vendor_data_offset:  uacpi_u16 #align 1;
+    vendor_data_length:  uacpi_u16 #align 1;
 }
 
 acpi_resource_clock_input :: struct {
     common:       acpi_large_item;
     revision_id:  uacpi_u8;
-    flags:        uacpi_u16;
-    divisor:      uacpi_u16;
-    numerator:    uacpi_u32;
+    flags:        uacpi_u16 #align 1;
+    divisor:      uacpi_u16 #align 1;
+    numerator:    uacpi_u32 #align 1;
     source_index: uacpi_u8;
 }
 
@@ -2133,8 +2137,16 @@ uacpi_eval_simple_package :: (parent: *uacpi_namespace_node, path: *uacpi_char, 
 */
 uacpi_get_aml_bitness :: (out_bitness: *uacpi_u8) -> uacpi_status #foreign uacpi;
 
+/*
+* Helpers for entering & leaving ACPI mode. Note that ACPI mode is entered
+* automatically during the call to uacpi_initialize().
+*/
 uacpi_enter_acpi_mode :: () -> uacpi_status #foreign uacpi;
 
+/*
+* Helpers for entering & leaving ACPI mode. Note that ACPI mode is entered
+* automatically during the call to uacpi_initialize().
+*/
 uacpi_leave_acpi_mode :: () -> uacpi_status #foreign uacpi;
 
 /*
@@ -2170,10 +2182,22 @@ uacpi_install_fixed_event_handler :: (event: uacpi_fixed_event, handler: uacpi_i
 
 uacpi_uninstall_fixed_event_handler :: (event: uacpi_fixed_event) -> uacpi_status #foreign uacpi;
 
+/*
+* Enable/disable a fixed event. Note that the event is automatically enabled
+* upon installing a handler to it.
+*/
 uacpi_enable_fixed_event :: (event: uacpi_fixed_event) -> uacpi_status #foreign uacpi;
 
+/*
+* Enable/disable a fixed event. Note that the event is automatically enabled
+* upon installing a handler to it.
+*/
 uacpi_disable_fixed_event :: (event: uacpi_fixed_event) -> uacpi_status #foreign uacpi;
 
+/*
+* Enable/disable a fixed event. Note that the event is automatically enabled
+* upon installing a handler to it.
+*/
 uacpi_clear_fixed_event :: (event: uacpi_fixed_event) -> uacpi_status #foreign uacpi;
 
 /*
@@ -2208,44 +2232,181 @@ uacpi_gpe_triggering :: enum s32 {
 
 uacpi_gpe_triggering_to_string :: (triggering: uacpi_gpe_triggering) -> *uacpi_char #foreign uacpi;
 
+/*
+* Installs a handler to the provided GPE at 'idx' controlled by device
+* 'gpe_device'. The GPE is automatically disabled & cleared according to the
+* configured triggering upon invoking the handler. The event is optionally
+* re-enabled (by returning UACPI_GPE_REENABLE from the handler)
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_install_gpe_handler :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16, triggering: uacpi_gpe_triggering, handler: uacpi_gpe_handler, ctx: uacpi_handle) -> uacpi_status #foreign uacpi;
 
+/*
+* Installs a raw handler to the provided GPE at 'idx' controlled by device
+* 'gpe_device'. The handler is dispatched immediately after the event is
+* received, status & enable bits are untouched.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_install_gpe_handler_raw :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16, triggering: uacpi_gpe_triggering, handler: uacpi_gpe_handler, ctx: uacpi_handle) -> uacpi_status #foreign uacpi;
 
+/*
+* Installs a raw handler to the provided GPE at 'idx' controlled by device
+* 'gpe_device'. The handler is dispatched immediately after the event is
+* received, status & enable bits are untouched.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_uninstall_gpe_handler :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16, handler: uacpi_gpe_handler) -> uacpi_status #foreign uacpi;
 
+/*
+* Marks the GPE 'idx' managed by 'gpe_device' as wake-capable. 'wake_device' is
+* optional and configures the GPE to generate an implicit notification whenever
+* an event occurs.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_setup_gpe_for_wake :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16, wake_device: *uacpi_namespace_node) -> uacpi_status #foreign uacpi;
 
+/*
+* Mark a GPE managed by 'gpe_device' as enabled/disabled for wake. The GPE must
+* have previously been marked by calling uacpi_gpe_setup_for_wake. This
+* function only affects the GPE enable register state following the call to
+* uacpi_gpe_enable_all_for_wake.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_enable_gpe_for_wake :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Mark a GPE managed by 'gpe_device' as enabled/disabled for wake. The GPE must
+* have previously been marked by calling uacpi_gpe_setup_for_wake. This
+* function only affects the GPE enable register state following the call to
+* uacpi_gpe_enable_all_for_wake.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_disable_gpe_for_wake :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Finalize GPE initialization by enabling all GPEs not configured for wake and
+* having a matching AML handler detected.
+*
+* This should be called after the kernel power managment subsystem has
+* enumerated all of the devices, executing their _PRW methods etc., and
+* marking those it wishes to use for wake by calling uacpi_setup_gpe_for_wake
+* or uacpi_mark_gpe_for_wake.
+*/
 uacpi_finalize_gpe_initialization :: () -> uacpi_status #foreign uacpi;
 
+/*
+* Enable/disable a general purpose event managed by 'gpe_device'. Internally
+* this uses reference counting to make sure a GPE is not disabled until all
+* possible users of it do so. GPEs not marked for wake are enabled
+* automatically so this API is only needed for wake events or those that don't
+* have a corresponding AML handler.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_enable_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Enable/disable a general purpose event managed by 'gpe_device'. Internally
+* this uses reference counting to make sure a GPE is not disabled until all
+* possible users of it do so. GPEs not marked for wake are enabled
+* automatically so this API is only needed for wake events or those that don't
+* have a corresponding AML handler.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_disable_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Clear the status bit of the event 'idx' managed by 'gpe_device'.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_clear_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Suspend/resume a general purpose event managed by 'gpe_device'. This bypasses
+* the reference counting mechanism and unconditionally clears/sets the
+* corresponding bit in the enable registers. This is used for switching the GPE
+* to poll mode.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_suspend_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Suspend/resume a general purpose event managed by 'gpe_device'. This bypasses
+* the reference counting mechanism and unconditionally clears/sets the
+* corresponding bit in the enable registers. This is used for switching the GPE
+* to poll mode.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_resume_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Finish handling the GPE managed by 'gpe_device' at 'idx'. This clears the
+* status registers if it hasn't been cleared yet and re-enables the event if
+* it was enabled before.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_finish_handling_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Hard mask/umask a general purpose event at 'idx' managed by 'gpe_device'.
+* This is used to permanently silence an event so that further calls to
+* enable/disable as well as suspend/resume get ignored. This might be necessary
+* for GPEs that cause an event storm due to the kernel's inability to properly
+* handle them. The only way to enable a masked event is by a call to unmask.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_mask_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Hard mask/umask a general purpose event at 'idx' managed by 'gpe_device'.
+* This is used to permanently silence an event so that further calls to
+* enable/disable as well as suspend/resume get ignored. This might be necessary
+* for GPEs that cause an event storm due to the kernel's inability to properly
+* handle them. The only way to enable a masked event is by a call to unmask.
+*
+* NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
+*/
 uacpi_unmask_gpe :: (gpe_device: *uacpi_namespace_node, idx: uacpi_u16) -> uacpi_status #foreign uacpi;
 
+/*
+* Disable all GPEs currently set up on the system.
+*/
 uacpi_disable_all_gpes :: () -> uacpi_status #foreign uacpi;
 
+/*
+* Enable all GPEs not marked as wake. This is only needed after the system
+* wakes from a shallow sleep state and is called automatically by wake code.
+*/
 uacpi_enable_all_runtime_gpes :: () -> uacpi_status #foreign uacpi;
 
+/*
+* Enable all GPEs marked as wake. This is only needed before the system goes
+* to sleep is called automatically by sleep code.
+*/
 uacpi_enable_all_wake_gpes :: () -> uacpi_status #foreign uacpi;
 
+/*
+* Install/uninstall a new GPE block, usually defined by a device in the
+* namespace with a _HID of ACPI0006.
+*/
 uacpi_install_gpe_block :: (gpe_device: *uacpi_namespace_node, address: uacpi_u64, address_space: uacpi_address_space, num_registers: uacpi_u16, irq: uacpi_u32) -> uacpi_status #foreign uacpi;
 
+/*
+* Install/uninstall a new GPE block, usually defined by a device in the
+* namespace with a _HID of ACPI0006.
+*/
 uacpi_uninstall_gpe_block :: (gpe_device: *uacpi_namespace_node) -> uacpi_status #foreign uacpi;
 
 uacpi_gas_read :: (gas: *acpi_gas, value: *uacpi_u64) -> uacpi_status #foreign uacpi;
@@ -2840,6 +3001,12 @@ uacpi_for_each_resource :: (resources: *uacpi_resources, cb: uacpi_resource_iter
 
 uacpi_for_each_device_resource :: (device: *uacpi_namespace_node, method: *uacpi_char, cb: uacpi_resource_iteration_callback, user: *void) -> uacpi_status #foreign uacpi;
 
+/*
+* Set the firmware waking vector in FACS.
+*
+* 'addr32' is the real mode entry-point address
+* 'addr64' is the protected mode entry-point address
+*/
 uacpi_set_waking_vector :: (addr32: uacpi_phys_addr, addr64: uacpi_phys_addr) -> uacpi_status #foreign uacpi;
 
 /*

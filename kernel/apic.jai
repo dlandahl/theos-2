@@ -365,15 +365,15 @@ debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
         print("CS: %\n", stack.cs);
 
         DR6 :: enum_flags u64 {
-            breakpoint_0_hit;
-            breakpoint_1_hit;
-            breakpoint_2_hit;
-            breakpoint_3_hit;
+            BREAKPOINT_0_HIT     :: 0x1;
+            BREAKPOINT_1_HIT     :: 0x2;
+            BREAKPOINT_2_HIT     :: 0x4;
+            BREAKPOINT_3_HIT     :: 0x8;
 
-            dr_access :: 1 << 13;
-            single_step;
-            hardware_task_switch;
-            outside_rtm_region;
+            DR_ACCESS            :: 1 << 13;
+            SINGLE_STEP          :: 1 << 14;
+            HARDWARE_TASK_SWITCH :: 1 << 15;
+            OUTSIDE_RTM_REGION   :: 1 << 16;
         }
 
         dr6: DR6;

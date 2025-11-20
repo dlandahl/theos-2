@@ -285,7 +285,7 @@ galois_multiply :: (x: i128, y: i128) -> i128 {
     v := y;
     w := x;
 
-    R :: i128.{ low = 0x0000_0000_0000_0000, high = 0xe100_0000_0000_0000 };
+    R :: i128.{ bytes[15] = 0xe1 };
 
     for 0..127 {
         if w.high & 0x8000_0000_0000_0000 {
@@ -450,13 +450,21 @@ test_cases :: Aes128_NIST_Test_Case.[
     },
 ];
 
+#run {
+    #import "String";
+    #import "Compiler";
+
+    cl := get_toplevel_command_line();
+
+    // Auto run the test without generating an executable, if the module gets passed to the compiler directly on the command line.
+    if cl.count == 2 && contains(cl[1], "Aes.jai") {
+        set_build_options_dc(.{do_output = false});
+        aes128_gcm_nist_test();
+    }
+}
+
 aes128_gcm_nist_test :: () {
     #import "Basic";
-
-    if #compile_time {
-        #import "Compiler";
-        set_build_options_dc(.{do_output = false});
-    }
 
     context.print_style.default_format_int.base = 16;
 

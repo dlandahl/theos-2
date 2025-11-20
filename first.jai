@@ -170,7 +170,6 @@ compile_kernel :: () -> success: bool {
     log("Compiling kernel");
     workspace := compiler_create_workspace("Kernel");
 
-
     plugins: [..] *Metaprogram_Plugin;
     to_create: [..] Plugin_To_Create;
 
@@ -195,10 +194,6 @@ compile_kernel :: () -> success: bool {
         options.disable_redzone = true;
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
-
-        options.llvm_options.bitcode_optimization_setting = .O0;
-        options.llvm_options.machine_code_optimization_setting = .NONE;
-        options.llvm_options.command_line = .["", "--code-model=large", "--relocation-model=pic", "--mxcoff-roptr"];
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");

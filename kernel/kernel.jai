@@ -269,8 +269,8 @@ kernel_entry :: () #no_context {
 
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
-                    // case 0x8; init_nvme_controller(it);
-                    // case 0x6; init_ahci_controller(it);
+                    case 0x8; init_nvme_controller(it);
+                    case 0x6; init_ahci_controller(it);
                 }
             }
 
@@ -1165,15 +1165,7 @@ kernel_write_string :: (text: string) #no_context {
 }
 
 
-load_fence :: () #expand {
-    #asm { lfence; }
-}
-
-store_fence :: () #expand {
-    #asm { sfence; }
-}
-
-memory_fence :: () #expand {
+barrier :: () #expand {
     #asm { mfence; }
 }
 
@@ -1190,14 +1182,12 @@ fetch_add :: (value: *int, add: int) -> int {
 
 // Todo: should programatically detect when these don't get paired up correctly.
 
-disable_preemption :: () #no_context {
+preempt_disable :: () #no_context {
     core := get_current_core();
     core.preempt_disable_count += 1;
-    memory_fence();
 }
 
-enable_preemption :: () #no_context {
-    memory_fence();
+preempt_restore :: () #no_context {
     core := get_current_core();
     core.preempt_disable_count -= 1;
 }
@@ -1240,13 +1230,10 @@ acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
         }
     }
 
-    memory_fence();
-
     return flags;
 }
 
 release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
-    memory_fence();
 
     if !lock.* bluescreen();
     lock.* = 0;
@@ -1326,22 +1313,22 @@ sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
 
             #asm { pause; }
         }
-        load_fence();
+        barrier(); // These fences are full hardware barriers, but in fact on modern x64, only compiler barriers are needed. Not sure if they are needed in Jai, or how to insert them.
 
         #insert body;
 
-        load_fence();
+        barrier();
         if lock.* == sequence break;
     }
 }
 
 sequence_write :: (lock: *Sequence_Lock, body: Code) #expand {
     lock.* += 1;
-    store_fence();
+    barrier();
 
     #insert body;
 
-    store_fence();
+    barrier();
     lock.* += 1;
 }
 

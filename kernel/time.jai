@@ -629,6 +629,8 @@ calibrate_tsc :: () -> hz: u64 {
 }
 
 calibrate_tsc_using_interrupt :: () {
+    preempt_disable();
+
     for 1..10 {
         hpet_configure_timer(
             timer_index = 1,
@@ -646,10 +648,13 @@ calibrate_tsc_using_interrupt :: () {
         }
 
         tsc1 := rdtsc();
+
         frequency := tsc1 - tsc0;
 
         log("Frequency according to 1 second interrupt calibration: %\n", frequency);
     }
+
+    preempt_restore();
 }
 
 debug_measure_tsc_drift :: () {

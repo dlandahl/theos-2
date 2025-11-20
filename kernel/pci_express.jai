@@ -351,21 +351,21 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 }
 
 register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
-    for kernel_globals.pci_routing_table {
-        bus    := (it.address >> 24) & 0xff;
-        device := (it.address >> 16) & 0xff;
+    for entry: kernel_globals.pci_routing_table {
+        bus    := (entry.address >> 24) & 0xff;
+        device := (entry.address >> 16) & 0xff;
 
         if bus != pci.bus_address.bus || device != pci.bus_address.device {
             continue;
         }
 
-        if pci.interrupt_pin != it.pin {
+        if pci.interrupt_pin != entry.pin {
             continue;
         }
 
         gate := allocate_interrupt_gate();
         register_interrupt_gate(interrupt_handler, gate);
-        ioapic_add_interrupt_redirection_table_entry(it.index, gate | (1 << 15) | (1 << 13));
+        ioapic_add_interrupt_redirection_table_entry(entry.index, gate | (1 << 15) | (1 << 13));
 
         return true;
     }
@@ -376,16 +376,14 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
 
 
 
-mac_address_print_style: struct {
-    #as using mac: Print_Style;
+mac_address_print_style := Print_Style.{
+    default_format_int.base = 16,
+    default_format_int.minimum_digits = 2,
 
-    mac.default_format_int.base = 16;
-    mac.default_format_int.minimum_digits = 2;
-
-    mac.default_format_array.separator = ":";
-    mac.default_format_array.begin_string = "";
-    mac.default_format_array.end_string = "";
-}
+    default_format_array.separator = ":",
+    default_format_array.begin_string = "",
+    default_format_array.end_string = "",
+};
 
 I8254x_Registers :: struct {
     start: void;
@@ -798,6 +796,8 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
     desc.length = cast(u16) packet.length;
     desc.command = .RS__report_status | .IFCS__insert_fcs | .EOP__end_of_packet;
 
+    barrier();
+
     nic.tx_queue_tail += 1;
     nic.TDT__transmit_descriptor_tail = nic.tx_queue_tail;
 
@@ -1170,6 +1170,8 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     set(*nvme.CC__controller_config, .IOSQES__io_submission_entry_size, 6);
     set(*nvme.CC__controller_config, .IOCQES__io_completion_entry_size, 4);
 
+    barrier();
+
     set(*nvme.CC__controller_config, .EN__enable, 1);
 
     if Timeout_Block(#code {
@@ -1196,6 +1198,7 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
 
     SQ0TDBL__submission_queue_0_tail_doorbell = admin_sq_tail;
 
+    barrier();
     Timeout((admin_cq[admin_cq_head].STATUS__status & 1) != start_phase);
 
     status := admin_cq[admin_cq_head].STATUS__status >> 1;
@@ -1206,6 +1209,7 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
     admin_cq_head += 1;
     if admin_cq_head == queue_size then admin_cq_head = 0;
 
+    barrier();
     CQ0HDBL__completion_queue_0_head_doorbell = admin_cq_head;
 }
 
@@ -1222,6 +1226,7 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
     sq_tail_doorbell += 2 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
     cast(*u32, sq_tail_doorbell).* = io_sq_tail;
 
+    barrier();
     Timeout((io_cq[io_cq_head].STATUS__status & 1) != start_phase);
 
     status := io_cq[io_cq_head].STATUS__status >> 1;
@@ -1234,6 +1239,8 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
 
     cq_head_doorbell := *doorbell_base;
     cq_head_doorbell += 3 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
+
+    barrier();
     cast(*u32, cq_head_doorbell).* = io_cq_head;
 }
 
@@ -1510,6 +1517,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         return;
     }
 
+    barrier();
     assert(!(controller.port.CI__command_issue & 1));
     controller.port.CI__command_issue |= 1;
 
