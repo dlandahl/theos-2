@@ -253,7 +253,7 @@ startup_application_processors :: () {
         // Todo: This disables interrupts, which is silly because the lock will be released on a different core.
         acquire(*ap_startup_spinlock);
 
-        stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + 0x1_0000;
+        stack := alloc_block(*kernel_globals.physical_block_allocator, 0x8_0000) + 0x8_0000;
         ap_startup_data.stack = stack + DIRECT_MAPPING_BASE;
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
@@ -298,6 +298,7 @@ ap_entry_point :: () #c_call {
 }
 
 get_current_core :: inline () -> *X64_Core #no_context {
+    // Todo: it would be better to use gs-relative loads of fields of X64_Core, since the returned core pointer becomes stale when load-balancing occurs. We could always disable preemption before calling this function, but that seems strictly worse in any case where an atomic gs-relative read/write/add/sub will work. Preemption is currently not being disabled in many places in the code where this is called, but load-balancing is not implemented yet, so that code is correct as it stands.
     core: *X64_Core;
 
     #asm FSGSBASE {
@@ -306,6 +307,11 @@ get_current_core :: inline () -> *X64_Core #no_context {
 
     return core;
 }
+
+gs_relative_read  :: (offset: int) -> u64 #foreign Assembly;
+gs_relative_write :: (offset: int) -> u64 #foreign Assembly;
+gs_relative_inc   :: (offset: int) -> u64 #foreign Assembly;
+gs_relative_dec   :: (offset: int) -> u64 #foreign Assembly;
 
 
 ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {

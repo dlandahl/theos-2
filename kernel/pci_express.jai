@@ -1260,6 +1260,7 @@ Ahci_Controller :: struct {
 #program_export
 ahci_interrupt :: (data: *void) {
     write_string("Handling AHCI Interrupt.\n");
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, success: bool {

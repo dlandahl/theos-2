@@ -514,7 +514,8 @@ initialize_tsc :: () {
 
     if ecx & (1 << 24) {
         log("TSC_DEADLINE Supported.");
-        kernel_globals.tsc_deadline_support = true;
+        // TSC Deadline seems to be broken on QEMU on the laptop. Todo.
+        // kernel_globals.tsc_deadline_support = true;
     }
 
     kernel_globals.tsc_frequency = calibrate_tsc();

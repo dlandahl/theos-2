@@ -43,9 +43,10 @@ Scheduler :: struct {
     last_task_switch_timestamp: Apollo_Time;
 }
 
-lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags {
+lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags, *Scheduler {
     // We need to dereference on_core to lock a task, but it can be stale by the time we
     // get the lock. In practice it should almost always work the first time.
+    assert(task.on_core != null);
 
     while true {
         core := task.on_core;
@@ -53,13 +54,18 @@ lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags {
         flags := acquire(*core.scheduler.spinlock);
 
         if task.on_core == core {
-            return flags;
+            return flags, *core.scheduler;
         }
 
         release(*core.scheduler.spinlock, flags);
     }
 
-    return 0;
+    return 0, null;
+}
+
+get_current_task :: () -> *Task_Info #no_context {
+    offset := offset_of(X64_Core, "scheduler.current_task");
+    return cast(*Task_Info)gs_relative_read(offset);
 }
 
 allocate_task_info :: () -> *Task_Info {
@@ -79,14 +85,13 @@ core_begin_multitasking :: () {
     core := get_current_core();
     scheduler := *core.scheduler;
 
-    flags := acquire(*scheduler.spinlock);
-
     queue_reserve(*scheduler.waiting_to_run, 256);
 
     scheduler.current_task = allocate_task_info();
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
     scheduler.current_task._context = *context;
     scheduler.current_task.name = "Idle";
+    scheduler.current_task.on_core = core;
     scheduler.idle_task = scheduler.current_task;
 
     if core.id == 0 {
@@ -94,23 +99,19 @@ core_begin_multitasking :: () {
 
         idle :: () {
             while true {
-                #asm { hlt; }
+                #asm { sti; hlt; }
                 schedule_tasks();
             }
         }
 
         scheduler.idle_task = create_task(idle, 0x2000, name = "Idle");
+        scheduler.idle_task.on_core = core;
         scheduler.current_task.name = "Kernel Main";
     }
 
-    release(*scheduler.spinlock, flags);
-
     core.online = true;
 
-
-
     // Enable scheduling clock - either LAPIC or preferably TSC Deadline.
-
     lapic_timer: Apic_Lvt_Timer;
 
     if kernel_globals.tsc_deadline_support {
@@ -144,6 +145,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
 }
 
 create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "") -> *Task_Info {
+
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
@@ -187,10 +189,9 @@ pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
-    core := get_current_core();
-    scheduler := *core.scheduler;
 
-    Scoped_Acquire(*scheduler.spinlock);
+    current := get_current_task();
+    flags, scheduler := lock_scheduler_for_task(current);
 
     time_now := get_monotonic_system_time();
 
@@ -209,10 +210,10 @@ schedule_tasks :: () {
         }
     }
 
-    current := scheduler.current_task;
     next := pick_next_task_to_run(scheduler);
 
     if next == current {
+        release(*scheduler.spinlock, flags);
         return;
     }
 
@@ -223,11 +224,14 @@ schedule_tasks :: () {
     current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
     scheduler.last_task_switch_timestamp = time_now;
 
+    core := get_current_core();
     core.task_state_segment.rsp[0] = next.kernel_stack;
     scheduler.current_task = next;
 
     context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
     context_switch(current, next);
+
+    release(*scheduler.spinlock, flags);
 }
 
 new_task_start :: () #no_context {
@@ -239,16 +243,15 @@ new_task_start :: () #no_context {
 
         release(*core.scheduler.spinlock, 0);
 
-        task := core.scheduler.current_task;
+        task := get_current_task();
         task._context = *context;
 
         task.entry_point();
 
         while true {
-            schedule_tasks();
+            // Todo: remove the task from the scheduler properly
+            yield_execution();
         }
-
-        // Todo: remove the task from the scheduler properly
     }
 }
 
@@ -289,56 +292,51 @@ sleep :: (time: Apollo_Time) {
 }
 
 sleep_until :: (time: Apollo_Time) {
+    task := get_current_task();
+    flags, scheduler := lock_scheduler_for_task(task);
 
-    scheduler := *get_current_core().scheduler;
-    task := scheduler.current_task;
+    task.sleeping = true;
+    task.sleep_until = time;
 
-    {
-        Scoped_Acquire(*scheduler.spinlock);
+    queue := scheduler.sleep_queue;
+    previous: *Task_Info;
 
-        task.sleeping = true;
-        task.sleep_until = time;
+    if !queue {
+        scheduler.sleep_queue = task;
+        task.next_sleeping = null;
+    } else while (true) {
 
-        queue := scheduler.sleep_queue;
-        previous: *Task_Info;
-
-        if !queue {
-            scheduler.sleep_queue = task;
-            task.next_sleeping = null;
-        } else while (true) {
-
-            if !queue || queue.sleep_until > time {
-                if queue == scheduler.sleep_queue {
-                    scheduler.sleep_queue = task;
-                }
-
-                if previous previous.next_sleeping = task;
-                task.next_sleeping = queue;
-
-                break;
+        if !queue || queue.sleep_until > time {
+            if queue == scheduler.sleep_queue {
+                scheduler.sleep_queue = task;
             }
 
-            previous = queue;
-            queue = queue.next_sleeping;
+            if previous previous.next_sleeping = task;
+            task.next_sleeping = queue;
+
+            break;
         }
+
+        previous = queue;
+        queue = queue.next_sleeping;
     }
 
+    release(*scheduler.spinlock, flags);
     yield_execution();
 }
 
 
 
 Mutex :: struct {
-    spinlock: Recursive_Spinlock; // Recursive to support trylock.
+    spinlock: Spinlock;
     held_by: *Task_Info;
     queue: Queue(*Task_Info);
 }
 
 acquire_mutex :: (mutex: *Mutex) {
-    core := get_current_core();
-    current_task := core.scheduler.current_task;
-
     flags := acquire(*mutex.spinlock);
+
+    current_task := get_current_task();
 
     if mutex.held_by == null {
         assert(queue_is_empty(mutex.queue));
@@ -357,10 +355,10 @@ acquire_mutex :: (mutex: *Mutex) {
 }
 
 release_mutex :: (mutex: *Mutex) {
-    core := get_current_core();
-    current_task := core.scheduler.current_task;
 
     flags := acquire(*mutex.spinlock);
+
+    current_task := get_current_task();
 
     assert(mutex.held_by == current_task);
     mutex.held_by = null;
@@ -388,12 +386,15 @@ release_mutex :: (mutex: *Mutex) {
 }
 
 trylock_mutex :: (mutex: *Mutex) -> bool {
-    core := get_current_core();
-
     Scoped_Acquire(*mutex.spinlock);
 
+    task := get_current_task();
+
     if mutex.held_by == null {
-        acquire_mutex(mutex);
+        assert(queue_is_empty(mutex.queue));
+
+        mutex.held_by = get_current_task();
+
         return true;
     }
 
@@ -553,8 +554,8 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 // This is needed by the syscall handler implemented in assembly in first.jai
 #program_export
 get_kernel_stack :: () -> *void #c_call {
-    core := get_current_core();
-    return core.scheduler.current_task.kernel_stack;
+    task := get_current_task();
+    return task.kernel_stack;
 }
 
 enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
@@ -562,10 +563,12 @@ enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Fla
 
 
 task_do_work :: () {
-    core := get_current_core();
+    task := get_current_task();
 
-    user_stack := core.scheduler.current_task.user_stack;
+    user_stack := task.user_stack;
     entry_point := task_do_work_in_ring_3;
+
+    log("Task % entering user mode.", task.name);
 
     enter_user_mode(entry_point, user_stack);
 }
@@ -599,7 +602,7 @@ task_do_work_in_ring_3 :: () #c_call {
                 #asm { pause; }
             }
 
-            if trylock_from_user_mode(*ring_3_work_mutex) {
+            if core.id != 0 if trylock_from_user_mode(*ring_3_work_mutex) {
                 print_from_user_mode("Thread \"%\" got the mutex - holding for one second.\n", thread.name);
                 sleep_from_user_mode(seconds_to_apollo(1));
                 unlock_from_user_mode(*ring_3_work_mutex);

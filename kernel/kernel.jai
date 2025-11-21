@@ -162,20 +162,20 @@ kernel_entry :: () #no_context {
     large_page_allocator.lru_least = LRU_TAIL;
     large_page_allocator.lru_most  = LRU_TAIL;
 
-    // Todo: improve this allocator.
+    // Todo: hardcoded.
 
     for region: memory_map {
         if !it_index continue;
         region_size := region.pages * 4096;
 
-        if region_size >= 0x100_0000 && region.type == .FREE {
+        if region_size >= 0x200_0000 && region.type == .FREE {
             first_page := region.address / 0x20_0000;
 
-            for first_page..first_page+16 {
+            for first_page..first_page+32 {
                 large_pages[it].state = .RESERVED;
             }
 
-            init_block_allocator(*physical_block_allocator, region.address, 0x100_0000, 0x10);
+            init_block_allocator(*physical_block_allocator, region.address, 0x200_0000, 0x10);
             break;
         }
     }
@@ -249,6 +249,8 @@ kernel_entry :: () #no_context {
 
         initialize_tsc();
 
+        assert(get_rflags() & .IF__interrupt == 0); // We don't want interrupts to be enabled while we're initializing multitasking.
+
         core_begin_multitasking();
 
         // Todo: system time alone is too low entropy for OS random number generation.
@@ -288,9 +290,7 @@ kernel_entry :: () #no_context {
         thread_index := 1;
 
         for *core: processor_cores {
-            if core.id == 0 continue;
-
-            for 1..4 {
+            for 1..3 {
                 name := tprint("Do Work %:%", core.id, thread_index);
                 task := create_task(task_do_work, kernel_stack_size = 0x8_0000, user_stack_size = 0x8_0000, name = name);
                 put_task_on_core(task, core);
@@ -299,11 +299,9 @@ kernel_entry :: () #no_context {
             }
         }
 
-        #asm { sti; }
-
         while true {
             schedule_tasks();
-            #asm { hlt; }
+            #asm { sti; hlt; }
         }
     }
 }
@@ -544,7 +542,7 @@ init_processor_core :: () {
 }
 
 bluescreen :: (loc := #caller_location) #no_context {
-    #asm { cli; }
+    disable_interrupts();
 
     write_string("\nBluescreen!\n");
 
@@ -1009,6 +1007,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
     }
 
     // If we get here there isn't a large enough free block
+    write_string("Block allocator out of memory.");
     bluescreen(loc);
     return 0, .{};
 }
@@ -1183,13 +1182,13 @@ fetch_add :: (value: *int, add: int) -> int {
 // Todo: should programatically detect when these don't get paired up correctly.
 
 preempt_disable :: () #no_context {
-    core := get_current_core();
-    core.preempt_disable_count += 1;
+    offset := offset_of(X64_Core, "preempt_disable_count");
+    gs_relative_inc(offset);
 }
 
 preempt_restore :: () #no_context {
-    core := get_current_core();
-    core.preempt_disable_count -= 1;
+    offset := offset_of(X64_Core, "preempt_disable_count");
+    gs_relative_dec(offset);
 }
 
 
@@ -1213,8 +1212,9 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
 Spinlock :: #type,distinct u32;
 
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
-    // Todo: for now, spinlocks disable all IRQs. Really, if the same spinlock will not be used
-    // from interrupt handlers, we only need to disable preemption.
+
+    // Todo: For now, spinlocks disable all IRQs. Really, if the same spinlock will not be used from interrupt handlers, we only need to disable preemption.
+    // Todo: Is it better to disable just before taking the lock and then restore in case we don't get it?
     flags := disable_interrupts();
 
     carry: u8 = 1;
@@ -1258,18 +1258,19 @@ Recursive_Spinlock :: struct {
 acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
     if !kernel_globals.bootstrap_core_initialized {
         // It's too early in boot for recursive spinlocks to work.
-        // Just return to allow e.g. serial port to be accessed even while only the bootstrap core is running.
+        // Just return to allow e.g. serial port to be accessed even while only the bootstrap core is running. We could make this work by manually giving the lock to the bootstrap core, which would allow holding a spinlock accross the core initialization boundary. But we don't use this lock that way so I won't add code here to support it.
         return 0;
     }
 
+    flags := disable_interrupts(); // Seems kind of messy. To prevent load balancing causing "core" to become stale.
     core := get_current_core();
 
     if lock.lock && lock.held_by_core == core.id {
         lock.recursion_count += 1;
-        return get_rflags();
+        return 0;
     }
 
-    flags := acquire(*lock.lock);
+    acquire(*lock.lock);
 
     lock.held_by_core = core.id;
     return flags;
@@ -1281,6 +1282,7 @@ release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
         return;
     }
 
+    disable_interrupts();
     core := get_current_core();
 
     if lock.held_by_core != core.id bluescreen();
@@ -1637,4 +1639,13 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
 
 bit_cast :: (object: $T, $target_type: Type) -> target_type {
     return (.*) cast(*target_type) *object;
+}
+
+offset_of :: ($T: Type, $member: string) -> s64 #no_context {
+    BODY :: #string DONE
+    dummy: T = ---;
+    return cast(*void) (*dummy.%) - cast(*void) *dummy;
+    DONE
+
+    #insert #run sprint(BODY, member);
 }

@@ -470,6 +470,36 @@ init_segment_registers:
     mov ss, ax
     ret
 
+
+global gs_relative_read
+global gs_relative_write
+global gs_relative_inc
+global gs_relative_dec
+
+align 0x10;
+gs_relative_read:
+    mov rax, rdi
+    mov rax, [gs:rax]
+    ret
+
+align 0x10;
+gs_relative_write:
+    mov rax, rdi
+    mov qword [gs:rax], rsi
+    ret
+
+align 0x10;
+gs_relative_inc:
+    mov rax, rdi
+    inc qword [gs:rax]
+    ret
+
+align 0x10;
+gs_relative_dec:
+    mov rax, rdi
+    dec qword [gs:rax]
+    ret
+
 END;
 
 
