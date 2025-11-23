@@ -333,73 +333,121 @@ Mutex :: struct {
     queue: Queue(*Task_Info);
 }
 
-acquire_mutex :: (mutex: *Mutex) {
-    flags := acquire(*mutex.spinlock);
+acquire_mutex :: (using mutex: *Mutex) {
+    flags := acquire(*spinlock);
+    task := get_current_task();
 
-    current_task := get_current_task();
+    if held_by == null {
+        assert(queue_is_empty(queue));
 
-    if mutex.held_by == null {
-        assert(queue_is_empty(mutex.queue));
+        held_by = task;
 
-        mutex.held_by = current_task;
-
-        release(*mutex.spinlock, flags);
+        release(*spinlock, flags);
         return;
     }
 
-    queue_push(*mutex.queue, current_task);
-    current_task.waiting_for_mutex = true;
+    queue_push(*queue, task);
+    task.waiting_for_mutex = true;
 
-    release(*mutex.spinlock, flags);
+    release(*spinlock, flags);
     yield_execution();
 }
 
-release_mutex :: (mutex: *Mutex) {
+release_mutex :: (using mutex: *Mutex) {
+    flags := acquire(*spinlock);
+    task := get_current_task();
 
-    flags := acquire(*mutex.spinlock);
+    assert(held_by == task);
+    held_by = null;
 
-    current_task := get_current_task();
-
-    assert(mutex.held_by == current_task);
-    mutex.held_by = null;
-
-    if queue_is_empty(mutex.queue) {
-        release(*mutex.spinlock, flags);
+    if queue_is_empty(queue) {
+        release(*spinlock, flags);
         return;
     }
 
-    next := queue_pop(*mutex.queue);
-    mutex.held_by = next;
-
-    release(*mutex.spinlock, flags);
+    next := queue_pop(*queue);
+    held_by = next;
+    release(*spinlock, flags);
 
     flags = lock_scheduler_for_task(next);
 
     assert(next.waiting_for_mutex);
     next.waiting_for_mutex = false;
 
-    queue_push(*next.on_core.scheduler.waiting_to_run, next);
-
-    release(*next.on_core.scheduler.spinlock, flags);
+    scheduler := *next.on_core.scheduler;
+    queue_push(*scheduler.waiting_to_run, next);
+    release(*scheduler.spinlock, flags);
 
     // Todo: IPI to wake/preempt the other core.
 }
 
-trylock_mutex :: (mutex: *Mutex) -> bool {
-    Scoped_Acquire(*mutex.spinlock);
+trylock_mutex :: (using mutex: *Mutex) -> bool {
+    Scoped_Acquire(*spinlock);
 
     task := get_current_task();
 
-    if mutex.held_by == null {
-        assert(queue_is_empty(mutex.queue));
+    if held_by == null {
+        assert(queue_is_empty(queue));
 
-        mutex.held_by = get_current_task();
+        held_by = get_current_task();
 
         return true;
     }
 
     return false;
 }
+
+
+
+Semaphore :: struct {
+    spinlock: Spinlock;
+    counter: int;
+    queue: Queue(*Task_Info);
+}
+
+wait_for :: (using sema: *Semaphore) {
+    flags := acquire(*spinlock);
+    task := get_current_task();
+
+    if counter > 0 {
+        counter -= 1;
+        release(*spinlock, flags);
+        return;
+    }
+
+    // The flag is only used to check if the current task is still runnable when yielding execution. Therefore we can reuse the one from mutex.
+    // This sort of thing will be cleaned up soon when scheduling queues get refactored.
+    task.waiting_for_mutex = true;
+
+    queue_push(*queue, task);
+    release(*spinlock, flags);
+
+    yield_execution();
+
+    // With the current implementation, we know it's our turn if we are woken up. This will change in the future as the scheduler and thread primitives get more features, such as timeout etc.
+}
+
+signal :: (using sema: *Semaphore) {
+    flags := acquire(*spinlock);
+
+    if queue_is_empty(queue) {
+        counter += 1;
+        release(*spinlock, flags);
+        return;
+    }
+
+    next := queue_pop(*queue);
+    release(*spinlock, flags);
+
+    flags = lock_scheduler_for_task(next);
+
+    next.waiting_for_mutex = false;
+
+    scheduler := *next.on_core.scheduler;
+    queue_push(*scheduler.waiting_to_run, next);
+    release(*scheduler.spinlock, flags);
+}
+
 
 
 // In the future we should generate these using metaprogramming, from a table.

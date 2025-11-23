@@ -267,6 +267,7 @@ inc32 :: (counter: *i128) {
 
 galois_multiply :: (x: i128, y: i128) -> i128 {
     /*
+
       Todo: According to NIST document this algorithm can be sped up a lot.
 
       "Multiplication in a binary field can use a variety of time-memory tradeoffs. It can be implemented

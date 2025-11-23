@@ -38,6 +38,8 @@ Boot_Data :: struct {
 
     BASE_ADDRESS :: 0x10_0000;
 
+    trace_buffers: [4] u64;
+
     page_directories_used: int;
 
     framebuffer: Framebuffer;

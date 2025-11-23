@@ -149,7 +149,7 @@ initialize_apic :: () {
 
     init_processor_core();
 
-    kernel_globals.bootstrap_core_initialized = true;
+    kernel_globals.multiprocessing_initialized = true;
 
     #insert #run,host -> string {
         builder: String_Builder;
@@ -298,7 +298,6 @@ ap_entry_point :: () #c_call {
 }
 
 get_current_core :: inline () -> *X64_Core #no_context {
-    // Todo: it would be better to use gs-relative loads of fields of X64_Core, since the returned core pointer becomes stale when load-balancing occurs. We could always disable preemption before calling this function, but that seems strictly worse in any case where an atomic gs-relative read/write/add/sub will work. Preemption is currently not being disabled in many places in the code where this is called, but load-balancing is not implemented yet, so that code is correct as it stands.
     core: *X64_Core;
 
     #asm FSGSBASE {
@@ -342,7 +341,7 @@ DEFAULT_ISA_FAULT_HANDLER :: #string END
 #program_export
 default_isa_fault_handler_%1 :: (stack: *void) #c_call {
     core := get_current_core();
-    Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+    Scoped_Acquire(*kernel_globals.text_output_spinlock);
 
     write_string("Something bad happened (%1) on core ");
     write_number(core.id);
@@ -358,7 +357,7 @@ END;
 debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
     push_context {
 
-        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+        Scoped_Acquire(*kernel_globals.text_output_spinlock);
 
         core := get_current_core();
         task := core.scheduler.current_task;
@@ -398,7 +397,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
         context.print_style.default_format_int.base = 16;
 
-        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+        Scoped_Acquire(*kernel_globals.text_output_spinlock);
 
         print("\nBreakpoint hit. Context:\n%", stack.*);
     }
@@ -410,7 +409,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
 page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     push_context,defer_pop;
 
-    Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+    Scoped_Acquire(*kernel_globals.text_output_spinlock);
 
     core := get_current_core();
     task := core.scheduler.current_task;
@@ -448,7 +447,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = true)) #c_call {
     push_context {
-        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+        Scoped_Acquire(*kernel_globals.text_output_spinlock);
 
         core := get_current_core();
         task := core.scheduler.current_task;
@@ -881,8 +880,8 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_get_thread_id :: () -> uacpi_thread_id #c_call {
-    core := get_current_core();
-    return xx core.scheduler.current_task.id;
+    task := get_current_task();
+    return xx task.id;
 }
 
 #program_export uacpi_kernel_acquire_mutex :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_status #c_call {

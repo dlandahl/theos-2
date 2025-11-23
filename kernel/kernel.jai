@@ -6,6 +6,7 @@
 #import "Hash_Table";
 #import "String";
 #import "Random";
+#import "Hash";
 
 #import "Bitfield"(true);
 set :: bitfield_set;
@@ -23,6 +24,9 @@ get :: bitfield_get;
 #load "pci_express.jai";
 #load "multitasking.jai";
 #load "time.jai";
+
+TRACE_INCLUDE_RUNTIME_CODE :: true;
+#load "trace.jai";
 
 X64_Core :: struct {
     task_state_segment: Tss_With_Iopb #align 0x80;
@@ -50,6 +54,8 @@ space_for_processor_cores: [1024] X64_Core;
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
 
+    trace_state: Trace_State;
+
     large_page_allocator: Large_Page_Allocator;
 
     physical_page_pool: Physical_4k_Page_Pool(1024);
@@ -71,7 +77,10 @@ Kernel_Globals :: struct {
     task_info_storage_spinlock: Spinlock;
 
     processor_cores: [] X64_Core;
-    bootstrap_core_initialized: bool;
+
+    // This flag means that we can call "get_current_core" and that we can access the processor_cores array.
+    // It does not mean that any cores besides the bootstrap processor are ready yet. For that, check the "online" bit in the corresponding X64_Core struct.
+    multiprocessing_initialized: bool;
 
     apic: *void;
     io_apic: *u32;
@@ -96,13 +105,15 @@ Kernel_Globals :: struct {
 
         font: Netpbm_Image;
 
-        spinlock: Recursive_Spinlock;
+        spinlock: Spinlock;
 
         font_loaded: bool;
     }
 
-    // Recursive, so that procedures that write to the serial port multiple times can have those writes grouped together, and not be interleaved with writes by other cores.
-    serial_port_spinlock: Recursive_Spinlock;
+    COM1: Serial_Port(0x3f8); // Used for writing to log files and the host console on VirtualBox and QEMU.
+    COM2: Serial_Port(0x2f8); // Used for writing trace data.
+
+    text_output_spinlock: Recursive_Spinlock; // Used to prevent multiple calls to write_string from different cores becoming interleaved, in cases where this makes the output harder to interpret.
 
     net: Network_Connection;
 
@@ -161,6 +172,9 @@ kernel_entry :: () #no_context {
     large_page_allocator.freelist = FREELIST_TAIL;
     large_page_allocator.lru_least = LRU_TAIL;
     large_page_allocator.lru_most  = LRU_TAIL;
+
+    // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
+    init_tracing();
 
     // Todo: hardcoded.
 
@@ -359,7 +373,7 @@ set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
  
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        flags := acquire(*kernel_globals.serial_port_spinlock);
+        flags := acquire(*kernel_globals.text_output_spinlock);
 
         write_string("Assertion failure");
         if message.count {
@@ -367,14 +381,14 @@ set_global_context_callbacks :: () #no_context {
         }
         write_string("\n");
 
-        release(*kernel_globals.serial_port_spinlock, flags);
+        release(*kernel_globals.text_output_spinlock, flags);
 
         bluescreen(location);
         return true;
     };
 
     kernel_default_logger = (message: string, data: *void, info: Log_Info) {
-        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+        Scoped_Acquire(*kernel_globals.text_output_spinlock);
 
         if context.log_category {
             write_string("[");
@@ -399,12 +413,21 @@ set_global_context_callbacks :: () #no_context {
                 return null;
             }
 
-            // Todo: handle resize
-            physical := alloc_block(*kernel_globals.physical_block_allocator, cast(u64) size);
+            is_resize := mode == .RESIZE && old_memory != null;
 
+            if is_resize {
+                physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
+                success := resize_block(*kernel_globals.physical_block_allocator, physical, cast(u64) size);
+
+                if success {
+                    return old_memory;
+                }
+            }
+
+            physical := alloc_block(*kernel_globals.physical_block_allocator, cast(u64) size);
             virtual := cast(*void) physical + DIRECT_MAPPING_BASE;
 
-            if mode == .RESIZE && old_memory != null {
+            if is_resize {
                 memcpy(virtual, old_memory, old_size);
 
                 physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
@@ -424,7 +447,7 @@ set_global_context_callbacks :: () #no_context {
         }
 
         if mode == .CAPS {
-            return cast(*void) Allocator_Caps.FREE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR;
+            return cast(*void) Allocator_Caps.FREE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR | .ACTUALLY_RESIZE;
         }
 
         return null;
@@ -566,7 +589,7 @@ bluescreen :: (loc := #caller_location) #no_context {
         // the serial port spinlock, other CPU cores should still be able to
         // keep running.
 
-        lock := *kernel_globals.serial_port_spinlock;
+        lock := *kernel_globals.text_output_spinlock;
 
         if lock.lock && lock.held_by_core == core.id {
             lock.recursion_count = 0;
@@ -968,7 +991,27 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, loc := #caller_location) -> address: u64, Block_Desc #no_context {
+find_block :: (using allocator: *Block_Allocator, address: u64) -> *Block_Desc, index: int {
+    assert(spinlock != 0); // Caller should take the lock.
+
+    // Find the block corresponding to that address using linear search
+    looking_for := address - allocator.base_address;
+
+    m := -1;
+
+    for blocks {
+        if it.base == looking_for {
+            m = it_index;
+            break;
+        }
+    }
+
+    if m == -1 return null, m;
+
+    return *blocks[m], m;
+}
+
+alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, loc := #caller_location) -> address: u64 #no_context {
     Scoped_Acquire(*spinlock);
 
     bytes_wanted: u64;
@@ -987,7 +1030,8 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
             it.size = bytes_wanted;
 
             if remaining_bytes != 0 {
-                // We didn't use the whole block, make a new one and move the others over
+                // We didn't use the whole block, make a new one and move the others over.
+
                 if blocks.count >= max_block_descriptors-1 {
                     bluescreen(loc);
                 }
@@ -1002,40 +1046,71 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
                 blocks[it_index+1].used = false;
             }
 
-            return cast(u64, base_address + it.base), it.*;
+            return cast(u64, base_address + it.base);
         }
     }
 
-    // If we get here there isn't a large enough free block
+    // If we get here there isn't a large enough free block.
+
     write_string("Block allocator out of memory.");
     bluescreen(loc);
-    return 0, .{};
+    return 0;
+}
+
+resize_block :: (using allocator: *Block_Allocator, address: u64, new_size: u64) -> success: bool {
+    Scoped_Acquire(*spinlock);
+
+    block, m := find_block(allocator, address);
+
+    if !block || !block.used {
+        print_stack_trace(context.stack_trace);
+        bluescreen();
+        return false;
+    }
+
+    if m == blocks.count-1 {
+        return false;
+    }
+
+    following_block := *blocks[m+1];
+
+    if following_block.used {
+        return false;
+    }
+
+    additional_bytes_needed := new_size - block.size;
+
+    // We only need to check one following block, because free blocks always get coalesced.
+
+    if following_block.size < additional_bytes_needed {
+        return false;
+    }
+
+    // There's a free block trailing the block we're trying to grow, and it's big enough to allow the resize operation.
+
+    block.size += additional_bytes_needed;
+    following_block.size -= additional_bytes_needed;
+    following_block.base += additional_bytes_needed;
+
+    if following_block.size == 0 {
+        // Remove the descriptor if the whole following block was used up by the realloc.
+
+        for m+2 .. blocks.count-1 {
+            blocks[it-1] = blocks[it];
+        }
+
+        blocks.count -= 1;
+    }
+
+    return true;
 }
 
 free_block :: (using allocator: *Block_Allocator, address: u64) {
     Scoped_Acquire(*spinlock);
 
-    // Find the block corresponding to that address using linear search
-    looking_for := address - allocator.base_address;
+    block, m := find_block(allocator, address);
 
-    m := -1;
-
-    for blocks {
-        if it.base == looking_for {
-            m = it_index;
-            break;
-        }
-    }
-
-    if m == -1 {
-        print_stack_trace(context.stack_trace);
-        bluescreen();
-        return;
-    }
-
-    block := *blocks[m];
-
-    if !block.used {
+    if !block || !block.used {
         print_stack_trace(context.stack_trace);
         bluescreen();
         return;
@@ -1126,15 +1201,18 @@ find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
 
 
 
-serial_out :: (data: string) #no_context {
-    COM1 :: 0x3f8;
+Serial_Port :: struct (base_address: u16) {
+    spinlock: Spinlock;
+}
 
-    Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
+
+    Scoped_Acquire(*spinlock);
 
     for data {
         for 1..10_0000 {
             status: u8;
-            port := COM1 + 5;
+            port := base_address + 5;
 
             #asm {
                 status === a;
@@ -1148,7 +1226,7 @@ serial_out :: (data: string) #no_context {
         }
 
         byte := it;
-        port := COM1;
+        port := base_address;
 
         #asm {
             byte === a;
@@ -1159,7 +1237,9 @@ serial_out :: (data: string) #no_context {
 }
 
 kernel_write_string :: (text: string) #no_context {
-    serial_out(text);
+    Scoped_Acquire(*kernel_globals.text_output_spinlock);
+
+    serial_out(text, *kernel_globals.COM1);
     draw_text(text);
 }
 
@@ -1209,6 +1289,10 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
 
 
 
+
+// https://lwn.net/Articles/590243/
+// https://pdos.csail.mit.edu/6.828/2019/lec/faq-locks.txt
+
 Spinlock :: #type,distinct u32;
 
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
@@ -1248,50 +1332,57 @@ Scoped_Acquire :: (lock: *Spinlock) #expand {
 
 
 
+// Todo: Maybe it would be better to get rid of this, and rewrite the code to not require recursive spinlocks.
+
 Recursive_Spinlock :: struct {
     lock: Spinlock;
 
-    held_by_core: int;
+    held_by_core: int = -1;
     recursion_count: int;
 }
 
 acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
-    if !kernel_globals.bootstrap_core_initialized {
-        // It's too early in boot for recursive spinlocks to work.
-        // Just return to allow e.g. serial port to be accessed even while only the bootstrap core is running. We could make this work by manually giving the lock to the bootstrap core, which would allow holding a spinlock accross the core initialization boundary. But we don't use this lock that way so I won't add code here to support it.
-        return 0;
+
+    flags := disable_interrupts();
+    core_id := 0;
+
+    if kernel_globals.multiprocessing_initialized {
+        core := get_current_core();
+        core_id = core.id;
+    } else {
+        // If it's too early in boot for multiprocessing to be enabled, core_id can remain zero to indicate the bootstrap core.
     }
 
-    flags := disable_interrupts(); // Seems kind of messy. To prevent load balancing causing "core" to become stale.
-    core := get_current_core();
-
-    if lock.lock && lock.held_by_core == core.id {
+    if lock.lock && lock.held_by_core == core_id {
         lock.recursion_count += 1;
         return 0;
     }
 
     acquire(*lock.lock);
+    lock.held_by_core = core_id;
 
-    lock.held_by_core = core.id;
     return flags;
 }
 
 release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
-    if !kernel_globals.bootstrap_core_initialized {
-        // See comment above
-        return;
+
+    core_id := 0;
+
+    if kernel_globals.multiprocessing_initialized {
+        core := get_current_core();
+        core_id = core.id;
+    } else {
+        // If it's too early in boot for multiprocessing to be enabled, core_id can remain zero to indicate the bootstrap core.
     }
 
-    disable_interrupts();
-    core := get_current_core();
-
-    if lock.held_by_core != core.id bluescreen();
+    if lock.held_by_core != core_id bluescreen();
 
     if lock.recursion_count > 0 {
         lock.recursion_count -= 1;
         return;
     }
 
+    lock.held_by_core = -1; // Prevent a race due to acquiring the lock, then setting held_by_core immediately afterwards.
     release(*lock.lock, flags);
 }
 

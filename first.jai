@@ -478,26 +478,22 @@ global gs_relative_dec
 
 align 0x10;
 gs_relative_read:
-    mov rax, rdi
-    mov rax, [gs:rax]
+    mov rax, [gs:rdi]
     ret
 
 align 0x10;
 gs_relative_write:
-    mov rax, rdi
-    mov qword [gs:rax], rsi
+    mov [gs:rdi], rsi
     ret
 
 align 0x10;
 gs_relative_inc:
-    mov rax, rdi
-    inc qword [gs:rax]
+    inc qword [gs:rdi]
     ret
 
 align 0x10;
 gs_relative_dec:
-    mov rax, rdi
-    dec qword [gs:rax]
+    dec qword [gs:rdi]
     ret
 
 END;
