@@ -174,29 +174,18 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
     return new_task;
 }
 
-pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
-    if !queue_is_empty(waiting_to_run) {
-        return queue_pop(*waiting_to_run);
-    }
-
-    if !current_task.sleeping && !current_task.waiting_for_mutex {
-        return current_task;
-    }
-
-    return idle_task;
-}
-
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
-
     current := get_current_task();
-    flags, scheduler := lock_scheduler_for_task(current);
+    scheduler := *current.on_core.scheduler;
+
+    flags := acquire(*scheduler.spinlock);
 
     time_now := get_monotonic_system_time();
 
     {
-        // Wake sleeping tasks
+        // Wake sleeping tasks.
         using scheduler;
 
         while sleep_queue && sleep_queue.sleep_until < time_now {
@@ -210,29 +199,43 @@ schedule_tasks :: () {
         }
     }
 
-    next := pick_next_task_to_run(scheduler);
+    next: *Task_Info;
+    current_task_wants_to_run := !current.sleeping && !current.waiting_for_mutex && current != scheduler.idle_task;
+
+    {
+        // Pick next task to run.
+        if !queue_is_empty(scheduler.waiting_to_run) {
+            next = queue_pop(*scheduler.waiting_to_run);
+        }
+
+        else if current_task_wants_to_run {
+            next = current;
+        }
+
+        else next = scheduler.idle_task;
+    }
 
     if next == current {
         release(*scheduler.spinlock, flags);
         return;
     }
 
-    if !current.sleeping && !current.waiting_for_mutex && current != scheduler.idle_task {
+    if current_task_wants_to_run {
         queue_push(*scheduler.waiting_to_run, current);
     }
 
     current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
-    scheduler.last_task_switch_timestamp = time_now;
+    current.on_core.task_state_segment.rsp[0] = next.kernel_stack;
 
-    core := get_current_core();
-    core.task_state_segment.rsp[0] = next.kernel_stack;
+    scheduler.last_task_switch_timestamp = time_now;
     scheduler.current_task = next;
 
-    context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
     context_switch(current, next);
 
     release(*scheduler.spinlock, flags);
 }
+
+context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
 
 new_task_start :: () #no_context {
     // When booting a new kernel thread, we could go straight to its entry point, but we always
@@ -407,13 +410,14 @@ Semaphore :: struct {
 
 wait_for :: (using sema: *Semaphore) {
     flags := acquire(*spinlock);
-    task := get_current_task();
 
     if counter > 0 {
         counter -= 1;
         release(*spinlock, flags);
         return;
     }
+
+    task := get_current_task();
 
     // The flag is only used to check if the current task is still runnable when yielding execution. Therefore we can reuse the one from mutex.
     // This sort of thing will be cleaned up soon when scheduling queues get refactored.
@@ -663,11 +667,6 @@ task_do_work_in_ring_3 :: () #c_call {
         }
     }
 }
-
-#program_export
-spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
-    write_string("Spurious...\n");
-} @InterruptRoutine
 
 
 

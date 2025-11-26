@@ -42,6 +42,8 @@ X64_Core :: struct {
     preempt_disable_count: int;
 
     online: bool; // The core has called core_begin_multitasking, so we can put threads on it.
+
+    mcs_node: MCS_Node;
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
@@ -563,6 +565,11 @@ init_processor_core :: () {
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
     }
 }
+
+#program_export
+spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
+    write_string("Spurious...\n");
+} @InterruptRoutine
 
 bluescreen :: (loc := #caller_location) #no_context {
     disable_interrupts();
@@ -1257,6 +1264,13 @@ fetch_add :: (value: *int, add: int) -> int {
     return add;
 }
 
+fetch_store :: (target: *$T, value: T) -> old_value: T #no_context {
+    #asm {
+        lock_xchg?T value, [target];
+    }
+    return value;
+}
+
 
 
 // Todo: should programatically detect when these don't get paired up correctly.
@@ -1288,17 +1302,64 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
 }
 
 
+// MCS lock based on https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf
+
+MCS_Node :: struct {
+    next: *MCS_Node;
+    blocked: bool;
+}
+
+MCS_Lock :: *MCS_Node;
+
+acquire :: (lock: *MCS_Lock) -> X64_Flags #no_context {
+    flags := disable_interrupts();
+
+    core := get_current_core();
+    my_node := *core.mcs_node;
+
+    my_node.next = null;
+    prev := fetch_store(lock, my_node);
+
+    if prev {
+        my_node.blocked = true;
+        prev.next = my_node;
+
+        while my_node.blocked {
+            #asm { pause; }
+        }
+    }
+
+    return flags;
+}
+
+release :: (lock: *MCS_Lock, flags: X64_Flags) #no_context {
+    defer restore_interrupts(flags);
+
+    core := get_current_core();
+    my_node := *core.mcs_node;
+
+    if !my_node.next {
+        if compare_and_swap(lock, my_node, null) {
+            return;
+        }
+
+        while !my_node.next {
+            #asm { pause; }
+        }
+    }
+
+    my_node.next.blocked = false;
+}
 
 
-// https://lwn.net/Articles/590243/
-// https://pdos.csail.mit.edu/6.828/2019/lec/faq-locks.txt
+
+// Todo: ticket system
 
 Spinlock :: #type,distinct u32;
 
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
 
     // Todo: For now, spinlocks disable all IRQs. Really, if the same spinlock will not be used from interrupt handlers, we only need to disable preemption.
-    // Todo: Is it better to disable just before taking the lock and then restore in case we don't get it?
     flags := disable_interrupts();
 
     carry: u8 = 1;
