@@ -1257,9 +1257,9 @@ barrier :: () #expand {
 
 
 
-fetch_add :: (value: *int, add: int) -> int {
+fetch_add :: (value: *$T, add: T) -> T #no_context {
     #asm {
-        lock_xadd [value], add;
+        lock_xadd?T [value], add;
     }
     return add;
 }
@@ -1309,9 +1309,9 @@ MCS_Node :: struct {
     blocked: bool;
 }
 
-MCS_Lock :: *MCS_Node;
+MCS_Spinlock :: *MCS_Node;
 
-acquire :: (lock: *MCS_Lock) -> X64_Flags #no_context {
+acquire :: (lock: *MCS_Spinlock) -> X64_Flags #no_context {
     flags := disable_interrupts();
 
     core := get_current_core();
@@ -1332,7 +1332,7 @@ acquire :: (lock: *MCS_Lock) -> X64_Flags #no_context {
     return flags;
 }
 
-release :: (lock: *MCS_Lock, flags: X64_Flags) #no_context {
+release :: (lock: *MCS_Spinlock, flags: X64_Flags) #no_context {
     defer restore_interrupts(flags);
 
     core := get_current_core();
@@ -1353,26 +1353,27 @@ release :: (lock: *MCS_Lock, flags: X64_Flags) #no_context {
 
 
 
-// Todo: ticket system
-
 Spinlock :: #type,distinct u32;
+
+is_held :: (lock: Spinlock) -> bool #no_context {
+    now_serving := cast(u16) (lock & 0xffff);
+    next_ticket := cast(u16) (lock >> 16);
+
+    return now_serving.* != next_ticket.*;
+}
 
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
 
     // Todo: For now, spinlocks disable all IRQs. Really, if the same spinlock will not be used from interrupt handlers, we only need to disable preemption.
     flags := disable_interrupts();
 
-    carry: u8 = 1;
+    now_serving := cast(*u16)lock;
+    next_ticket := cast(*u16)lock + 1;
 
-    while carry {
-        while lock.* {
-            #asm { pause; }
-        }
+    my_ticket := fetch_add(next_ticket, 1);
 
-        #asm {
-            lock_bts.32 [lock], 0;
-            setc carry;
-        }
+    while now_serving.* != my_ticket {
+        #asm { pause; }
     }
 
     return flags;
@@ -1380,8 +1381,8 @@ acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
 
 release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
 
-    if !lock.* bluescreen();
-    lock.* = 0;
+    now_serving := cast(*u16)lock;
+    now_serving.* += 1;
 
     restore_interrupts(flags);
 }
@@ -1414,7 +1415,7 @@ acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
         // If it's too early in boot for multiprocessing to be enabled, core_id can remain zero to indicate the bootstrap core.
     }
 
-    if lock.lock && lock.held_by_core == core_id {
+    if is_held(*lock.lock) && lock.held_by_core == core_id {
         lock.recursion_count += 1;
         return 0;
     }
