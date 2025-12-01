@@ -15,7 +15,7 @@ Ecam_Entry :: struct {
 }
 
 find_all_pci_devices :: () {
-    for kernel_globals.pci_ecam {
+    for global.pci_ecam {
         for bus: it.start_bus..it.end_bus {
             for device: 0..255 {
                 header := read_configuration_space(it.base_address, bus, device, 0);
@@ -51,19 +51,19 @@ find_all_pci_devices :: () {
 
         entries := cast(*uacpi_pci_routing_table_entry) (routing + 1);
 
-        kernel_globals.pci_routing_table.count = cast(s64) routing.num_entries;
-        kernel_globals.pci_routing_table.data = entries;
+        global.pci_routing_table.count = cast(s64) routing.num_entries;
+        global.pci_routing_table.data = entries;
 
         return .BREAK;
     }
 
     uacpi_find_devices("PNP0A03", find_routing_table_under_bridge, null);
 
-    if kernel_globals.pci_routing_table.data == null {
+    if global.pci_routing_table.data == null {
         uacpi_find_devices("PNP0A08", find_routing_table_under_bridge, null);
     }
 
-    assert(kernel_globals.pci_routing_table.data != null);
+    assert(global.pci_routing_table.data != null);
 }
 
 pci_devices: [..] Pci_Device;
@@ -337,7 +337,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
         bluescreen();
     }
 
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
+    virtual := alloc_block(*global.virtual_block_allocator, bar.limit);
 
     {
         push_print_style().default_format_int.base = 16;
@@ -353,7 +353,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 }
 
 register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
-    for entry: kernel_globals.pci_routing_table {
+    for entry: global.pci_routing_table {
         bus    := (entry.address >> 24) & 0xff;
         device := (entry.address >> 16) & 0xff;
 
@@ -1359,7 +1359,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
 
         memory_needed := cast(u64, list_size + fis_size + command_slot_count * 4096 + 4096);
 
-        using kernel_globals;
+        using global;
         virtual  := cast(*void) alloc_block(*virtual_block_allocator,  memory_needed);
         physical :=             alloc_block(*physical_block_allocator, memory_needed);
 
@@ -1798,41 +1798,51 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
     bar0 := read_base_address_register(device, 0);
     hda.mmio = cast(*Intel_HDA_Memory_Region)map_base_address_register(bar0);
 
-    set_bit(*hda.GCTL__global_control, .CRST__controller_reset);
+    {
+        // Reset controller.
 
-    if Timeout(get_bit(*hda.GCTL__global_control, .CRST__controller_reset)) {
-        log_error("Failed to reset (CRST remains low).");
-        return;
+        set_bit(*hda.GCTL__global_control, .CRST__controller_reset);
+
+        if Timeout(get_bit(*hda.GCTL__global_control, .CRST__controller_reset)) {
+            log_error("Failed to reset (CRST remains low).");
+            return;
+        }
+
+        busy_wait(521);
     }
 
-    busy_wait(521);
+    // Detect active codecs.
 
     statests := hda.STATESTS__state_change_status;
     bits := formatInt(statests, base=2);
     log("Active codecs: %", bits);
 
-    ringbuffer_memory := get_4k_page(); // Todo: ensure this is low (sub-4Gb) memory. We will need some reserved physical memory for that purpose.
-    assert(ringbuffer_memory < 0x1_0000_0000);
+    {
+        // Set up Command Output Ring Buffer (CORB).
 
-    hda.CORBCTL__corb_control &= ~.CORBRUN;
-    if Timeout(hda.CORBCTL__corb_control & .CORBRUN) {
-        log_error("Failed to stop CORB.");
-        return;
+        ringbuffer_memory := get_4k_page(); // Todo: ensure this is low (sub-4Gb) memory. We will need some reserved physical memory for that purpose.
+        assert(ringbuffer_memory < 0x1_0000_0000);
+
+        hda.CORBCTL__corb_control &= ~.CORBRUN;
+        if Timeout(hda.CORBCTL__corb_control & .CORBRUN) {
+            log_error("Failed to stop CORB.");
+            return;
+        }
+
+        corbszcap := get(hda.CORBSIZE__corb_size, .RBSZCAP);
+        if corbszcap & 0b0100 == 0 {
+            log_error("Large output buffer size is not supported by the device. Todo.");
+            return;
+        }
+        set(*hda.CORBSIZE__corb_size, .RBSIZE, 0b10);
+
+        hda.CORBRP__corb_read_pointer |= 1 << 15;
+        hda.CORBWP__corb_write_pointer &= 0xff;
+
+        hda.corb_size = 256;
+
+        hda.CORBLBASE__corb_lower_base = cast(u32)ringbuffer_memory;
     }
-
-    corbszcap := get(hda.CORBSIZE__corb_size, .RBSZCAP);
-    if corbszcap & 0b0100 == 0 {
-        log_error("Large output buffer size is not supported by the device. Todo.");
-        return;
-    }
-    set(*hda.CORBSIZE__corb_size, .RBSIZE, 0b10);
-
-    hda.CORBRP__corb_read_pointer |= 1 << 15;
-    hda.CORBWP__corb_write_pointer &= 0xff;
-
-    hda.corb_size = 256;
-
-    hda.CORBLBASE__corb_lower_base = cast(u32)ringbuffer_memory;
 }
 
 hda_submit_command :: (hda: *High_Definition_Audio, verb: HDA_Codec_Verb) -> enum {success; buffer_full;} {

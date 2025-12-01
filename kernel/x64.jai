@@ -70,7 +70,7 @@ Interrupt_Gate_Descriptor :: struct {
 }
 
 register_interrupt_gate :: (handler: () #c_call, index: int, trap := false) {
-    desc := *kernel_globals.interrupt_descriptor_table[index];
+    desc := *global.interrupt_descriptor_table[index];
     desc.* = .{};
 
     address := cast(u64) cast(*void) handler;

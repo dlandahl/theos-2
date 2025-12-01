@@ -67,12 +67,12 @@ lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags, *Scheduler {
 }
 
 get_current_task :: () -> *Task_Info #no_context {
-    offset := offset_of(X64_Core, "scheduler.current_task");
+    offset :: #run offset_of(X64_Core, "scheduler.current_task");
     return cast(*Task_Info)gs_relative_read(offset);
 }
 
 allocate_task_info :: () -> *Task_Info {
-    using kernel_globals;
+    using global;
 
     Scoped_Acquire(*task_info_storage_spinlock);
 
@@ -91,7 +91,7 @@ core_begin_multitasking :: () {
     queue_reserve(*scheduler.waiting_to_run, 256);
 
     scheduler.current_task = allocate_task_info();
-    scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    scheduler.current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
     scheduler.current_task._context = *context;
     scheduler.current_task.name = "Idle";
     scheduler.current_task.on_core = core;
@@ -115,12 +115,11 @@ core_begin_multitasking :: () {
     core.online = true;
 
     // Enable scheduling clock - either LAPIC or preferably TSC Deadline.
-    using kernel_globals;
 
-    if tsc_deadline_support {
-        configure_tsc_deadline_interrupt(scheduling_interrupt_gate);
+    if global.tsc_deadline_support {
+        configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x40_0000, scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(0x40_0000, global.scheduling_interrupt_gate);
     }
 }
 
@@ -141,7 +140,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
 create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "") -> *Task_Info {
 
     new_task := allocate_task_info();
-    new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     new_task.kernel_stack = alloc(kernel_stack_size) + kernel_stack_size;
 
@@ -258,7 +257,7 @@ DISABLE_KERNEL_PREEMPTION :: false;
 scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
-    defer if kernel_globals.tsc_deadline_support {
+    defer if global.tsc_deadline_support {
         schedule_tsc_deadline_interrupt(20);
     }
 

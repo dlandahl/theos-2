@@ -50,7 +50,7 @@ X64_Core :: struct {
     mcs_node: MCS_Node;
 }
 
-// This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
+// This can't be in global, or else, due to the size of the IOPB, the compiler will
 // reserve 8Mb in the executable, all of which is zero. Todo: is there really a reason not to dynamically allocate this?
 space_for_processor_cores: [1024] X64_Core;
 
@@ -127,13 +127,13 @@ Kernel_Globals :: struct {
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 }
 
-kernel_globals: Kernel_Globals;
+global: Kernel_Globals;
 
 Assembly :: #library,no_dll "../.build/assembly";
 
 #program_export
 kernel_entry :: () #no_context {
-    using kernel_globals;
+    using global;
 
     write_string_callback = kernel_write_string;
 
@@ -297,7 +297,7 @@ kernel_entry :: () #no_context {
             }
 
             if false if it.class_code == .NETWORK && it.subclass == 0x0 {
-                kernel_globals.net.adapter = init_i8254x(it);
+                global.net.adapter = init_i8254x(it);
             }
 
             if it.class_code == .MULTIMEDIA {
@@ -319,7 +319,7 @@ kernel_entry :: () #no_context {
 user_mode_stress_test :: () {
     thread_index := 1;
 
-    for *core: kernel_globals.processor_cores {
+    for *core: global.processor_cores {
         for 1..4 {
             name := tprint("Do Work %:%", core.id, thread_index);
             task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
@@ -331,35 +331,34 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    using kernel_globals;
 
-    network_adapter_initialized := net.adapter.mmio != null;
+    network_adapter_initialized := global.net.adapter.mmio != null;
     assert(network_adapter_initialized);
 
     task := create_task(network_thread, name = "Network Thread");
-    put_task_on_core(task, *processor_cores[1]);
+    put_task_on_core(task, *global.processor_cores[1]);
 
     log("Waiting for DHCP handshake.");
-    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
+    Timeout(global.net.dhcp_handshake_state == .COMPLETED, 60_000);
 
     log("Sending DNS Query");
-    dns_query := transmit_dns_query(*net, "google.com");
+    dns_query := transmit_dns_query(*global.net, "google.com");
 
     Timeout(dns_query.complete, 60_000);
     // assert(dns_query.answer != 0);
 
     // hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
-    transmit_ping(*net, dns_query.answer);
+    transmit_ping(*global.net, dns_query.answer);
 
-    connection := initiate_tcp_connection(*net, dns_query.answer, 443);
+    connection := initiate_tcp_connection(*global.net, dns_query.answer, 443);
 
     Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
-    tls := initiate_tls_connection(*net, connection);
+    tls := initiate_tls_connection(*global.net, connection);
 
     if false {
         request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-        transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
+        transmit_tcp_packet(*global.net, *global.net.tcp_connections[0], .ACK | .PSH, request);
     }
 }
 
@@ -382,7 +381,7 @@ set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
  
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        flags := acquire(*kernel_globals.text_output_spinlock);
+        flags := acquire(*global.text_output_spinlock);
 
         write_string("Assertion failure");
         if message.count {
@@ -390,14 +389,14 @@ set_global_context_callbacks :: () #no_context {
         }
         write_string("\n");
 
-        release(*kernel_globals.text_output_spinlock, flags);
+        release(*global.text_output_spinlock, flags);
 
         bluescreen(location);
         return true;
     };
 
     kernel_default_logger = (message: string, data: *void, info: Log_Info) {
-        Scoped_Acquire(*kernel_globals.text_output_spinlock);
+        Scoped_Acquire(*global.text_output_spinlock);
 
         if context.log_category {
             write_string("[");
@@ -426,21 +425,21 @@ set_global_context_callbacks :: () #no_context {
 
             if is_resize {
                 physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
-                success := resize_block(*kernel_globals.physical_block_allocator, physical, cast(u64) size);
+                success := resize_block(*global.physical_block_allocator, physical, cast(u64) size);
 
                 if success {
                     return old_memory;
                 }
             }
 
-            physical := alloc_block(*kernel_globals.physical_block_allocator, cast(u64) size);
+            physical := alloc_block(*global.physical_block_allocator, cast(u64) size);
             virtual := cast(*void) physical + DIRECT_MAPPING_BASE;
 
             if is_resize {
                 memcpy(virtual, old_memory, old_size);
 
                 physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
-                free_block(*kernel_globals.physical_block_allocator, physical);
+                free_block(*global.physical_block_allocator, physical);
             }
 
             return virtual;
@@ -452,7 +451,7 @@ set_global_context_callbacks :: () #no_context {
             }
 
             physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
-            free_block(*kernel_globals.physical_block_allocator, physical);
+            free_block(*global.physical_block_allocator, physical);
         }
 
         if mode == .CAPS {
@@ -471,7 +470,7 @@ init_processor_core :: () {
     {
         my_local_apic_id := read_apic_register(.APIC_ID) >> 24;
 
-        for* kernel_globals.processor_cores {
+        for* global.processor_cores {
             if it.local_apic_id == my_local_apic_id {
                 core = it;
                 break;
@@ -537,8 +536,8 @@ init_processor_core :: () {
             base: *Interrupt_Gate_Descriptor #align 2;
         }
 
-        idt_desc.limit = size_of(type_of(kernel_globals.interrupt_descriptor_table));
-        idt_desc.base = kernel_globals.interrupt_descriptor_table.data;
+        idt_desc.limit = size_of(type_of(global.interrupt_descriptor_table));
+        idt_desc.base = global.interrupt_descriptor_table.data;
 
         pointer := *idt_desc;
         #asm { lidt [pointer]; }
@@ -603,7 +602,7 @@ bluescreen :: (loc := #caller_location) #no_context {
         // the serial port spinlock, other CPU cores should still be able to
         // keep running.
 
-        lock := *kernel_globals.text_output_spinlock;
+        lock := *global.text_output_spinlock;
 
         if lock.lock && lock.held_by_core == core.id {
             lock.recursion_count = 0;
@@ -611,7 +610,7 @@ bluescreen :: (loc := #caller_location) #no_context {
         }
     }
 
-    using kernel_globals.framebuffer;
+    using global.framebuffer;
 
     for y: 0..y_resolution-1 {
         for x: 0..x_resolution-1 {
@@ -639,21 +638,21 @@ Large_Page_Allocator :: struct {
 
 allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
 
-    using kernel_globals.large_page_allocator;
+    using global.large_page_allocator;
     Scoped_Acquire(*spinlock);
 
     if freelist != FREELIST_TAIL {
         address := freelist * 0x20_0000;
 
-        desc := *kernel_globals.large_pages[freelist];
+        desc := *global.large_pages[freelist];
         desc.state = .ALLOCATED;
         freelist = desc.freelist;
 
         return cast(u64) address;
     }
 
-    while max_large_page_used < kernel_globals.large_pages.count {
-        desc := *kernel_globals.large_pages[max_large_page_used];
+    while max_large_page_used < global.large_pages.count {
+        desc := *global.large_pages[max_large_page_used];
 
         address := max_large_page_used * 0x20_0000;
         max_large_page_used += 1;
@@ -668,7 +667,7 @@ allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
 
     // There are no free large pages, evict one from the disk cache.
     if lru_least != LRU_TAIL {
-        desc := *kernel_globals.large_pages[lru_least];
+        desc := *global.large_pages[lru_least];
         desc.state = .ALLOCATED;
 
         address := cast(u64) lru_least * 0x20_0000;
@@ -686,7 +685,7 @@ allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
 // move that into dedicated structs and procedures.
 
 find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
-    using kernel_globals;
+    using global;
 
     Scoped_Acquire(*large_page_allocator.spinlock);
 
@@ -761,7 +760,7 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
 }
 
 evict_disk_cache_entry :: (page: u64) #no_context {
-    using kernel_globals;
+    using global;
 
     page_index := page / 0x20_0000;
     lru_entry  := *large_pages[page_index];
@@ -777,7 +776,7 @@ evict_disk_cache_entry :: (page: u64) #no_context {
     }
 
     if page_index == cast,no_check(u64) large_page_allocator.lru_least {
-        kernel_globals.large_page_allocator.lru_least = lru_entry.more_recently_used;
+        large_page_allocator.lru_least = lru_entry.more_recently_used;
     }
 
     // Todo: actually flush the data
@@ -820,7 +819,7 @@ page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 
 }
 
 get_4k_page :: () -> u64 #no_context {
-    return get_4k_page(*kernel_globals.physical_page_pool);
+    return get_4k_page(*global.physical_page_pool);
 }
 
 get_4k_page :: (pool: *Physical_4k_Page_Pool) -> u64 #no_context {
@@ -851,7 +850,7 @@ free_4k_page :: (pool: *Physical_4k_Page_Pool, address: u64) #no_context {
 }
 
 free_4k_page :: (address: u64) #no_context {
-    free_4k_page(*kernel_globals.physical_page_pool, address);
+    free_4k_page(*global.physical_page_pool, address);
 }
 
 
@@ -892,7 +891,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pd\ _offset := (virtual_address >> 21) & mask;
     pt\ _offset := (virtual_address >> 12) & mask;
 
-    pml4 := kernel_globals.page_tables.pml4.data;
+    pml4 := global.page_tables.pml4.data;
 
     pdpt := get_or_create_page_table(pml4, pml4_offset);
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
@@ -1185,19 +1184,19 @@ Acpi_Table_Header :: struct {
 } #no_padding
 
 find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
-    table_size := kernel_globals.root_acpi_table.length - size_of(Acpi_Table_Header);
+    table_size := global.root_acpi_table.length - size_of(Acpi_Table_Header);
 
-    pointer_size := cast(u64, ifx kernel_globals.acpi_version then 8 else 4);
+    pointer_size := cast(u64, ifx global.acpi_version then 8 else 4);
     pointer_count := table_size / pointer_size;
 
-    table_base := cast(u64, kernel_globals.root_acpi_table + 1);
+    table_base := cast(u64, global.root_acpi_table + 1);
 
     for table_index: 0..pointer_count - 1 {
         offset := table_index * pointer_size + table_base;
 
         physical_address := cast(u64) cast(*u32, offset).*;
 
-        if kernel_globals.acpi_version {
+        if global.acpi_version {
             physical_address = cast(*u64, offset).*;
         }
 
@@ -1251,9 +1250,9 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
 }
 
 kernel_write_string :: (text: string) #no_context {
-    Scoped_Acquire(*kernel_globals.text_output_spinlock);
+    Scoped_Acquire(*global.text_output_spinlock);
 
-    serial_out(text, *kernel_globals.COM1);
+    serial_out(text, *global.COM1);
     draw_text(text);
 }
 
@@ -1307,6 +1306,7 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
         #asm { sti; }
     }
 }
+
 
 
 // MCS lock based on https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf
@@ -1415,7 +1415,7 @@ acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
     flags := disable_interrupts();
     core_id := 0;
 
-    if kernel_globals.multiprocessing_initialized {
+    if global.multiprocessing_initialized {
         core := get_current_core();
         core_id = core.id;
     } else {
@@ -1437,7 +1437,7 @@ release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
 
     core_id := 0;
 
-    if kernel_globals.multiprocessing_initialized {
+    if global.multiprocessing_initialized {
         core := get_current_core();
         core_id = core.id;
     } else {
@@ -1502,7 +1502,7 @@ LRU_TAIL      :: -1;
 
 
 allocate_interrupt_gate :: () -> int {
-    using kernel_globals;
+    using global;
 
     assert(next_free_interrupt_gate < 0xff);
 
@@ -1515,7 +1515,7 @@ allocate_interrupt_gate :: () -> int {
 
 
 debug_print_physical_memory_map :: () {
-    using kernel_globals;
+    using global;
     push_print_style().default_format_float.trailing_width = 2;
 
     #if false {
@@ -1644,7 +1644,7 @@ font_file :: #run,host -> [] u8 {
 }
 
 draw_text :: (text: string) #no_context {
-    using kernel_globals.text_drawing_state;
+    using global.text_drawing_state;
 
     if !font_loaded return;
 
@@ -1661,7 +1661,7 @@ draw_text :: (text: string) #no_context {
     first_code   :: #char " ";
     last_code    :: #char "~";
 
-    framebuffer := kernel_globals.framebuffer;
+    framebuffer := global.framebuffer;
 
     for text {
         if it == #char "\n" {

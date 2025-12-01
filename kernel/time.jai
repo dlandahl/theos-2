@@ -1,10 +1,9 @@
 
 get_kernel_timestamp :: () -> Apollo_Time {
-    using kernel_globals;
 
     // This method of converting TSC to Apollo Time is not precise for low TSC frequencies, like those you get from QEMU when virtualization is not enabled.
     // Use the higher-latency, more complicated HPET timer.
-    if tsc_frequency < 1_000_000 {
+    if global.tsc_frequency < 1_000_000 {
         return hpet_get_monotonic_time();
     }
 
@@ -13,13 +12,13 @@ get_kernel_timestamp :: () -> Apollo_Time {
 
     FEMTOSECONDS_PER_SECOND :: 1_000_000_000_000_000;
     timestamp *= FEMTOSECONDS_PER_SECOND;
-    timestamp /= cast(s64) tsc_frequency;
+    timestamp /= cast(s64) global.tsc_frequency;
 
     return timestamp;
 }
 
 get_monotonic_system_time :: () -> Apollo_Time {
-    return get_kernel_timestamp() + kernel_globals.boot_time;
+    return get_kernel_timestamp() + global.boot_time;
 }
 
 get_monotonic_time :: get_monotonic_system_time;
@@ -192,7 +191,7 @@ rtc_init :: () {
     status |= _24H_CLOCK;
     rtc_write(.STATUS_B, status);
 
-    kernel_globals.rtc_format_is_bcd = status & BCD_MODE == 0;
+    global.rtc_format_is_bcd = status & BCD_MODE == 0;
 }
 
 #program_export
@@ -214,7 +213,7 @@ rtc_read :: (register: Rtc_Register) -> u8 {
                        || (register == .STATUS_B)
                        || (register == .STATUS_C);
 
-    if kernel_globals.rtc_format_is_bcd && !is_status_register {
+    if global.rtc_format_is_bcd && !is_status_register {
         ax = (ax & 0xf) + (ax / 16) * 10;
     }
 
@@ -246,7 +245,7 @@ rtc_get_calendar_time :: () -> Calendar_Time {
     cal.minute = cast(s8)  rtc_read(.MINUTES);
     cal.second = cast(s8)  rtc_read(.SECONDS);
 
-    fadt := kernel_globals.fadt;
+    fadt := global.fadt;
 
     if fadt && fadt.century {
         century := cast(s32) rtc_read(cast(Rtc_Register) fadt.century);
@@ -287,11 +286,11 @@ Hpet_Register :: enum u64 {
 }
 
 read :: (reg: Hpet_Register) -> u64 #no_context {
-    return cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg).*;
+    return cast(*u64, global.high_precision_timer.base_address + cast(u64) reg).*;
 }
 
 write :: (reg: Hpet_Register, value: u64) #no_context {
-    cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg).* = value;
+    cast(*u64, global.high_precision_timer.base_address + cast(u64) reg).* = value;
 }
 
 Hpet_Config_Flags :: enum_flags u64 {
@@ -332,7 +331,7 @@ HPET :: struct {
 }
 
 initialize_hpet :: () {
-    hpet := *kernel_globals.high_precision_timer;
+    hpet := *global.high_precision_timer;
 
     acpi_header := find_acpi_table("HPET");
 
@@ -344,7 +343,7 @@ initialize_hpet :: () {
     acpi_table := cast(*Hpet_Acpi_Table) acpi_header;
     assert(acpi_table.address_space == .MAIN_MEMORY);
 
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
+    virtual := alloc_block(*global.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
     map_page(virtual, acpi_table.base_address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     offset_in_page := acpi_table.base_address % 0x1000;
@@ -381,7 +380,7 @@ initialize_hpet :: () {
 hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool, frequency_in_millihertz := false) {
     assert(timer_index == 0 || timer_index == 1);
 
-    hpet := *kernel_globals.high_precision_timer;
+    hpet := *global.high_precision_timer;
 
     register_offset := cast(Hpet_Register, 0x20 * timer_index);
 
@@ -432,7 +431,7 @@ hpet_restart :: () {
 
 #program_export
 hpet_timer0_interrupt :: (data: *Interrupt_Stack_Frame()) #c_call {
-    using kernel_globals.high_precision_timer;
+    using global.high_precision_timer;
 
     sequence_write(*seq_lock, #code {
         timers[0].counter += 1;
@@ -444,13 +443,13 @@ hpet_timer0_interrupt :: (data: *Interrupt_Stack_Frame()) #c_call {
 
 #program_export
 hpet_timer1_interrupt :: (data: *Interrupt_Stack_Frame()) #c_call {
-    using kernel_globals.high_precision_timer;
+    using global.high_precision_timer;
     timers[1].counter += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
 hpet_get_monotonic_time :: () -> Apollo_Time {
-    using kernel_globals;
+    using global;
 
     counter, ticks: u64;
 
@@ -531,7 +530,7 @@ configure_tsc_deadline_interrupt :: (gate: int) {
 }
 
 schedule_tsc_deadline_interrupt :: (delay_ms: u64) #no_context {
-    delay := (kernel_globals.tsc_frequency * delay_ms / 1_000);
+    delay := (global.tsc_frequency * delay_ms / 1_000);
     write_msr(.TSC_DEADLINE, rdtsc() + delay);
 }
 
@@ -563,10 +562,10 @@ initialize_tsc :: () {
     if ecx & (1 << 24) {
         log("TSC_DEADLINE Supported.");
         // TSC Deadline seems to be broken on QEMU on the laptop. Todo.
-        // kernel_globals.tsc_deadline_support = true;
+        // global.tsc_deadline_support = true;
     }
 
-    kernel_globals.tsc_frequency = calibrate_tsc();
+    global.tsc_frequency = calibrate_tsc();
 }
 
 calibrate_tsc :: () -> hz: u64 {
@@ -609,7 +608,7 @@ calibrate_tsc :: () -> hz: u64 {
 
 
     if verbose log("Calibrating TSC...");
-    hpet := kernel_globals.high_precision_timer;
+    hpet := global.high_precision_timer;
 
     calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
 
@@ -691,7 +690,7 @@ calibrate_tsc_using_interrupt :: () {
 
         while true {
             #asm { hlt; }
-            if kernel_globals.high_precision_timer.timers[1].counter > 0 {
+            if global.high_precision_timer.timers[1].counter > 0 {
                 break;
             }
         }
@@ -712,7 +711,7 @@ debug_measure_tsc_drift :: () {
     #asm { cli; }
 
     tsc_start := rdtsc();
-    tsc_frequency := cast(float) kernel_globals.tsc_frequency;
+    tsc_frequency := cast(float) global.tsc_frequency;
 
     time := hpet_get_monotonic_time();
 
@@ -734,7 +733,7 @@ debug_run_tsc_timer :: () {
     #asm { cli; }
 
     tsc_start := rdtsc();
-    tsc_frequency := cast(float) kernel_globals.tsc_frequency;
+    tsc_frequency := cast(float) global.tsc_frequency;
 
     seconds: int;
 

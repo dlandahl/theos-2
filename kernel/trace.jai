@@ -53,14 +53,14 @@ file_table :: string.[
     }
 
     init_tracing :: () #no_context {
-        using kernel_globals.trace_state;
+        using global.trace_state;
 
         for* trace_buffers {
             page := allocate_large_page();
             it.* = cast(*Trace_Buffer)(page + DIRECT_MAPPING_BASE);
 
             // Also store the addresses of the buffers at a known offset in memory, so we can find them in a memory dump, should we ever want to.
-            kernel_globals.boot_data.trace_buffers[it_index] = page;
+            global.boot_data.trace_buffers[it_index] = page;
         }
     }
 
@@ -82,14 +82,14 @@ file_table :: string.[
     }
 
     trace_internal :: (tag: Trace_Tag, file: u8, line: u16) {
-        using kernel_globals.trace_state;
+        using global.trace_state;
 
         index := fetch_add(*current_index, 1);
 
         entry: Trace_Entry;
         entry.tsc = rdtsc();
 
-        if kernel_globals.multiprocessing_initialized {
+        if global.multiprocessing_initialized {
             // Todo: multiprocessing_initialized doesn't mean that scheduling is initialized... so we can't actually do this.
             task := get_current_task();
 

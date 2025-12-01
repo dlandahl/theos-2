@@ -78,19 +78,19 @@ Apic_Register :: enum {
 }
 
 read_apic_register :: (register: Apic_Register) -> u32 #no_context {
-    if kernel_globals.apic == null {
+    if global.apic == null {
         bluescreen();
     }
 
-    return cast(*u32, kernel_globals.apic + cast(u64) register).*;
+    return cast(*u32, global.apic + cast(u64) register).*;
 }
 
 write_apic_register :: (register: Apic_Register, value: u32) #no_context {
-    if kernel_globals.apic == null {
+    if global.apic == null {
         bluescreen();
     }
 
-    cast(*u32, kernel_globals.apic + cast(u64) register).* = value;
+    cast(*u32, global.apic + cast(u64) register).* = value;
 }
 
 initialize_apic :: () {
@@ -120,22 +120,22 @@ initialize_apic :: () {
         physical := cast(u64) apic_base & ~0xfff;
         assert(0xfee0_0000 == physical);
 
-        virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
+        virtual := alloc_block(*global.virtual_block_allocator, 4096);
         map_page(virtual, physical, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-        kernel_globals.apic = cast(*void) virtual;
+        global.apic = cast(*void) virtual;
     }
 
 
-    kernel_globals.processor_cores.data = space_for_processor_cores.data;
-    kernel_globals.processor_cores.count = 1;
+    global.processor_cores.data = space_for_processor_cores.data;
+    global.processor_cores.count = 1;
 
-    bootstrap_core := *kernel_globals.processor_cores[0];
+    bootstrap_core := *global.processor_cores[0];
     bootstrap_core.local_apic_id = read_apic_register(.APIC_ID) >> 24;
 
     init_processor_core();
 
-    kernel_globals.multiprocessing_initialized = true;
+    global.multiprocessing_initialized = true;
 
     #insert #run,host -> string {
         builder: String_Builder;
@@ -173,23 +173,23 @@ initialize_apic :: () {
             // Apparently we should be able to use the ONLINE_CAPABLE bit in the ics flags to determine if
             // this processor core is usable, but for some reason it's always 0 in Qemu and Vbox.
 
-            id := kernel_globals.processor_cores.count;
-            kernel_globals.processor_cores.count += 1;
+            id := global.processor_cores.count;
+            global.processor_cores.count += 1;
 
-            new_core := *kernel_globals.processor_cores[id];
+            new_core := *global.processor_cores[id];
 
             new_core.local_apic_id = lapic_ics.apic_id;
             new_core.id = id;
 
           case .IO_APIC;
-            assert(kernel_globals.io_apic == null);
+            assert(global.io_apic == null);
 
             ioapic_ics := cast(*Ics_Io_Apic) ics;
 
-            virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
+            virtual := alloc_block(*global.virtual_block_allocator, 4096);
             map_page(virtual, ioapic_ics.address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-            kernel_globals.io_apic = cast(*u32) virtual;
+            global.io_apic = cast(*u32) virtual;
 
             assert(ioapic_ics.address == 0xfec0_0000);
 
@@ -204,10 +204,10 @@ initialize_apic :: () {
     register_interrupt_gate(isr__scheduling_timer_interrupt, timer_gate);
 
     // Store this, to be able to configure the APIC timer (or TSC deadline) of all cores to use the same interrupt handler, which is done in core_begin_multitasking.
-    kernel_globals.scheduling_interrupt_gate = timer_gate;
+    global.scheduling_interrupt_gate = timer_gate;
 
-    kernel_globals.tasks.allocator = context.allocator;
-    kernel_globals.next_task_id = 1;
+    global.tasks.allocator = context.allocator;
+    global.next_task_id = 1;
 }
 
 startup_application_processors :: () {
@@ -224,11 +224,11 @@ startup_application_processors :: () {
 
     ap_startup_data := cast(*Ap_Startup_Data) (0x8200 + DIRECT_MAPPING_BASE);
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
-    ap_startup_data.pml4 = kernel_globals.boot_data.page_tables.pml4.data;
+    ap_startup_data.pml4 = global.boot_data.page_tables.pml4.data;
 
     bsp := get_current_core();
 
-    for* kernel_globals.processor_cores {
+    for* global.processor_cores {
         if it == bsp {
             continue;
         }
@@ -239,7 +239,7 @@ startup_application_processors :: () {
         // Todo: This disables interrupts, which is silly because the lock will be released on a different core.
         acquire(*ap_startup_spinlock);
 
-        stack := alloc_block(*kernel_globals.physical_block_allocator, 0x8_0000) + 0x8_0000;
+        stack := alloc_block(*global.physical_block_allocator, 0x8_0000) + 0x8_0000;
         ap_startup_data.stack = stack + DIRECT_MAPPING_BASE;
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
@@ -306,11 +306,11 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 
     register_index := REDIRECTION_TABLE_BASE + redirection_index * REDIRECTION_TABLE_ENTRY_SIZE;
 
-    kernel_globals.io_apic[0] = register_index;
-    kernel_globals.io_apic[4] = cast(u32) gate_number;
+    global.io_apic[0] = register_index;
+    global.io_apic[4] = cast(u32) gate_number;
 
-    kernel_globals.io_apic[0] = register_index+1;
-    kernel_globals.io_apic[4] = 0;
+    global.io_apic[0] = register_index+1;
+    global.io_apic[4] = 0;
 }
 
 
@@ -328,7 +328,7 @@ DEFAULT_ISA_FAULT_HANDLER :: #string END
 #program_export
 default_isa_fault_handler_%1 :: (stack: *void) #c_call {
     core := get_current_core();
-    Scoped_Acquire(*kernel_globals.text_output_spinlock);
+    Scoped_Acquire(*global.text_output_spinlock);
 
     write_string("Something bad happened (%1) on core ");
     write_number(core.id);
@@ -344,7 +344,7 @@ END;
 debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
     push_context {
 
-        Scoped_Acquire(*kernel_globals.text_output_spinlock);
+        Scoped_Acquire(*global.text_output_spinlock);
 
         core := get_current_core();
         task := core.scheduler.current_task;
@@ -384,7 +384,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
         context.print_style.default_format_int.base = 16;
 
-        Scoped_Acquire(*kernel_globals.text_output_spinlock);
+        Scoped_Acquire(*global.text_output_spinlock);
 
         print("\nBreakpoint hit. Context:\n%", stack.*);
     }
@@ -396,7 +396,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
 page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     push_context,defer_pop;
 
-    Scoped_Acquire(*kernel_globals.text_output_spinlock);
+    Scoped_Acquire(*global.text_output_spinlock);
 
     core := get_current_core();
     task := core.scheduler.current_task;
@@ -434,7 +434,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = true)) #c_call {
     push_context {
-        Scoped_Acquire(*kernel_globals.text_output_spinlock);
+        Scoped_Acquire(*global.text_output_spinlock);
 
         core := get_current_core();
         task := core.scheduler.current_task;
@@ -485,7 +485,7 @@ initialize_uacpi :: () {
     ecam.data = cast(*Ecam_Entry, mcfg + 1);
     ecam.count = ecam_length_bytes / size_of(Ecam_Entry);
 
-    kernel_globals.pci_ecam = ecam;
+    global.pci_ecam = ecam;
 
 
     // uACPI uses thread local storage.
@@ -514,11 +514,11 @@ initialize_uacpi :: () {
 
     if uacpi_finalize_gpe_initialization() != .OK bluescreen();
 
-    uacpi := *kernel_globals.uacpi_state;
+    uacpi := *global.uacpi_state;
     uacpi.work_thread = create_task(uacpi.work_thread_proc, name="uACPI Worker");
 
     // Note: according to uACPI kernel_api.h, work items should be done on CPU0 due to firmware bugs.
-    cpu0 := *kernel_globals.processor_cores[0];
+    cpu0 := *global.processor_cores[0];
     put_task_on_core(uacpi.work_thread, cpu0);
 }
 
@@ -548,7 +548,7 @@ Uacpi_State :: struct {
     work_thread: *Task_Info;
 
     work_thread_proc :: () {
-        using kernel_globals.uacpi_state;
+        using global.uacpi_state;
 
         // uACPI uses thread local storage.
         tls := get_4k_page() + DIRECT_MAPPING_BASE;
@@ -593,7 +593,7 @@ Uacpi_State :: struct {
 }
 
 #program_export uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
-    rsdp_address.* = cast(uacpi_phys_addr) kernel_globals.acpi_rsdp;
+    rsdp_address.* = cast(uacpi_phys_addr) global.acpi_rsdp;
     return .OK;
 }
 
@@ -646,7 +646,7 @@ Uacpi_State :: struct {
 uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, byte_width: u8, value: *u64) -> uacpi_status #c_call {
     using bus_address;
 
-    for kernel_globals.pci_ecam {
+    for global.pci_ecam {
         if it.segment_group != segment continue;
 
         device_offset := cast(u64, bus * 256 + device * 8 + function);
@@ -672,7 +672,7 @@ uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, b
 uacpi_kernel_pci_write :: (bus_address: *uacpi_pci_address, offset: uacpi_size, byte_width: u8, value: u64) -> uacpi_status #c_call {
     using bus_address;
 
-    for kernel_globals.pci_ecam {
+    for global.pci_ecam {
         if it.segment_group != segment continue;
 
         device_offset := cast(u64, bus * 256 + device * 8 + function);
@@ -695,7 +695,7 @@ uacpi_kernel_pci_write :: (bus_address: *uacpi_pci_address, offset: uacpi_size, 
 
 #program_export
 uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi_handle) -> uacpi_status #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     out_handle.* = xx base;
 
@@ -709,7 +709,7 @@ uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi
 
 #program_export
 uacpi_kernel_io_read :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: *u64) -> uacpi_status #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     io_base := cast(u16) handle;
     address := io_base + xx offset;
@@ -734,7 +734,7 @@ uacpi_kernel_io_read :: (handle: uacpi_handle, offset: uacpi_size, byte_width: u
 
 #program_export
 uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: u64) -> uacpi_status #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     io_base := cast(u16) handle;
     address := io_base + xx offset;
@@ -757,7 +757,7 @@ uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: 
 #program_export
 uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
     push_context {
-        memory := alloc_block(*kernel_globals.virtual_block_allocator, cast(u64) len);
+        memory := alloc_block(*global.virtual_block_allocator, cast(u64) len);
         pages_needed := len / 4096;
         if len % 4096 pages_needed += 1;
 
@@ -780,7 +780,7 @@ uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
 #program_export
 uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     push_context {
-        phys := alloc_block(*kernel_globals.physical_block_allocator, size);
+        phys := alloc_block(*global.physical_block_allocator, size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
         return virt;
@@ -792,7 +792,7 @@ uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
     size_bytes := size*count;
 
     push_context {
-        phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
+        phys := alloc_block(*global.physical_block_allocator, size_bytes);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
         memset(virt, 0, cast(s64) size_bytes);
@@ -806,7 +806,7 @@ uacpi_kernel_free :: (mem: *void) #c_call {
 
     push_context {
         phys := cast(u64) mem - DIRECT_MAPPING_BASE;
-        free_block(*kernel_globals.physical_block_allocator, phys);
+        free_block(*global.physical_block_allocator, phys);
     }
 }
 
@@ -903,7 +903,7 @@ next_event_handle: uacpi_handle = xx 1;
 UACPI_IRQ_HANDLER :: #string END
 #program_export
 handle_uacpi_irq_%1 :: (stack: *void) #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
     irq := *irq_contexts[%1];
     irq.handler(irq.ctx);
 } @InterruptRoutine
@@ -919,10 +919,10 @@ END;
 };
 
 init_uacpi_interrupt_handlers :: () {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
-    first_irq_handler_gate_index = kernel_globals.next_free_interrupt_gate;
-    kernel_globals.next_free_interrupt_gate += irq_contexts.count;
+    first_irq_handler_gate_index = global.next_free_interrupt_gate;
+    global.next_free_interrupt_gate += irq_contexts.count;
 
     #insert #run,host -> string {
         builder: String_Builder;
@@ -935,7 +935,7 @@ init_uacpi_interrupt_handlers :: () {
 
 #program_export
 uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_handler, ctx: uacpi_handle, out_irq_handle: *uacpi_handle) -> uacpi_status #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     push_context {
         if irq_contexts_used >= irq_contexts.count {
@@ -964,7 +964,7 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
 
 #program_export
 uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
     push_context {
 
         locator, _ := bucket_array_add(*spinlock_storage, 0);
@@ -981,7 +981,7 @@ uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
 
 #program_export
 uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     push_context {
         locator := bit_cast(handle, Bucket_Locator);
@@ -993,7 +993,7 @@ uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
 
 #program_export
 uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     push_context {
         locator := bit_cast(handle, Bucket_Locator);
@@ -1008,7 +1008,7 @@ uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call 
 
 #program_export
 uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     push_context {
         locator := bit_cast(handle, Bucket_Locator);
@@ -1021,7 +1021,7 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
 
 #program_export
 uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handler, ctx: uacpi_handle) -> uacpi_status #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     item: Work_Item;
     item.type = type;
@@ -1038,7 +1038,7 @@ uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handle
 
 #program_export
 uacpi_kernel_wait_for_work_completion :: () #c_call {
-    using kernel_globals.uacpi_state;
+    using global.uacpi_state;
 
     push_context {
         while true {

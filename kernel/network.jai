@@ -1659,7 +1659,7 @@ network_thread :: () {
     time := get_monotonic_system_time();
     random_seed(cast(S128)time);
 
-    using net := *kernel_globals.net;
+    using net := *global.net;
     next_port = FIRST_EPHEMERAL_PORT;
 
     dns_client_port = allocate_port(net);
