@@ -489,6 +489,54 @@ hpet_get_monotonic_time :: () -> Apollo_Time {
 
 
 
+Apic_Lvt_Timer :: enum u32 {
+    gate_index      :: 8;
+    reserved_0      :: 4;
+    delivery_status :: 1;
+    reserved_1      :: 3;
+    mask            :: 1;
+    timer_mode      :: 2;
+    reserved_2      :: 13;
+} @Bitfield
+
+APIC_TIMER_MODE_ONE_SHOT     :: 0b00;
+APIC_TIMER_MODE_PERIODIC     :: 0b01;
+APIC_TIMER_MODE_TSC_DEADLINE :: 0b10;
+
+configure_apic_timer_interrupt :: (period_in_ticks: u32, gate: int) {
+
+    lapic_timer: Apic_Lvt_Timer;
+
+    set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
+    set(*lapic_timer, .gate_index, gate);
+    set(*lapic_timer, .mask,       0);
+
+    // Todo: we don't currently measure APIC timer frequency, so we can't use a realtime value.
+    write_apic_register(.TIC__TIMER_INITIAL, period_in_ticks);
+    write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
+}
+
+configure_tsc_deadline_interrupt :: (gate: int) {
+    // Mutually exclusive with using the APIC timer interrupt above.
+
+    lapic_timer: Apic_Lvt_Timer;
+
+    set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
+    set(*lapic_timer, .gate_index, gate);
+    set(*lapic_timer, .mask,       0);
+
+    write_msr(.TSC_DEADLINE, rdtsc() - 1); // Ensure it doesn't fire yet.
+
+    write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
+}
+
+schedule_tsc_deadline_interrupt :: (delay_ms: u64) #no_context {
+    delay := (kernel_globals.tsc_frequency * delay_ms / 1_000);
+    write_msr(.TSC_DEADLINE, rdtsc() + delay);
+}
+
+
+
 initialize_tsc :: () {
 
     // Check for TSC hardware support.

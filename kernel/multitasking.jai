@@ -28,6 +28,9 @@ Task_Info :: struct {
     on_core: *X64_Core;
 
     cpu_time: Apollo_Time;
+
+    next: *Task_Info;
+    prev: *Task_Info;
 }
 
 Scheduler :: struct {
@@ -112,22 +115,13 @@ core_begin_multitasking :: () {
     core.online = true;
 
     // Enable scheduling clock - either LAPIC or preferably TSC Deadline.
-    lapic_timer: Apic_Lvt_Timer;
+    using kernel_globals;
 
-    if kernel_globals.tsc_deadline_support {
-        set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
-
-        delay := kernel_globals.tsc_frequency / 10;
-        write_msr(.TSC_DEADLINE, rdtsc() + delay);
+    if tsc_deadline_support {
+        configure_tsc_deadline_interrupt(scheduling_interrupt_gate);
     } else {
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0040_0000);
-        set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
+        configure_apic_timer_interrupt(0x40_0000, scheduling_interrupt_gate);
     }
-
-    set(*lapic_timer, .gate_index, kernel_globals.local_apic_timer_interrupt_gate);
-    set(*lapic_timer, .mask,       0);
-
-    write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
 }
 
 put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
@@ -264,9 +258,8 @@ DISABLE_KERNEL_PREEMPTION :: false;
 scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
-    if kernel_globals.tsc_deadline_support {
-        delay := kernel_globals.tsc_frequency / 10;
-        write_msr(.TSC_DEADLINE, rdtsc() + delay);
+    defer if kernel_globals.tsc_deadline_support {
+        schedule_tsc_deadline_interrupt(20);
     }
 
     core := get_current_core();
@@ -668,6 +661,37 @@ task_do_work_in_ring_3 :: () #c_call {
     }
 }
 
+
+/*
+Task_Queue :: struct {
+    front: *Task_Info;
+    back:  *Task_Info;
+
+    protected_by: *Spinlock;
+}
+
+push_back :: (queue: *Task_Queue, item: *Task_Info) {
+    if queue.back {
+        assert(queue.back.next == null);
+        queue.back.next = item;
+    }
+
+    item.next  = queue.back;
+    item.prev  = null;
+    queue.back = item;
+
+    if !queue.front {
+        queue.front = queue.back;
+    }
+}
+
+pop_front :: (queue: *Task_Queue) -> *Task_Info {
+    if !queue.front return null;
+
+    assert(queue.front.prev == null);
+    queue.front
+}
+*/
 
 
 Queue :: struct (Item_Type: Type) {

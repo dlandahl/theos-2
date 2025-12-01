@@ -97,7 +97,7 @@ read_configuration_space :: (base_address: u64, bus: int, device: int, function:
     device_offset := cast(u64, bus * 256 + device * 8 + function);
     address := base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
 
-    header := cast(*Pci_Configuration_Space, address + DIRECT_MAPPING_BASE);
+    header := cast(*Pci_Configuration_Space, address + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
 
     if header.vendor_id == PCI_VENDOR_ID_NO_DEVICE {
         return null;
@@ -115,16 +115,18 @@ Pci_Configuration_Space :: struct {
 
     vendor_id:       u16;
     device_id:       u16;
+    command:         Pci_Command;
     status:          u16;
-    command:         u16;
     revision_id:     u8;
     prog_if:         u8;
     subclass:        u8;
-    class_code:      Pci_Class_Code;
+    class_code:      Pci_Class;
     cache_line_size: u8;
     latency_timer:   u8;
     header_type:     u8;
     bist:            u8;
+
+    // Todo: probably just put BARs here to simplify the BAR reading code.
 
 #place start; _: [0x34] u8;
     capability_pointer: u32;
@@ -606,8 +608,8 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     log("Vendor ID: %", hex(device.vendor_id));
     log("Device ID: %", hex(device.device_id));
 
-    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
-    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+    device.command |= .BUS_MASTER | .MEMORY_SPACE;
+    device.command &= ~.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
     enabled := enable_msi_or_msi_x(device, isr__i8254x_interrupt);
@@ -694,7 +696,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // Allocate transmit descriptor queue
         transmit_desc_buffer := get_4k_page();
 
-        nic.tx_queue.data = cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
+        nic.tx_queue.data = cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nic.tx_queue.count = 4096 / size_of(I8254x_Transmit_Descriptor);
 
         nic.TDBAL__transmit_descriptor_base_low  = cast(u32, transmit_desc_buffer & 0xffff_ffff);
@@ -734,7 +736,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // Allocate receive descriptor queue
         receive_desc_buffer := get_4k_page();
 
-        nic.rx_queue.data = cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE);
+        nic.rx_queue.data = cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nic.rx_queue.count = 4096 / size_of(I8254x_Receive_Descriptor);
 
         nic.RDBAL__receive_descriptor_base_low  = cast(u32, receive_desc_buffer & 0xffff_ffff);
@@ -1008,8 +1010,8 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     if device.class_code != .MASS_STORAGE bluescreen();
     if device.subclass   != 0x8           bluescreen();
 
-    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
-    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+    device.command |= .BUS_MASTER | .MEMORY_SPACE;
+    device.command &= ~.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
 
@@ -1095,7 +1097,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
         nvme_send_admin_command(*nvme, admin_command);
 
-        nvme.io_sq = xx (io_sq_base + DIRECT_MAPPING_BASE);
+        nvme.io_sq = xx (io_sq_base + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nvme.io_cq = xx (io_cq_base + DIRECT_MAPPING_BASE);
     }
 
@@ -1152,7 +1154,7 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     nvme.ASQ__admin_sq = admin_sq;
     nvme.ACQ__admin_cq = admin_cq;
 
-    nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
+    nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
     nvme.admin_cq = cast(*Nvme_Completion_Queue_Entry, admin_cq + DIRECT_MAPPING_BASE);
 
     NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
@@ -1266,8 +1268,8 @@ ahci_interrupt :: (data: *void) {
 init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
     log_category("AHCI");
 
-    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
-    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+    device.command |= .BUS_MASTER | .MEMORY_SPACE;
+    device.command &= ~.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
     enable_msi_or_msi_x(device, isr__ahci_interrupt);
@@ -1716,17 +1718,74 @@ HBA_PxSIG__Ahci_Port_Signature :: enum u32 {
 
 
 
-Intel_HDA_Memory_Region :: struct {
-    offset: [8] u8;
-    gctl__global_control: GCTL__Global_Control;
+High_Definition_Audio :: struct {
+    using mmio: *Intel_HDA_Memory_Region;
+
+    // Measured in commands not bytes.
+    corb_size: int;
+    rirb_size: int;
 }
 
-GCTL__Global_Control :: enum u32 {
-    CRST__controller_rest :: 1;
-    FCNTRL__flush_control :: 1;
-    reserved_0            :: 6;
-    UNSOL                 :: 8;
-    reserved_1            :: 16;
+Intel_HDA_Memory_Region :: struct {
+    start: void;
+
+    GCAP: u16;
+    VMIN: u8;
+    VMAJ: u8;
+    OUTPAY: u16;
+    INPAY:  u16;
+
+    GCTL__global_control: HDA_GCTL__Global_Control;
+    WAKEEN: u16;
+    STATESTS__state_change_status: u16;
+    GSTS: u16;
+
+    OUTSTRMPAY: u16 #align 8;
+    INSTRMPAY:  u16;
+
+#place start; _: [0x40] u8;
+    CORBLBASE__corb_lower_base: u32;
+    CORBUBASE__corb_upper_base: u32;
+
+    CORBWP__corb_write_pointer: u16;
+    CORBRP__corb_read_pointer: u16;
+    CORBCTL__corb_control: enum_flags u8 {
+        CMEIE   :: 1;
+        CORBRUN :: 2;
+    };
+
+    CORBSTS__corb_status: u8;
+    CORBSIZE__corb_size: HDA_RB_Size;
+
+#place start; _: [0x50] u8;
+    RIRBBLBASE__rirb_lower_base: u32;
+    RIRBBUBASE__rirb_upper_base: u32;
+
+    RIRBWP__rirb_write_pointer: u16;
+    RINTCNT__interrupt_count: u16;
+    RIRBCTL__rirb_control: u8;
+    RIRBSTS__rirb_status: u8;
+    RIRBSIZE__rirb_size: HDA_RB_Size;
+}
+
+HDA_RB_Size :: enum u8 {
+    RBSIZE  :: 2;
+    _       :: 2;
+    RBSZCAP :: 4;
+};
+
+HDA_GCTL__Global_Control :: enum u32 {
+    CRST__controller_reset :: 1;
+    FCNTRL__flush_control  :: 1;
+    reserved_0             :: 6;
+    UNSOL                  :: 8;
+    reserved_1             :: 16;
+}
+
+HDA_Codec_Verb :: enum u32 {
+    payload       :: 20;
+    node_id       :: 8;
+    codec_address :: 4;
 }
 
 init_high_definition_audio_controller :: (device: *Pci_Device) {
@@ -1734,14 +1793,65 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
 
     log("Found an INTEL HDA audio device");
 
+    hda: High_Definition_Audio;
+
     bar0 := read_base_address_register(device, 0);
-    mmio := map_base_address_register(bar0);
+    hda.mmio = cast(*Intel_HDA_Memory_Region)map_base_address_register(bar0);
+
+    set_bit(*hda.GCTL__global_control, .CRST__controller_reset);
+
+    if Timeout(get_bit(*hda.GCTL__global_control, .CRST__controller_reset)) {
+        log_error("Failed to reset (CRST remains low).");
+        return;
+    }
+
+    busy_wait(521);
+
+    statests := hda.STATESTS__state_change_status;
+    bits := formatInt(statests, base=2);
+    log("Active codecs: %", bits);
+
+    ringbuffer_memory := get_4k_page(); // Todo: ensure this is low (sub-4Gb) memory. We will need some reserved physical memory for that purpose.
+    assert(ringbuffer_memory < 0x1_0000_0000);
+
+    hda.CORBCTL__corb_control &= ~.CORBRUN;
+    if Timeout(hda.CORBCTL__corb_control & .CORBRUN) {
+        log_error("Failed to stop CORB.");
+        return;
+    }
+
+    corbszcap := get(hda.CORBSIZE__corb_size, .RBSZCAP);
+    if corbszcap & 0b0100 == 0 {
+        log_error("Large output buffer size is not supported by the device. Todo.");
+        return;
+    }
+    set(*hda.CORBSIZE__corb_size, .RBSIZE, 0b10);
+
+    hda.CORBRP__corb_read_pointer |= 1 << 15;
+    hda.CORBWP__corb_write_pointer &= 0xff;
+
+    hda.corb_size = 256;
+
+    hda.CORBLBASE__corb_lower_base = cast(u32)ringbuffer_memory;
+}
+
+hda_submit_command :: (hda: *High_Definition_Audio, verb: HDA_Codec_Verb) -> enum {success; buffer_full;} {
+    rp := cast(int) hda.CORBRP__corb_read_pointer & 0xff;
+    wp := cast(int) hda.CORBWP__corb_write_pointer & 0xff;
+
+    free_space := ifx wp < rp then (hda.corb_size - wp + rp) else (rp - wp);
+    if free_space == 0 {
+        return .buffer_full;
+    }
+
+    // ...
+
+    return .success;
 }
 
 
 
-
-Pci_Class_Code :: enum u8 {
+Pci_Class :: enum u8 {
     UNCLASSIFIED             :: 0x0;
     MASS_STORAGE             :: 0x1;
     NETWORK                  :: 0x2;

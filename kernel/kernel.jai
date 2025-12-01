@@ -9,8 +9,12 @@
 #import "Hash";
 
 #import "Bitfield"(true);
+
 set :: bitfield_set;
 get :: bitfield_get;
+
+set_bit :: bitfield_set_bit;
+get_bit :: bitfield_get_bit;
 
 #import "Aes";
 #import "Jai_Crypto";
@@ -86,7 +90,7 @@ Kernel_Globals :: struct {
 
     apic: *void;
     io_apic: *u32;
-    local_apic_timer_interrupt_gate: int;
+    scheduling_interrupt_gate: int;
 
     high_precision_timer: HPET;
 
@@ -282,17 +286,17 @@ kernel_entry :: () #no_context {
             while !core.online pause();
         }
 
-        if false for* pci_devices {
+        for* pci_devices {
             #asm { sti; }
 
-            if it.class_code == .MASS_STORAGE {
+            if false if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
                     case 0x8; init_nvme_controller(it);
                     case 0x6; init_ahci_controller(it);
                 }
             }
 
-            if it.class_code == .NETWORK && it.subclass == 0x0 {
+            if false if it.class_code == .NETWORK && it.subclass == 0x0 {
                 kernel_globals.net.adapter = init_i8254x(it);
             }
 
@@ -303,17 +307,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        thread_index := 1;
-
-        for *core: processor_cores {
-            for 1..3 {
-                name := tprint("Do Work %:%", core.id, thread_index);
-                task := create_task(task_do_work, kernel_stack_size = 0x8_0000, user_stack_size = 0x8_0000, name = name);
-                put_task_on_core(task, core);
-
-                thread_index += 1;
-            }
-        }
+        user_mode_stress_test();
 
         while true {
             schedule_tasks();
@@ -322,15 +316,28 @@ kernel_entry :: () #no_context {
     }
 }
 
+user_mode_stress_test :: () {
+    thread_index := 1;
+
+    for *core: kernel_globals.processor_cores {
+        for 1..4 {
+            name := tprint("Do Work %:%", core.id, thread_index);
+            task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
+            put_task_on_core(task, core);
+
+            thread_index += 1;
+        }
+    }
+}
+
 network_test :: () {
     using kernel_globals;
 
-    network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
+    network_adapter_initialized := net.adapter.mmio != null;
+    assert(network_adapter_initialized);
 
-    if network_adapter_initialized {
-        task := create_task(network_thread, name = "Network Thread");
-        put_task_on_core(task, *processor_cores[1]);
-    }
+    task := create_task(network_thread, name = "Network Thread");
+    put_task_on_core(task, *processor_cores[1]);
 
     log("Waiting for DHCP handshake.");
     Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
@@ -885,7 +892,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pd\ _offset := (virtual_address >> 21) & mask;
     pt\ _offset := (virtual_address >> 12) & mask;
 
-    pml4 := kernel_globals.boot_data.page_tables.pml4.data;
+    pml4 := kernel_globals.page_tables.pml4.data;
 
     pdpt := get_or_create_page_table(pml4, pml4_offset);
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
@@ -1359,7 +1366,7 @@ is_held :: (lock: Spinlock) -> bool #no_context {
     now_serving := cast(u16) (lock & 0xffff);
     next_ticket := cast(u16) (lock >> 16);
 
-    return now_serving.* != next_ticket.*;
+    return now_serving != next_ticket;
 }
 
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
@@ -1415,7 +1422,7 @@ acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
         // If it's too early in boot for multiprocessing to be enabled, core_id can remain zero to indicate the bootstrap core.
     }
 
-    if is_held(*lock.lock) && lock.held_by_core == core_id {
+    if is_held(lock.lock) && lock.held_by_core == core_id {
         lock.recursion_count += 1;
         return 0;
     }
@@ -1566,6 +1573,8 @@ align :: (alignment: int, value: int) -> int #no_context {
 
     return (value + (alignment - 1)) & -alignment;
 }
+
+// These are mainly used by drivers when waiting for a response from the device. Maybe they should yield when the timeout is long.
 
 Timeout_Block :: (code: Code, time_ms := 1000) -> bool #expand {
     start := get_monotonic_system_time();

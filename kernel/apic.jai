@@ -93,20 +93,6 @@ write_apic_register :: (register: Apic_Register, value: u32) #no_context {
     cast(*u32, kernel_globals.apic + cast(u64) register).* = value;
 }
 
-Apic_Lvt_Timer :: enum u32 {
-    gate_index      :: 8;
-    reserved_0      :: 4;
-    delivery_status :: 1;
-    reserved_1      :: 3;
-    mask            :: 1;
-    timer_mode      :: 2;
-    reserved_2      :: 13;
-} @Bitfield
-
-APIC_TIMER_MODE_ONE_SHOT     :: 0b00;
-APIC_TIMER_MODE_PERIODIC     :: 0b01;
-APIC_TIMER_MODE_TSC_DEADLINE :: 0b10;
-
 initialize_apic :: () {
 
     // Disable the older interrupt controller. I sort of assume UEFI does this anyway.
@@ -218,7 +204,7 @@ initialize_apic :: () {
     register_interrupt_gate(isr__scheduling_timer_interrupt, timer_gate);
 
     // Store this, to be able to configure the APIC timer (or TSC deadline) of all cores to use the same interrupt handler, which is done in core_begin_multitasking.
-    kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
+    kernel_globals.scheduling_interrupt_gate = timer_gate;
 
     kernel_globals.tasks.allocator = context.allocator;
     kernel_globals.next_task_id = 1;
@@ -311,6 +297,7 @@ gs_relative_read  :: (offset: int) -> u64 #foreign Assembly;
 gs_relative_write :: (offset: int) -> u64 #foreign Assembly;
 gs_relative_inc   :: (offset: int) -> u64 #foreign Assembly;
 gs_relative_dec   :: (offset: int) -> u64 #foreign Assembly;
+
 
 
 ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {

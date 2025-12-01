@@ -62,6 +62,31 @@ bitfield_get :: inline (bitfield: $B, flag: $F, $loc := #caller_location, $call 
     return cast(F.loose) value;
 }
 
+
+bitfield_set_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
+    return handle_as(*B, *F);
+} {
+    bit_mask :: #run get_single_bit_mask(B, loc, call);
+
+    bitfield.* |= bit_mask;
+}
+
+bitfield_clear_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
+    return handle_as(*B, *F);
+} {
+    bit_mask :: #run get_single_bit_mask(B, loc, call);
+
+    bitfield.* &= ~bit_mask;
+}
+
+bitfield_get_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) -> bool #modify {
+    return handle_as(*B, *F);
+} {
+    bit_mask :: #run get_single_bit_mask(B, loc, call);
+
+    return bitfield.* & bit_mask > 0;
+}
+
 print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct = null, $loc := #caller_location) {
     ti :: type_info(B);
 
@@ -191,6 +216,22 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
 
     bit_mask <<= bit_offset;
     return bit_mask, bit_offset;
+}
+
+#import "Bit_Operations";
+get_single_bit_mask :: (bitfield: Type, loc: Source_Code_Location, call: Code) -> int {
+    bit := calculate_mask_and_offset(bitfield, loc, call);
+
+    count := popcount(bit);
+    if count != 1 {
+        ti := cast(*Type_Info_Enum) bitfield;
+        name := ifx ti.name else "(anonymous type)";
+
+        error := tprint("A member of the bitfield \"%\" was used as a single bit argument, but is % bits wide.", name, count);
+        compiler_report(error, loc);
+    }
+
+    return bit;
 }
 
 validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
