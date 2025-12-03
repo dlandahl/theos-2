@@ -12,6 +12,7 @@ Task_Info :: struct {
     name: string;
 
     entry_point: ();
+    user_data: *void;
 
     _context: *#Context;
 
@@ -19,7 +20,7 @@ Task_Info :: struct {
     kernel_stack: *void;
 
     sleeping: bool;
-    waiting_for_mutex: bool;
+    blocked: bool;
 
     sleep_until: Apollo_Time;
 
@@ -28,9 +29,6 @@ Task_Info :: struct {
     on_core: *X64_Core;
 
     cpu_time: Apollo_Time;
-
-    next: *Task_Info;
-    prev: *Task_Info;
 }
 
 Scheduler :: struct {
@@ -137,7 +135,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "") -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "", user_data: *void = null) -> *Task_Info {
 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
@@ -163,6 +161,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
     new_task.xsave.mxcsr = mxcsr;
     new_task.entry_point = entry_point;
     new_task.name = name;
+    new_task.user_data = user_data;
 
     return new_task;
 }
@@ -193,7 +192,7 @@ schedule_tasks :: () {
     }
 
     next: *Task_Info;
-    current_task_wants_to_run := !current.sleeping && !current.waiting_for_mutex && current != scheduler.idle_task;
+    current_task_wants_to_run := !current.sleeping && !current.blocked && current != scheduler.idle_task;
 
     {
         // Pick next task to run.
@@ -258,7 +257,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
     defer if global.tsc_deadline_support {
-        schedule_tsc_deadline_interrupt(20);
+        schedule_tsc_deadline_interrupt(1);
     }
 
     core := get_current_core();
@@ -283,6 +282,12 @@ sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds
 }
 
 sleep :: (time: Apollo_Time) {
+    if time == APOLLO_TIME_INVALID {
+        // This lets us easily implement optional timeouts when blocked by something.
+        yield_execution();
+        return;
+    }
+
     sleep_until(get_monotonic_system_time() + time);
 }
 
@@ -296,11 +301,7 @@ sleep_until :: (time: Apollo_Time) {
     queue := scheduler.sleep_queue;
     previous: *Task_Info;
 
-    if !queue {
-        scheduler.sleep_queue = task;
-        task.next_sleeping = null;
-    } else while (true) {
-
+    while (true) {
         if !queue || queue.sleep_until > time {
             if queue == scheduler.sleep_queue {
                 scheduler.sleep_queue = task;
@@ -318,6 +319,38 @@ sleep_until :: (time: Apollo_Time) {
 
     release(*scheduler.spinlock, flags);
     yield_execution();
+}
+
+wake_task :: (task: *Task_Info) {
+    flags, scheduler := lock_scheduler_for_task(task);
+
+    // By the time we got the lock, the task might not have been blocked anymore.
+    if !task.sleeping {
+        release(*scheduler.spinlock, flags);
+        return;
+    }
+
+    task.sleeping = false;
+
+    // Remove from sleep queue. Todo: hardcoded.
+    curr := scheduler.sleep_queue;
+    prev: *Task_Info;
+    while true {
+        assert(curr != null);
+
+        if curr == task {
+            if prev   prev.next_sleeping    = task.next_sleeping;
+            else      scheduler.sleep_queue = task.next_sleeping;
+
+            break;
+        }
+
+        prev = curr;
+        curr = curr.next_sleeping;
+    }
+
+    queue_push(*scheduler.waiting_to_run, task);
+    release(*scheduler.spinlock, flags);
 }
 
 
@@ -342,7 +375,7 @@ acquire_mutex :: (using mutex: *Mutex) {
     }
 
     queue_push(*queue, task);
-    task.waiting_for_mutex = true;
+    task.blocked = true;
 
     release(*spinlock, flags);
     yield_execution();
@@ -366,8 +399,8 @@ release_mutex :: (using mutex: *Mutex) {
 
     flags = lock_scheduler_for_task(next);
 
-    assert(next.waiting_for_mutex);
-    next.waiting_for_mutex = false;
+    assert(next.blocked);
+    next.blocked = false;
 
     scheduler := *next.on_core.scheduler;
     queue_push(*scheduler.waiting_to_run, next);
@@ -397,30 +430,71 @@ trylock_mutex :: (using mutex: *Mutex) -> bool {
 Semaphore :: struct {
     spinlock: Spinlock;
     counter: int;
-    queue: Queue(*Task_Info);
+
+    Waiter :: struct {
+        task: *Task_Info;
+
+        // This is to prevent a race. If we get signalled, but then timeout before being woken, this will tell us that this happened and that we're now holding the semaphore despite having timed out.
+        signalled: bool;
+    }
+
+    queue: List_Queue(Waiter);
 }
 
-wait_for :: (using sema: *Semaphore) {
+wait_for :: (using sema: *Semaphore, timeout := APOLLO_TIME_INVALID) -> bool {
+
     flags := acquire(*spinlock);
 
     if counter > 0 {
         counter -= 1;
         release(*spinlock, flags);
-        return;
+        return true;
     }
 
     task := get_current_task();
 
-    // The flag is only used to check if the current task is still runnable when yielding execution. Therefore we can reuse the one from mutex.
-    // This sort of thing will be cleaned up soon when scheduling queues get refactored.
-    task.waiting_for_mutex = true;
+    // The flag is used to check if the current task is still runnable when yielding execution.
+    task.blocked = true;
 
-    queue_push(*queue, task);
-    release(*spinlock, flags);
+    waiter: queue.Node;
+    waiter.task = task;
+    queue_push(*queue, *waiter);
 
-    yield_execution();
+    end_time := get_monotonic_time() + timeout;
+    remaining_timeout := timeout;
 
-    // With the current implementation, we know it's our turn if we are woken up. This will change in the future as the scheduler and thread primitives get more features, such as timeout etc.
+    while true {
+        release(*spinlock, flags);
+
+        sleep(remaining_timeout);
+
+        flags = acquire(*spinlock);
+
+        if waiter.signalled {
+            release(*spinlock, flags);
+            return true;
+        }
+
+        if timeout == APOLLO_TIME_INVALID {
+            continue;
+        }
+
+        woke_at_time := get_monotonic_time();
+
+        if woke_at_time < end_time {
+            // We have been awoken for the wrong reason. Can happen due to a race where the task is sleeping for a different reason by the time 'wake_task' gets the lock.
+            remaining_timeout -= end_time - woke_at_time;
+            continue;
+        }
+
+        // If we get here we've timed out. Remove ourselves from the wait queue and inform the caller.
+        queue_remove(*queue, *waiter);
+        release(*spinlock, flags);
+        return false;
+    }
+
+    assert(false);
+    return true;
 }
 
 signal :: (using sema: *Semaphore) {
@@ -432,16 +506,15 @@ signal :: (using sema: *Semaphore) {
         return;
     }
 
-    next := queue_pop(*queue);
+    waiter := queue_pop(*queue);
+    waiter.signalled = true;
+    waiter.task.blocked = false;
+
+    to_wake := waiter.task; // 'waiter' may become stale once we release the spinlock.
+
     release(*spinlock, flags);
 
-    flags = lock_scheduler_for_task(next);
-
-    next.waiting_for_mutex = false;
-
-    scheduler := *next.on_core.scheduler;
-    queue_push(*scheduler.waiting_to_run, next);
-    release(*scheduler.spinlock, flags);
+    wake_task(to_wake);
 }
 
 
@@ -661,36 +734,77 @@ task_do_work_in_ring_3 :: () #c_call {
 }
 
 
-/*
-Task_Queue :: struct {
-    front: *Task_Info;
-    back:  *Task_Info;
 
-    protected_by: *Spinlock;
-}
-
-push_back :: (queue: *Task_Queue, item: *Task_Info) {
-    if queue.back {
-        assert(queue.back.next == null);
-        queue.back.next = item;
+List_Queue :: struct (Item_Type: Type) {
+    Node :: struct {
+        next: *Node;
+        using item: Item_Type;
     }
 
-    item.next  = queue.back;
-    item.prev  = null;
-    queue.back = item;
+    first: *Node;
+    last:  *Node;
+}
 
-    if !queue.front {
-        queue.front = queue.back;
+queue_push :: (queue: *List_Queue, item: *queue.Node) {
+    item.next = null;
+
+    if queue.first == null {
+        assert(queue.last == null);
+
+        queue.first = item;
+        queue.last = item;
+
+        return;
+    }
+
+    assert(queue.last != null);
+
+    queue.last.next = item;
+    queue.last      = item;
+}
+
+queue_pop :: (queue: *List_Queue) -> *queue.Node {
+    assert(queue.first != null);
+    result := queue.first;
+
+    queue.first = queue.first.next;
+    if queue.first == null queue.last = null;
+
+    return result;
+}
+
+queue_remove :: (queue: *List_Queue, item: *queue.Node) {
+    prev: *queue.Node;
+    curr := queue.first;
+
+    while true {
+        assert(curr != null); // For now, caller always needs to know that the item is in the queue, to help catch bugs.
+
+        if curr == item {
+            if prev   prev.next   = item.next;
+            else      queue.first = item.next;
+
+            if queue.last == item {
+                queue.last = prev;
+            }
+
+            return;
+        }
+
+        prev = curr;
+        curr = curr.next;
     }
 }
 
-pop_front :: (queue: *Task_Queue) -> *Task_Info {
-    if !queue.front return null;
+queue_is_empty :: (queue: List_Queue) -> bool {
+    if queue.first == null {
+        assert(queue.last == null);
+        return true;
+    }
 
-    assert(queue.front.prev == null);
-    queue.front
+    return false;
 }
-*/
+
 
 
 Queue :: struct (Item_Type: Type) {

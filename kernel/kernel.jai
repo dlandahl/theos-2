@@ -307,7 +307,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        user_mode_stress_test();
+        semaphore_test();
 
         while true {
             schedule_tasks();
@@ -359,6 +359,61 @@ network_test :: () {
     if false {
         request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
         transmit_tcp_packet(*global.net, *global.net.tcp_connections[0], .ACK | .PSH, request);
+    }
+}
+
+semaphore_test :: () {
+
+    proc :: () {
+        task := get_current_task();
+        using data := cast(*type_of(user_data)) task.user_data;
+
+        while true {
+            us := cast(s64)rdtsc() % 1_000_000;
+            busy_wait(us);
+
+            log("[%] Trying to take the semaphore.", task.name);
+
+            us = cast(s64)rdtsc() % 200_000;
+            if wait_for(*sem, microseconds_to_apollo(us)) {
+                holders += 1;
+                log("[%] Got the semaphore. Holders: %", task.name, holders);
+
+                us := cast(s64)rdtsc() % 500_000;
+                busy_wait(us);
+
+                holders -= 1;
+                signal(*sem);
+            } else {
+                log("[%] Timed out after %ms", task.name, us / 1000);
+            }
+        }
+    }
+
+    user_data: struct {
+        sem: Semaphore;
+        holders: int;
+    }
+
+    user_data.sem.counter = 2;
+
+    thread_index := 1;
+
+    #asm { sti; }
+
+    for *core: global.processor_cores {
+        for 1..2 {
+            name := tprint("Sem test %:%", core.id, thread_index);
+            task := create_task(proc, kernel_stack_size = 0x4_0000, name = name, user_data = *user_data);
+            put_task_on_core(task, core);
+
+            thread_index += 1;
+        }
+    }
+
+    while true {
+        schedule_tasks();
+        #asm { sti; hlt; }
     }
 }
 
