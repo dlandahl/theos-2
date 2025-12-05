@@ -296,18 +296,18 @@ kernel_entry :: () #no_context {
                 }
             }
 
-            if false if it.class_code == .NETWORK && it.subclass == 0x0 {
+            if it.class_code == .NETWORK && it.subclass == 0x0 {
                 global.net.adapter = init_i8254x(it);
             }
 
-            if it.class_code == .MULTIMEDIA {
+            if false if it.class_code == .MULTIMEDIA {
                 if it.subclass == 0x3 {
                     init_high_definition_audio_controller(it);
                 }
             }
         }
 
-        semaphore_test();
+        network_test();
 
         while true {
             schedule_tasks();
@@ -331,34 +331,59 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
+    USE_DNS :: false;
+
+    log_category("Test");
 
     network_adapter_initialized := global.net.adapter.mmio != null;
     assert(network_adapter_initialized);
 
-    task := create_task(network_thread, name = "Network Thread");
+    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x4_0000);
     put_task_on_core(task, *global.processor_cores[1]);
 
     log("Waiting for DHCP handshake.");
     Timeout(global.net.dhcp_handshake_state == .COMPLETED, 60_000);
 
-    log("Sending DNS Query");
-    dns_query := transmit_dns_query(*global.net, "google.com");
+    ip_address := bit_cast(u8.[192, 168, 1, 65], u32);
 
-    Timeout(dns_query.complete, 60_000);
-    // assert(dns_query.answer != 0);
+    #if USE_DNS {
+        log("Sending DNS Query");
+        dns_query := transmit_dns_query(*global.net, "google.com");
 
-    // hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
-    transmit_ping(*global.net, dns_query.answer);
+        if Timeout(dns_query.complete, 60_000) {
+            bluescreen();
+        }
 
-    connection := initiate_tcp_connection(*global.net, dns_query.answer, 443);
+        ip_address = dns_query.answer;
+    }
+
+    transmit_ping(*global.net, ip_address);
+
+    connection := initiate_tcp_connection(*global.net, ip_address, 4443);
 
     Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
     tls := initiate_tls_connection(*global.net, connection);
 
+    while true {
+        auto_release_temp(); // Reading from a TCP stream uses temporary storage.
+
+        received := blocking_read_tcp_bytes(tls.tcp, size_of(Tls_Record_Header));
+        record := cast(*Tls_Record_Header)received.data;
+
+        byte_swap_protocol_header(record);
+
+        received = blocking_read_tcp_bytes(tls.tcp, record.length);
+
+        log("Received TLS message: %", cast(string)received);
+
+        // ... handle the TLS message in 'received'.
+        handle_tls_message(*tls, record);
+    }
+
     if false {
         request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-        transmit_tcp_packet(*global.net, *global.net.tcp_connections[0], .ACK | .PSH, request);
+        transmit_tcp_packet(*global.net.tcp_connections[0], .ACK | .PSH, request);
     }
 }
 
@@ -1427,7 +1452,9 @@ is_held :: (lock: Spinlock) -> bool #no_context {
 acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
 
     // Todo: For now, spinlocks disable all IRQs. Really, if the same spinlock will not be used from interrupt handlers, we only need to disable preemption.
-    flags := disable_interrupts();
+    // flags := disable_interrupts();
+
+    preempt_disable();
 
     now_serving := cast(*u16)lock;
     next_ticket := cast(*u16)lock + 1;
@@ -1438,7 +1465,7 @@ acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
         #asm { pause; }
     }
 
-    return flags;
+    return 0;
 }
 
 release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
@@ -1446,7 +1473,8 @@ release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
     now_serving := cast(*u16)lock;
     now_serving.* += 1;
 
-    restore_interrupts(flags);
+    preempt_restore();
+    // restore_interrupts(flags);
 }
 
 Scoped_Acquire :: (lock: *Spinlock) #expand {

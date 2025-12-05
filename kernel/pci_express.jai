@@ -1060,7 +1060,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
         nvme_send_admin_command(*nvme, admin_command);
 
-        nsid_list := cast(*[1024] u32, admin_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+        nsid_list := cast(*[1024]u32) (admin_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
 
         for nsid_list.* if it != 0 {
             nvme.nsid = it;
@@ -1113,8 +1113,8 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_command.NLB__number_of_logical_blocks = 0; // This means 1 block
 
         nvme_send_io_command(*nvme, io_command);
-        
-        if cast(*u16, buffer + 510 + DIRECT_MAPPING_BASE).* == 0xaa55 {
+
+        if (.*) cast(*u16) (buffer + 510 + DIRECT_MAPPING_BASE) == 0xaa55 {
             log("Success");
         } else {
             log("Failure");
@@ -1145,7 +1145,6 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     // Subtract one, because the field is zero based.
     queue_size := nvme.queue_size - 1;
 
-    // Don't write these fields individually, since 16-bit access is not necessarily supported on 32-bit registers.
     nvme.AQA__admin_queue_attributes = .{
         cast(u16) queue_size,
         cast(u16) queue_size
@@ -1154,8 +1153,12 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     nvme.ASQ__admin_sq = admin_sq;
     nvme.ACQ__admin_cq = admin_cq;
 
-    nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
-    nvme.admin_cq = cast(*Nvme_Completion_Queue_Entry, admin_cq + DIRECT_MAPPING_BASE);
+    virt := alloc_block(*global.virtual_block_allocator, 4096 * 2);
+    map_page(virt,        admin_sq, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
+    map_page(virt + 4096, admin_cq, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
+
+    nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry) virt;
+    nvme.admin_cq = cast(*Nvme_Completion_Queue_Entry) (virt + 4096);
 
     NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
     IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
@@ -1198,9 +1201,9 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
     admin_sq_tail += 1;
     if admin_sq_tail == queue_size then admin_sq_tail = 0;
 
+    barrier();
     SQ0TDBL__submission_queue_0_tail_doorbell = admin_sq_tail;
 
-    barrier();
     Timeout((admin_cq[admin_cq_head].STATUS__status & 1) != start_phase);
 
     status := admin_cq[admin_cq_head].STATUS__status >> 1;
@@ -1226,9 +1229,10 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
 
     sq_tail_doorbell := *doorbell_base;
     sq_tail_doorbell += 2 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
-    cast(*u32, sq_tail_doorbell).* = io_sq_tail;
 
     barrier();
+    cast(*u32, sq_tail_doorbell).* = io_sq_tail;
+
     Timeout((io_cq[io_cq_head].STATUS__status & 1) != start_phase);
 
     status := io_cq[io_cq_head].STATUS__status >> 1;
@@ -1724,6 +1728,8 @@ High_Definition_Audio :: struct {
     // Measured in commands not bytes.
     corb_size: int;
     rirb_size: int;
+
+    corb: *[256]HDA_Codec_Verb;
 }
 
 Intel_HDA_Memory_Region :: struct {
@@ -1802,6 +1808,7 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
         // Reset controller.
 
         set_bit(*hda.GCTL__global_control, .CRST__controller_reset);
+        barrier();
 
         if Timeout(get_bit(*hda.GCTL__global_control, .CRST__controller_reset)) {
             log_error("Failed to reset (CRST remains low).");
@@ -1817,11 +1824,11 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
     bits := formatInt(statests, base=2);
     log("Active codecs: %", bits);
 
+    ringbuffer_memory := get_4k_page(); // Todo: ensure this is low (sub-4Gb) memory. We will need some reserved physical memory for that purpose.
+    assert(ringbuffer_memory < 0x1_0000_0000);
+
     {
         // Set up Command Output Ring Buffer (CORB).
-
-        ringbuffer_memory := get_4k_page(); // Todo: ensure this is low (sub-4Gb) memory. We will need some reserved physical memory for that purpose.
-        assert(ringbuffer_memory < 0x1_0000_0000);
 
         hda.CORBCTL__corb_control &= ~.CORBRUN;
         if Timeout(hda.CORBCTL__corb_control & .CORBRUN) {
@@ -1837,11 +1844,14 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
         set(*hda.CORBSIZE__corb_size, .RBSIZE, 0b10);
 
         hda.CORBRP__corb_read_pointer |= 1 << 15;
-        hda.CORBWP__corb_write_pointer &= 0xff;
+        hda.CORBWP__corb_write_pointer &= 0xff_00;
 
         hda.corb_size = 256;
 
         hda.CORBLBASE__corb_lower_base = cast(u32)ringbuffer_memory;
+        hda.CORBUBASE__corb_upper_base = 0;
+
+        hda.CORBCTL__corb_control |= .CORBRUN;
     }
 }
 
@@ -1849,10 +1859,13 @@ hda_submit_command :: (hda: *High_Definition_Audio, verb: HDA_Codec_Verb) -> enu
     rp := cast(int) hda.CORBRP__corb_read_pointer & 0xff;
     wp := cast(int) hda.CORBWP__corb_write_pointer & 0xff;
 
-    free_space := ifx wp < rp then (hda.corb_size - wp + rp) else (rp - wp);
-    if free_space == 0 {
+    wp = (wp + 1) % hda.corb_size;
+    if wp == rp {
         return .buffer_full;
     }
+
+    // hda.corb[wp] = verb;
+    // hda.CORBWP__corb_write_pointer = cast(u16) next_wp;
 
     // ...
 

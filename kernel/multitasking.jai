@@ -84,16 +84,16 @@ allocate_task_info :: () -> *Task_Info {
 core_begin_multitasking :: () {
 
     core := get_current_core();
-    scheduler := *core.scheduler;
+    using core.scheduler;
 
-    queue_reserve(*scheduler.waiting_to_run, 256);
+    queue_reserve(*waiting_to_run, 256);
 
-    scheduler.current_task = allocate_task_info();
-    scheduler.current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
-    scheduler.current_task._context = *context;
-    scheduler.current_task.name = "Idle";
-    scheduler.current_task.on_core = core;
-    scheduler.idle_task = scheduler.current_task;
+    current_task = allocate_task_info();
+    current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    current_task._context = *context;
+    current_task.name = "Idle";
+    current_task.on_core = core;
+    idle_task = current_task;
 
     if core.id == 0 {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
@@ -105,9 +105,9 @@ core_begin_multitasking :: () {
             }
         }
 
-        scheduler.idle_task = create_task(idle, 0x2000, name = "Idle");
-        scheduler.idle_task.on_core = core;
-        scheduler.current_task.name = "Kernel Main";
+        idle_task = create_task(idle, 0x2000, name = "Idle");
+        idle_task.on_core = core;
+        current_task.name = "Kernel Main";
     }
 
     core.online = true;
@@ -117,7 +117,7 @@ core_begin_multitasking :: () {
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x40_0000, global.scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(0x400000, global.scheduling_interrupt_gate);
     }
 }
 
@@ -257,7 +257,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
     defer if global.tsc_deadline_support {
-        schedule_tsc_deadline_interrupt(1);
+        schedule_tsc_deadline_interrupt(5);
     }
 
     core := get_current_core();
@@ -275,6 +275,8 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 
+// Pretty indefinite.
+SLEEP_INDEFINITELY :: Apollo_Time.{0xffffffff_ffffffff, 0x7fffffff_ffffffff};
 
 sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
     time := #insert #run tprint("%_to_apollo(n);", units);
@@ -282,10 +284,8 @@ sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds
 }
 
 sleep :: (time: Apollo_Time) {
-    if time == APOLLO_TIME_INVALID {
-        // This lets us easily implement optional timeouts when blocked by something.
-        yield_execution();
-        return;
+    if time == SLEEP_INDEFINITELY {
+        sleep_until(SLEEP_INDEFINITELY);
     }
 
     sleep_until(get_monotonic_system_time() + time);
@@ -324,7 +324,7 @@ sleep_until :: (time: Apollo_Time) {
 wake_task :: (task: *Task_Info) {
     flags, scheduler := lock_scheduler_for_task(task);
 
-    // By the time we got the lock, the task might not have been blocked anymore.
+    // By the time we got the lock, the task might not be sleeping anymore.
     if !task.sleeping {
         release(*scheduler.spinlock, flags);
         return;
@@ -434,14 +434,14 @@ Semaphore :: struct {
     Waiter :: struct {
         task: *Task_Info;
 
-        // This is to prevent a race. If we get signalled, but then timeout before being woken, this will tell us that this happened and that we're now holding the semaphore despite having timed out.
+        // This is to prevent a race. If we get signalled, but then timeout before being woken, this flag will tell us that this happened and that we're now holding the semaphore despite having timed out.
         signalled: bool;
     }
 
     queue: List_Queue(Waiter);
 }
 
-wait_for :: (using sema: *Semaphore, timeout := APOLLO_TIME_INVALID) -> bool {
+wait_for :: (using sema: *Semaphore, timeout := SLEEP_INDEFINITELY) -> bool {
 
     flags := acquire(*spinlock);
 
@@ -453,7 +453,6 @@ wait_for :: (using sema: *Semaphore, timeout := APOLLO_TIME_INVALID) -> bool {
 
     task := get_current_task();
 
-    // The flag is used to check if the current task is still runnable when yielding execution.
     task.blocked = true;
 
     waiter: queue.Node;
@@ -466,6 +465,10 @@ wait_for :: (using sema: *Semaphore, timeout := APOLLO_TIME_INVALID) -> bool {
     while true {
         release(*spinlock, flags);
 
+        // Todo: Lost wake-up. If we get signalled right here before going to sleep we DO get unblocked correctly, but we wait to the end of the timeout for no reason.
+        // Normally you fix this by setting the state of the task that the scheduler bases its actions upon before calling into the scheduler. But here it happens
+        // inside the 'sleep' call.
+
         sleep(remaining_timeout);
 
         flags = acquire(*spinlock);
@@ -475,26 +478,21 @@ wait_for :: (using sema: *Semaphore, timeout := APOLLO_TIME_INVALID) -> bool {
             return true;
         }
 
-        if timeout == APOLLO_TIME_INVALID {
+        if timeout == SLEEP_INDEFINITELY {
             continue;
         }
 
         woke_at_time := get_monotonic_time();
 
         if woke_at_time < end_time {
-            // We have been awoken for the wrong reason. Can happen due to a race where the task is sleeping for a different reason by the time 'wake_task' gets the lock.
             remaining_timeout -= end_time - woke_at_time;
             continue;
         }
 
-        // If we get here we've timed out. Remove ourselves from the wait queue and inform the caller.
         queue_remove(*queue, *waiter);
         release(*spinlock, flags);
         return false;
     }
-
-    assert(false);
-    return true;
 }
 
 signal :: (using sema: *Semaphore) {
@@ -515,6 +513,10 @@ signal :: (using sema: *Semaphore) {
     release(*spinlock, flags);
 
     wake_task(to_wake);
+}
+
+is_up :: (using sema: Semaphore) -> bool {
+    return counter > 0;
 }
 
 
@@ -745,6 +747,34 @@ List_Queue :: struct (Item_Type: Type) {
     last:  *Node;
 }
 
+for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
+    #assert !(flags & .REVERSE);
+
+    prev: *queue.Node;
+
+    `it := queue.first;
+    `it_index: int;
+
+    while true {
+        if it == null {
+            break;
+        }
+
+        #insert (remove={
+            if prev   prev.next   = it.next;
+            else      queue.first = it.next;
+
+            if queue.last == it {
+                queue.last = prev;
+            }
+        }) body;
+
+        prev = it;
+        it = it.next;
+        it_index += 1;
+    }
+}
+
 queue_push :: (queue: *List_Queue, item: *queue.Node) {
     item.next = null;
 
@@ -774,25 +804,9 @@ queue_pop :: (queue: *List_Queue) -> *queue.Node {
 }
 
 queue_remove :: (queue: *List_Queue, item: *queue.Node) {
-    prev: *queue.Node;
-    curr := queue.first;
-
-    while true {
-        assert(curr != null); // For now, caller always needs to know that the item is in the queue, to help catch bugs.
-
-        if curr == item {
-            if prev   prev.next   = item.next;
-            else      queue.first = item.next;
-
-            if queue.last == item {
-                queue.last = prev;
-            }
-
-            return;
-        }
-
-        prev = curr;
-        curr = curr.next;
+    for queue.* if it == item {
+        remove it;
+        break;
     }
 }
 

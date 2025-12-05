@@ -1,4 +1,6 @@
 
+#import "Ring_Buffer";
+
 bs16 :: #bake_constants byte_swap(T=u16);
 bs32 :: #bake_constants byte_swap(T=u32);
 
@@ -333,20 +335,20 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
     return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x100);
 }
 
-init_tcp_header :: (net: *Network_Connection, con: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
-    tcp: Tcp_Header;
-    tcp.source_port = con.port;
-    tcp.destination_port = con.remote_port;
-    tcp.sequence_number = con.sequence_number;
-    tcp.ack_number = con.ack_number+1;
-    tcp.data_offset = 5 << 4;
-    tcp.flags = flags;
-    tcp.window = 4096;
+init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
+    h: Tcp_Header;
+    h.source_port = tcp.port;
+    h.destination_port = tcp.remote_port;
+    h.sequence_number = tcp.sequence_number;
+    h.ack_number = tcp.ack_number+1;
+    h.data_offset = 5 << 4;
+    h.flags = flags;
+    h.window = 4096;
 
-    byte_swap_protocol_header(*tcp);
-    tcp.checksum = tcp_checksum(tcp, net.our_ip, con.remote_ip, payload);
+    byte_swap_protocol_header(*h);
+    h.checksum = tcp_checksum(h, tcp.net.our_ip, tcp.remote_ip, payload);
 
-    return tcp;
+    return h;
 }
 
 Tcp_Header :: struct {
@@ -377,6 +379,8 @@ Tcp_Header :: struct {
 }
 
 Tcp_Connection :: struct {
+    net: *Network_Connection;
+
     port: u16;
 
     remote_port: u16;
@@ -399,12 +403,32 @@ Tcp_Connection :: struct {
 
     in_flight: [..] Tcp_Transmission_Info;
 
-    received_segments: [..] string;
+    stream: Ring_Buffer;
+    new_data: Semaphore;
+}
+
+blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
+    // Todo: timeout
+
+    buffer := talloc(bytes);
+    cursor: int;
+
+    while true {
+        wait_for(*tcp.new_data);
+
+        cursor += read_ring_buffer(*tcp.stream, buffer + cursor, bytes - cursor);
+        log("!!!! Got % bytes. !!!!", cursor);
+
+        if cursor == bytes break;
+    }
+
+    return .{bytes, buffer};
 }
 
 Tcp_Transmission_Info :: struct {
     // There should be an instance of this for each unacknowledged transmitted packet in a connection.
     // Except for ACKs sent by us, as we don't expect to receive an ACK for those.
+    
     packet: Network_Packet;
     sequence: u32;
     flags: Tcp_Header.Flags; // This value is stored in the packet header, but it seems cleaner to keep a separate copy of it rather than parsing it out of the packet.
@@ -413,24 +437,24 @@ Tcp_Transmission_Info :: struct {
     attempts: int;
 }
 
-record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet, flags: Tcp_Header.Flags) {
+record_tcp_packet_for_potential_retransmission :: (tcp: *Tcp_Connection, packet: Network_Packet, flags: Tcp_Header.Flags) {
 
     bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(Ipv4_Header) + size_of(Tcp_Header));
     if bytes_to_transmit == 0 bytes_to_transmit = 1;
-    con.sequence_number += cast(u32) bytes_to_transmit;
+    tcp.sequence_number += cast(u32) bytes_to_transmit;
 
-    info := array_add(*con.in_flight);
+    info := array_add(*tcp.in_flight);
     info.last_sent_at = get_monotonic_time();
     info.packet = packet;
 
     // The sequence number in the ACK will include the bytes transmitted in this packet, so store that.
     // The sequence number of the packet we're transmitting right now does not match this sequence number, as it describes the first byte being transmitted in that packet.
-    info.sequence = con.sequence_number;
+    info.sequence = tcp.sequence_number;
     info.flags = flags;
 }
 
-transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", needs_acknowledgement := true) {
-    if con.handshake_state == .CONNECTION_CLOSED {
+transmit_tcp_packet :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", needs_acknowledgement := true) {
+    if tcp.handshake_state == .CONNECTION_CLOSED {
         log_error("Trying to transmit TCP packet over a connection that has already been closed.");
         return;
     }
@@ -438,62 +462,64 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_f
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    eth := init_ethernet_header(net);
+    eth := init_ethernet_header(tcp.net);
     add_to_packet(*packet, eth);
 
     datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header) + payload.count;
-    ip := init_ip_header(net, .TCP, con.remote_ip, datagram_length);
+    ip := init_ip_header(tcp.net, .TCP, tcp.remote_ip, datagram_length);
     add_to_packet(*packet, ip);
 
-    tcp := init_tcp_header(net, con, header_flags, payload);
-    add_to_packet(*packet, tcp);
+    header := init_tcp_header(tcp, header_flags, payload);
+    add_to_packet(*packet, header);
 
     add_to_packet(*packet, payload);
 
     if needs_acknowledgement {
-        record_tcp_packet_for_potential_retransmission(net, con, packet, header_flags);
+        record_tcp_packet_for_potential_retransmission(tcp, packet, header_flags);
     }
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    i8254x_transmit_packet(*tcp.net.adapter, packet);
 }
 
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *Tcp_Connection {
 
-    port := allocate_port(net);
-
     log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
+
+    port := cast,trunc(u16)random_get(); // Todo
+
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
 
-    // Todo: this should be changed to a Bucket_Array for pointer stability.
-    con := array_add(*net.tcp_connections);
-    con.* = .{
-        port = port,
-        remote_port = remote_port,
-        remote_ip = remote_ip,
-        handshake_state = .NOT_STARTED,
-        sequence_number = sequence_number,
-        ack_number = 0xffff_ffff,
-    }; 
+    // Todo: Bucket_Array for pointer stability.
+    tcp := array_add(*net.tcp_connections);
+    tcp.net = net;
+    tcp.port = port;
+    tcp.remote_port = remote_port;
+    tcp.remote_ip = remote_ip;
+    tcp.handshake_state = .NOT_STARTED;
+    tcp.sequence_number = sequence_number;
+    tcp.ack_number = 0xffff_ffff;
 
-    transmit_tcp_packet(net, con, .SYN, needs_acknowledgement=false);
-    con.handshake_state = .SYN_SENT;
+    transmit_tcp_packet(tcp, .SYN, needs_acknowledgement=false);
+    tcp.handshake_state = .SYN_SENT;
 
-    return con;
+    tcp.stream.buffer = NewArray(0x1_0000, u8);
+
+    return tcp;
 }
 
-update_tcp_connection :: (net: *Network_Connection, con: *Tcp_Connection) {
+update_tcp_connection :: (tcp: *Tcp_Connection) {
     // Periodically check if something needs to be retransmitted.
     time_now := get_monotonic_time();
 
     // Maybe we should have a back-off system.
     RETRANSMISSION_TIME :: #run seconds_to_apollo(1);
 
-    for* info: con.in_flight {
+    for* info: tcp.in_flight {
         if time_now - info.last_sent_at > RETRANSMISSION_TIME {
             // Retransmit the segment
             log("TCP retransmit %", info.sequence);
-            i8254x_transmit_packet(*net.adapter, info.packet);
+            i8254x_transmit_packet(*tcp.net.adapter, info.packet);
 
             info.last_sent_at = time_now;
             info.attempts += 1;
@@ -509,67 +535,67 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     Tcp_Packet :: struct {
         eth: Ethernet_Header;
         ip: Ipv4_Header #align 1;
-        tcp: Tcp_Header #align 1;
+        tcp_header: Tcp_Header #align 1;
     }
 
     using packet := cast(*Tcp_Packet) eth_;
 
-    byte_swap_protocol_header(*tcp);
+    byte_swap_protocol_header(*tcp_header);
 
-    con: *Tcp_Connection;
+    tcp: *Tcp_Connection;
     for* net.tcp_connections {
-        if it.port == tcp.destination_port {
-            con = it;
+        if it.port == tcp_header.destination_port {
+            tcp = it;
             break;
         }
     }
 
-    if !con {
-        log_error("Got TCP message for nonexistent connection on port %", tcp.destination_port);
-        // Todo: transmit RST
+    if !tcp {
+        log_error("Got TCP message for nonexistent connection on port %", tcp_header.destination_port);
         return;
     }
 
-    if con.handshake_state == .CONNECTION_CLOSED {
+    if tcp.handshake_state == .CONNECTION_CLOSED {
+        log_error("Got TCP message for closed connection.");
         return;
     }
 
-    if tcp.flags == .SYN | .ACK {
-        if con.handshake_state == {
+    if tcp_header.flags == .SYN | .ACK {
+        if tcp.handshake_state == {
           case .COMPLETED;
             // It looks like the server missed the ACK the first time. Todo.
             log("TCP unexpected SYN-ACK.");
 
           case .SYN_SENT;
-            con.ack_number = tcp.sequence_number;
-            con.sequence_number += 1;
-            transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
-            con.handshake_state = .COMPLETED;
+            tcp.ack_number = tcp_header.sequence_number;
+            tcp.sequence_number += 1;
+            transmit_tcp_packet(tcp, .ACK, needs_acknowledgement=false);
+            tcp.handshake_state = .COMPLETED;
 
-            log("TCP connection with %:% successfully established.", format_ip(con.remote_ip), con.remote_port);
+            log("TCP connection with %:% successfully established.", format_ip(tcp.remote_ip), tcp.remote_port);
         }
 
         return;
     }
 
-    if tcp.flags & .RST {
+    if tcp_header.flags & .RST {
         // Todo.
-        log_error("Received RST from %:%.", format_ip(con.remote_ip), con.remote_port);
-        con.handshake_state = .CONNECTION_CLOSED;
+        log_error("Received RST from %:%.", format_ip(tcp.remote_ip), tcp.remote_port);
+        tcp.handshake_state = .CONNECTION_CLOSED;
         return;
     }
 
     // The FIN handling code is spaghetti code and should be refactored at some point.
 
-    if tcp.flags & .FIN && tcp.flags & .ACK {
+    if tcp_header.flags & .FIN && tcp_header.flags & .ACK {
         // Check if this is acknowledging a client-initiated connection termination.
 
-        for* info: con.in_flight {
-            if info.sequence == tcp.ack_number {
-                if con.handshake_state == .FIN_TRANSMITTED {
-                    if info.flags & .FIN && tcp.flags & .FIN {
-                        transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
-                        con.handshake_state = .CONNECTION_CLOSED;
+        for* info: tcp.in_flight {
+            if info.sequence == tcp_header.ack_number {
+                if tcp.handshake_state == .FIN_TRANSMITTED {
+                    if info.flags & .FIN && tcp_header.flags & .FIN {
+                        transmit_tcp_packet(tcp, .ACK, needs_acknowledgement=false);
+                        tcp.handshake_state = .CONNECTION_CLOSED;
 
                         return;
                     }
@@ -578,18 +604,18 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         }
     }
 
-    if tcp.flags & .ACK {
+    if tcp_header.flags & .ACK {
         // Handle the fact that something we transmitted was acknowledged.
-        for* info: con.in_flight {
-            if info.sequence <= tcp.ack_number {
+        for* info: tcp.in_flight {
+            if info.sequence <= tcp_header.ack_number {
                 // Any segment that has been acknowledged (bytes later than it have been received) will never need to be retransmitted.
-                free_4k_page(cast(u64, info.packet.data - DIRECT_MAPPING_BASE));
+                free_4k_page(cast(u64) (info.packet.data - DIRECT_MAPPING_BASE));
                 remove info;
             }
         }
     }
 
-    if tcp.sequence_number == con.ack_number + 1 {
+    if tcp_header.sequence_number == tcp.ack_number + 1 {
         length := bs16(xx get(ip, .total_length)) - size_of(Ipv4_Header) - size_of(Tcp_Header);
 
         if length == 0 {
@@ -597,32 +623,30 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             return;
         }
 
-        con.ack_number += length.(u32);
+        tcp.ack_number += length.(u32);
 
         // Transmit ACK
-        transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
+        transmit_tcp_packet(tcp, .ACK, needs_acknowledgement=false);
 
         packet_data: string;
-        packet_data.data = cast(*u8, *tcp + 1);
+        packet_data.data = cast(*u8, *tcp_header + 1);
         packet_data.count = length.(s64);
 
-        array_add(*con.received_segments, packet_data);
+        log("Received TCP segment from %:%, (% bytes)", format_ip(tcp.remote_ip), tcp.remote_port, length);
+        write_ring_buffer(*tcp.stream, packet_data);
 
-        log("Received TCP segment from %:%, (% bytes)", format_ip(con.remote_ip), con.remote_port, length);
+        signal(*tcp.new_data);
 
-        if tcp.flags & .PSH {
-            log("%", con.received_segments);
-            array_reset(*con.received_segments);
-        }
-    } else if tcp.sequence_number > con.ack_number + 1 {
+    } else if tcp_header.sequence_number > tcp.ack_number + 1 {
         // If we get a greater sequence number than expected, ACK the last packet we received to indicate to the peer that later packets may need to be retransmitted.
-        transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
+        log("Received packets out of order.");
+        transmit_tcp_packet(tcp, .ACK, needs_acknowledgement=false);
     }
 
-    if tcp.flags & .FIN {
+    if tcp_header.flags & .FIN {
         // Server-initiated connection termination. Acknowledged using a FIN-ACK.
-        transmit_tcp_packet(net, con, .FIN | .ACK, needs_acknowledgement=false);
-        con.handshake_state = .CONNECTION_CLOSED;
+        transmit_tcp_packet(tcp, .FIN | .ACK, needs_acknowledgement=false);
+        tcp.handshake_state = .CONNECTION_CLOSED;
         return;
     }
 }
@@ -706,11 +730,11 @@ Tls_Client_Hello :: struct {
     extensions_length: u16 #align 1;
 
     extensions: struct {
-        supported_groups: [14] u8;
-        ec_points_format: [6] u8;
-        signature_algorithms: [8] u8;
-        sct: [4] u8;
-        renegotiation_info: [5] u8;
+        supported_groups:      [14] u8;
+        ec_points_format:      [6] u8;
+        signature_algorithms:  [8] u8;
+        sct:                   [4] u8;
+        renegotiation_info:    [5] u8;
     } @DontByteswap
 }
 
@@ -800,14 +824,12 @@ Tls_Connection_State :: struct {
     }
 }
 
-initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> struct {} {
+initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> Tls_Connection_State {
 
-    if con.handshake_state != .COMPLETED {
+    if tcp.handshake_state != .COMPLETED {
         log_error("Trying to create a TLS connection without an established TCP connection.");
         return .{};
     }
-
-    Scoped_Acquire(*net.spinlock);
 
     // Send TLS client hello.
     packet: Network_Packet;
@@ -831,11 +853,11 @@ initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> s
     hello.compression_method        = 0;
 
     hello.extensions_length         = size_of(type_of(hello.extensions));
-    hello.extensions.signature_algorithms      = .[0x0, 0xd, 0x0, 0x4, 0x0, 0x2, 0x4, 0x1];
-    hello.extensions.sct                       = .[0x0, 0x12, 0x0, 0x0];
-    hello.extensions.supported_groups          = .[0x0, 0xa, 0x0, 0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
-    hello.extensions.ec_points_format          = .[0x0, 0xb, 0x0, 0x2, 0x1, 0x0];
-    hello.extensions.renegotiation_info        = .[0xff, 0x1, 0x0, 0x1, 0x0];
+    hello.extensions.signature_algorithms      = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
+    hello.extensions.sct                       = .[0x0,  0x12, 0x0,  0x0];
+    hello.extensions.supported_groups          = .[0x0,  0xa,  0x0,  0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
+    hello.extensions.ec_points_format          = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
+    hello.extensions.renegotiation_info        = .[0xff, 0x1,  0x0,  0x1, 0x0];
 
     hello.cipher_suites[0] = .ECDHE_RSA_WITH_AES128_CBC_SHA;
 
@@ -852,13 +874,13 @@ initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> s
     payload.data = packet.data;
     payload.count = packet.length;
 
-    transmit_tcp_packet(net, con, .ACK | .PSH, payload);
+    transmit_tcp_packet(tcp, .ACK | .PSH, payload);
 
-    return .{};
+    return .{tcp, .CLIENT_HELLO_SENT};
 }
 
-handle_tls_message :: (net: *Network_Connection, tls: *Tls_Connection_State, record: *Tls_Record_Header) {
-
+handle_tls_message :: (tls: *Tls_Connection_State, record: *Tls_Record_Header) {
+    net := tls.tcp.net;
 }
 
 
@@ -1505,7 +1527,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             cursor += 1;
         }
 
-        cursor := cast(*u8, *dns + 1);
+        cursor := cast(*u8) (*dns + 1);
 
         // Must cast this or it may underflow and loop for very many iterations.
         for 0..cast(s16)dns.questions-1 {
@@ -1653,7 +1675,6 @@ allocate_port :: (net: *Network_Connection) -> u16 {
 
 network_thread :: () {
 
-    sleep(5, .seconds);
     log_category("Net");
 
     time := get_monotonic_system_time();
@@ -1665,7 +1686,6 @@ network_thread :: () {
     dns_client_port = allocate_port(net);
 
     while true  {
-        flags := acquire(*spinlock);
 
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);
@@ -1715,6 +1735,11 @@ network_thread :: () {
                     continue;
                 }
 
+                if udp.destination_port == 137 {
+                    // NetBIOS Name Service.
+                    continue;
+                }
+
                 log("UDP packet for port % unhandled.\n", udp.destination_port);
 
               case .TCP;
@@ -1724,8 +1749,6 @@ network_thread :: () {
                 log("Received IP packet with unsupported protocol %.", ip.protocol);
             }
         }
-
-        release(*spinlock, flags);
 
         sleep(5, .milliseconds);
     }
