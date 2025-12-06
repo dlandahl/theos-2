@@ -52,17 +52,6 @@ write_ring_buffer :: (using ring: *Ring_Buffer, _data: $T/.[[]u8, string]) -> by
     return to_write;
 }
 
-available :: (ring: Ring_Buffer) -> int {
-    wc := write_cursor;
-    rc := read_cursor;
-
-    available := ifx wc >= rc
-        then wc - rc
-        else buffer.count - (rc - wc);
-
-    return available;
-}
-
 #scope_module
 
 min :: (x,y) => ifx x < y then x else y;

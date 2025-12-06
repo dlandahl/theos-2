@@ -378,6 +378,13 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
 
 
 
+// Links for modern Realtek ethernet cards (todo):
+// https://forum.osdev.org/viewtopic.php?t=57618
+// https://wiki.osdev.org/RTL8169
+// http://www.bitsavers.org/components/realtek/RTL8139/RTL8110S_8169S_DataSheet_1.3_200309.pdf
+
+
+
 mac_address_print_style := Print_Style.{
     default_format_int.base = 16,
     default_format_int.minimum_digits = 2,

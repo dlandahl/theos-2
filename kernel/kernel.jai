@@ -121,7 +121,7 @@ Kernel_Globals :: struct {
 
     text_output_spinlock: Recursive_Spinlock; // Used to prevent multiple calls to write_string from different cores becoming interleaved, in cases where this makes the output harder to interpret.
 
-    net: Network_Connection;
+    network_connection: Network_Connection;
 
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
@@ -297,7 +297,7 @@ kernel_entry :: () #no_context {
             }
 
             if it.class_code == .NETWORK && it.subclass == 0x0 {
-                global.net.adapter = init_i8254x(it);
+                global.network_connection.adapter = init_i8254x(it);
             }
 
             if false if it.class_code == .MULTIMEDIA {
@@ -335,20 +335,22 @@ network_test :: () {
 
     log_category("Test");
 
-    network_adapter_initialized := global.net.adapter.mmio != null;
+    net := *global.network_connection;
+
+    network_adapter_initialized := net.adapter.mmio != null;
     assert(network_adapter_initialized);
 
     task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x4_0000);
     put_task_on_core(task, *global.processor_cores[1]);
 
     log("Waiting for DHCP handshake.");
-    Timeout(global.net.dhcp_handshake_state == .COMPLETED, 60_000);
+    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
     ip_address := bit_cast(u8.[192, 168, 1, 65], u32);
 
     #if USE_DNS {
         log("Sending DNS Query");
-        dns_query := transmit_dns_query(*global.net, "google.com");
+        dns_query := transmit_dns_query(net, "google.com");
 
         if Timeout(dns_query.complete, 60_000) {
             bluescreen();
@@ -357,13 +359,13 @@ network_test :: () {
         ip_address = dns_query.answer;
     }
 
-    transmit_ping(*global.net, ip_address);
+    transmit_ping(net, ip_address);
 
-    connection := initiate_tcp_connection(*global.net, ip_address, 4443);
+    connection := initiate_tcp_connection(net, ip_address, 4443);
 
     Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
-    tls := initiate_tls_connection(*global.net, connection);
+    tls := initiate_tls_connection(net, connection);
 
     while true {
         auto_release_temp(); // Reading from a TCP stream uses temporary storage.
@@ -373,17 +375,13 @@ network_test :: () {
 
         byte_swap_protocol_header(record);
 
-        received = blocking_read_tcp_bytes(tls.tcp, record.length);
-
-        log("Received TLS message: %", cast(string)received);
-
         // ... handle the TLS message in 'received'.
-        handle_tls_message(*tls, record);
+        handle_tls_message(*tls);
     }
 
     if false {
         request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-        transmit_tcp_packet(*global.net.tcp_connections[0], .ACK | .PSH, request);
+        transmit_tcp_packet(connection, .ACK | .PSH, request);
     }
 }
 

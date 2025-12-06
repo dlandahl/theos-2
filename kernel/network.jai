@@ -1,8 +1,12 @@
 
 #import "Ring_Buffer";
 
-bs16 :: #bake_constants byte_swap(T=u16);
-bs32 :: #bake_constants byte_swap(T=u32);
+byte_swap_int :: #procedure_of_call byte_swap(1);
+
+bs16 :: #bake_constants (#procedure_of_call(byte_swap(1)))(T=u16);
+bs32 :: #bake_constants (#procedure_of_call(byte_swap(1)))(T=u32);
+
+byte_swap :: byte_swap_protocol_header;
 
 byte_swap_protocol_header :: (header: *$T) #modify {
     ti := cast(*Type_Info) T;
@@ -22,7 +26,7 @@ byte_swap_protocol_header :: (header: *$T) #modify {
             }
 
             if it.type == type_info(tls_u24) {
-                print(*builder, "    header.%1 = byte_swap_u24(header.%1);\n", it.name);
+                print(*builder, "    header.%1 = byte_swap(header.%1);\n", it.name);
                 continue;
             }
 
@@ -30,7 +34,8 @@ byte_swap_protocol_header :: (header: *$T) #modify {
               case .INTEGER;
                 print(*builder, "    header.%1 = byte_swap(header.%1);\n", it.name);
               case .ENUM;
-                print(*builder, "    header.%1 = xx byte_swap(xx header.%1);\n", it.name);
+                // In case of enum, cast it to the underlying integer type and back.
+                print(*builder, "    header.%1 = cast(type_of(header.%1)) byte_swap(cast(type_of(header.%1).loose) header.%1);\n", it.name);
 
               case .ARRAY;
                 tia := cast(*Type_Info_Array)it.type;
@@ -403,8 +408,11 @@ Tcp_Connection :: struct {
 
     in_flight: [..] Tcp_Transmission_Info;
 
-    stream: Ring_Buffer;
-    new_data: Semaphore;
+    in_stream: Ring_Buffer;
+    in_data: Semaphore;
+
+    out_stream: Ring_Buffer;
+    out_data: Semaphore;
 }
 
 blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
@@ -414,24 +422,39 @@ blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
     cursor: int;
 
     while true {
-        wait_for(*tcp.new_data);
-
-        cursor += read_ring_buffer(*tcp.stream, buffer + cursor, bytes - cursor);
-        log("!!!! Got % bytes. !!!!", cursor);
+        cursor += read_ring_buffer(*tcp.in_stream, buffer + cursor, bytes - cursor);
 
         if cursor == bytes break;
+
+        wait_for(*tcp.in_data);
     }
 
     return .{bytes, buffer};
 }
 
+blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8) {
+    cursor: int;
+
+    while true {
+        to_write := string.{bytes.count - cursor, bytes.data + cursor};
+
+        cursor += write_ring_buffer(*tcp.out_stream, to_write);
+
+        if cursor == bytes.count break;
+
+        wait_for(*tcp.out_data);
+    }
+}
+
 Tcp_Transmission_Info :: struct {
     // There should be an instance of this for each unacknowledged transmitted packet in a connection.
     // Except for ACKs sent by us, as we don't expect to receive an ACK for those.
-    
+
     packet: Network_Packet;
     sequence: u32;
-    flags: Tcp_Header.Flags; // This value is stored in the packet header, but it seems cleaner to keep a separate copy of it rather than parsing it out of the packet.
+
+    // This value is stored in the packet header, but it seems cleaner to keep a separate copy of it rather than parsing it out of the packet.
+    flags: Tcp_Header.Flags;
 
     last_sent_at: Apollo_Time; // To detect if we need to retransmit
     attempts: int;
@@ -503,7 +526,11 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     transmit_tcp_packet(tcp, .SYN, needs_acknowledgement=false);
     tcp.handshake_state = .SYN_SENT;
 
-    tcp.stream.buffer = NewArray(0x1_0000, u8);
+    tcp.in\_stream.buffer = NewArray(0x1_0000, u8);
+    tcp.out_stream.buffer = NewArray(0x1_0000, u8);
+
+    tcp.in\_data.counter_max = 1;
+    tcp.out_data.counter_max = 1;
 
     return tcp;
 }
@@ -623,19 +650,18 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             return;
         }
 
-        tcp.ack_number += length.(u32);
-
-        // Transmit ACK
-        transmit_tcp_packet(tcp, .ACK, needs_acknowledgement=false);
-
         packet_data: string;
         packet_data.data = cast(*u8, *tcp_header + 1);
         packet_data.count = length.(s64);
 
         log("Received TCP segment from %:%, (% bytes)", format_ip(tcp.remote_ip), tcp.remote_port, length);
-        write_ring_buffer(*tcp.stream, packet_data);
 
-        signal(*tcp.new_data);
+        written := write_ring_buffer(*tcp.in_stream, packet_data);
+
+        signal(*tcp.in_data);
+
+        tcp.ack_number += written.(u32);
+        transmit_tcp_packet(tcp, .ACK, needs_acknowledgement=false);
 
     } else if tcp_header.sequence_number > tcp.ack_number + 1 {
         // If we get a greater sequence number than expected, ACK the last packet we received to indicate to the peer that later packets may need to be retransmitted.
@@ -677,7 +703,7 @@ get :: (u24: *tls_u24) -> u32 {
 }
 
 // We don't do an overload for this, because the #bake_constants at the top of the file don't resolve overloads.
-byte_swap_u24 :: (u24: tls_u24) -> tls_u24 {
+byte_swap :: (u24: tls_u24) -> tls_u24 {
     result: tls_u24;
     result[0] = u24[2];
     result[1] = u24[1];
@@ -712,6 +738,16 @@ Tls_Handshake_Type :: enum u8 {
     FINISHED               :: 20;
 }
 
+Tls_Extension :: enum u16 {
+    server_name :: 0x00_00;
+    status_request :: 0x00_05;
+    supported_groups :: 0x00_0a;
+    ec_points_format :: 0x00_0b;
+    signature_algorithms :: 0x00_0d;
+    renegotiation_info :: 0xff_01;
+    signed_certificate_timestamp :: 0x00_12;
+}
+
 Tls_Client_Hello :: struct {
     type: Tls_Handshake_Type;
     length: tls_u24;
@@ -729,6 +765,7 @@ Tls_Client_Hello :: struct {
 
     extensions_length: u16 #align 1;
 
+    // Todo: hardcoded.
     extensions: struct {
         supported_groups:      [14] u8;
         ec_points_format:      [6] u8;
@@ -738,15 +775,9 @@ Tls_Client_Hello :: struct {
     } @DontByteswap
 }
 
-Tls_Server_Hello :: struct {
+Tls_Handshake_Header :: struct {
     type: Tls_Handshake_Type;
     length: tls_u24;
-
-    version: Tls_Version;
-    random: Tls_Random #align 1; @DontByteswap
-    session_id: u8;
-    cipher_suite: Tls_Cipher_Suite;
-    compression_method: u8;
 }
 
 Tls_Cipher_Suite :: enum u16 {
@@ -775,10 +806,11 @@ Tls_Version :: enum u16 {
 }
 
 Tls_Random :: struct {
-    random: [4] u64;
+    random: [4] u64; @DontByteswap
 
-#place random;
-    unix_time: u32;
+    // Todo: once we update the compiler we can change this to #overlay, and skip overlays in byte_swap_protocol_header.
+    // #place random;
+    //     unix_time: u32;
 }
 
 Tls_Alert :: struct {
@@ -820,7 +852,10 @@ Tls_Connection_State :: struct {
     tcp: *Tcp_Connection;
 
     handshake_state: enum {
+        INVALID;
         CLIENT_HELLO_SENT;
+        SERVER_HELLO_RECEIVED;
+        CERTIFICATE_RECEIVED;
     }
 }
 
@@ -851,8 +886,8 @@ initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> T
     hello.num_cipher_suites         = size_of(type_of(hello.cipher_suites));
     hello.num_compression_methods   = 1;
     hello.compression_method        = 0;
-
     hello.extensions_length         = size_of(type_of(hello.extensions));
+
     hello.extensions.signature_algorithms      = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
     hello.extensions.sct                       = .[0x0,  0x12, 0x0,  0x0];
     hello.extensions.supported_groups          = .[0x0,  0xa,  0x0,  0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
@@ -865,7 +900,7 @@ initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> T
 
     for* hello.random.random it.* = random_get();
     ts := to_timespec(get_monotonic_time());
-    hello.random.unix_time = bs32(xx ts.tv_sec);
+    // hello.random.unix_time = bs32(xx ts.tv_sec);
 
     byte_swap_protocol_header(*hello);
     add_to_packet(*packet, hello);
@@ -879,8 +914,85 @@ initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> T
     return .{tcp, .CLIENT_HELLO_SENT};
 }
 
-handle_tls_message :: (tls: *Tls_Connection_State, record: *Tls_Record_Header) {
+#if false {
+    session_id: u8;
+    cipher_suite: Tls_Cipher_Suite;
+    compression_method: u8;
+}
+
+handle_tls_message :: (tls: *Tls_Connection_State) {
+    read :: ($ type: Type) -> type #expand {
+        buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type));
+
+        item := (.*) cast(*type) buffer.data;
+
+        #if type_info(type).type == .STRUCT {
+            byte_swap_protocol_header(*item);
+        } else {
+            item = byte_swap(item);
+        }
+
+        return item;
+    }
+
+    read :: ($ type: Type, count: int) -> []type #expand {
+        buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type) * count);
+        return .{count, cast(*type) buffer.data};
+    }
+
     net := tls.tcp.net;
+
+    record := read(Tls_Handshake_Header);
+    log("Got handshake record: %", record);
+
+    if record.type == {
+      case .SERVER_HELLO;
+        assert(tls.handshake_state == .CLIENT_HELLO_SENT);
+
+        version := read(Tls_Version);
+        random  := read(Tls_Random);
+
+        session_id_size := read(u8);
+        session_id      := read(u8, session_id_size);
+
+        push_print_style().default_format_int.base = 16;
+        log("Got session ID: %", session_id);
+
+        cipher_suite := read(Tls_Cipher_Suite);
+        log("Requested cipher suite: %", cipher_suite);
+
+        compression_method := read(u8);
+        assert(compression_method == 0);
+
+        extensions_length := read(u16);
+
+        // Todo: very lazy.
+        while extensions_length > 0 {
+            extension_type := read(Tls_Extension);
+            extensions_length -= size_of(Tls_Extension);
+            log("Server hello provided extension %", extension_type);
+
+            extension_size := read(u16);
+            extensions_length -= size_of(u16);
+
+            extension_bytes := read(u8, extension_size);
+            extensions_length -= extension_size;
+        }
+
+        tls.handshake_state = .SERVER_HELLO_RECEIVED;
+
+      case .CERTIFICATE;
+        assert(tls.handshake_state == .SERVER_HELLO_RECEIVED);
+
+        all_certificates_length := read(tls_u24);
+
+        // Assuming the server sends one certificate.
+        certificate_length  := get(*read(tls_u24));
+
+        certificate := read(u8, certificate_length);
+        log("Got a security certificate of length %", certificate_length);
+        // Todo: parse certificate.
+    }
 }
 
 
@@ -1648,6 +1760,8 @@ Network_Connection :: struct {
     DHCP_ARP_PROBE_INTERVAL :: #run milliseconds_to_apollo(250);
     DHCP_REQUEST_INTERVAL   :: #run milliseconds_to_apollo(1000);
 
+    SKIP_ARP_PROBES :: true;
+
     arp_table: Table(u32, [6]u8);
 
     pings_in_flight: [..] struct {
@@ -1680,13 +1794,12 @@ network_thread :: () {
     time := get_monotonic_system_time();
     random_seed(cast(S128)time);
 
-    using net := *global.net;
+    using net := *global.network_connection;
     next_port = FIRST_EPHEMERAL_PORT;
 
     dns_client_port = allocate_port(net);
 
     while true  {
-
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);
         }

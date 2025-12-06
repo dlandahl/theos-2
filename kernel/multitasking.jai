@@ -275,7 +275,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 
-// Pretty indefinite.
+
 SLEEP_INDEFINITELY :: Apollo_Time.{0xffffffff_ffffffff, 0x7fffffff_ffffffff};
 
 sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
@@ -430,6 +430,7 @@ trylock_mutex :: (using mutex: *Mutex) -> bool {
 Semaphore :: struct {
     spinlock: Spinlock;
     counter: int;
+    counter_max: int; // 0 means no max.
 
     Waiter :: struct {
         task: *Task_Info;
@@ -500,6 +501,11 @@ signal :: (using sema: *Semaphore) {
 
     if queue_is_empty(queue) {
         counter += 1;
+
+        if counter_max && counter > counter_max {
+            counter = counter_max;
+        }
+
         release(*spinlock, flags);
         return;
     }

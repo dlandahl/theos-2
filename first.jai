@@ -183,7 +183,6 @@ compile_kernel :: () -> success: bool {
 
     init_plugins(to_create, *plugins, workspace);
 
-
     {
         options := get_build_options(workspace);
 
