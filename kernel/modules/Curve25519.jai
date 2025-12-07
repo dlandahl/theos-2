@@ -1,5 +1,7 @@
 
 generate_keypair :: (secret_key: *[32]u8) -> [32]u8 {
+    clamp25519(secret_key);
+
     public_key: [32]u8;
 
     _9: [32]u8;
@@ -32,9 +34,7 @@ field_elem :: [16]s64;
 }
 
 scalarmult :: (out: *[32]u8, scalar: *[32]u8, point: *[32]u8) {
-    clamped := scalar.*;
-    clamped[0] &= 0xf8;
-    clamped[31] = (clamped[31] & 0x7f) | 0x40;
+    clamp25519(scalar);
 
     a, b, c, d, e, f, x: field_elem;
     unpack25519(*x, point);
@@ -42,7 +42,7 @@ scalarmult :: (out: *[32]u8, scalar: *[32]u8, point: *[32]u8) {
     a[0], d[0] = 1;
 
     for< i: 0..254 {
-        bit := (clamped[i >> 3] >> (i & 7)) & 1;
+        bit := (scalar.*[i >> 3] >> (i & 7)) & 1;
         swap25519(*a, *b, bit);
         swap25519(*c, *d, bit);
         fadd(*e, a, c);
@@ -70,6 +70,12 @@ scalarmult :: (out: *[32]u8, scalar: *[32]u8, point: *[32]u8) {
     finverse(*c, c);
     fmul(*a, a, c);
     pack25519(out, a);
+}
+
+clamp25519 :: (a: *[32]u8) {
+    a.*[0]  &= 0xf8;
+    a.*[31] &= 0x7f;
+    a.*[31] |= 0x40;
 }
 
 unpack25519 :: (out: *field_elem, in: *[32]u8) {

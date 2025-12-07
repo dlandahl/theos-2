@@ -78,10 +78,10 @@ sha512 :: (data: string) -> string {
     return builder_to_string(*digest);
 }
 
+SHA256_BLOCK_SIZE :: 64;
+SHA256_HASH_SIZE :: 32;
 
-hmac_sha256 :: (key: string, data: string) -> string {
-    SHA256_BLOCK_SIZE :: 64;
-    SHA256_HASH_SIZE :: 32;
+hmac_sha256 :: (key: string, data: string) -> [SHA256_HASH_SIZE]u8 {
 
     k       : [SHA256_BLOCK_SIZE]u8;
     k_ipad  : [SHA256_BLOCK_SIZE]u8 = ---;
@@ -98,8 +98,8 @@ hmac_sha256 :: (key: string, data: string) -> string {
         memcpy(k.data, key.data, key.count);
     }
 
-    memset(k_ipad.data, 0x36,                   SHA256_BLOCK_SIZE);
-    memset(k_opad.data, 0x5c,                   SHA256_BLOCK_SIZE);
+    memset(k_ipad.data, 0x36, SHA256_BLOCK_SIZE);
+    memset(k_opad.data, 0x5c, SHA256_BLOCK_SIZE);
 
     for i:0..SHA256_BLOCK_SIZE-1 {
         k_ipad[i] ^= k[i];
@@ -118,9 +118,7 @@ hmac_sha256 :: (key: string, data: string) -> string {
     memcpy(ihash.data,  H(k_ipad, data).data,   SHA256_HASH_SIZE);
     memcpy(ohash.data,  H(k_opad, ihash).data,  SHA256_HASH_SIZE);
 
-    digest: String_Builder;
-    for 0..SHA256_HASH_SIZE-1 append(*digest, tprint("%", formatInt(ohash[it], base=16, minimum_digits=2)));
-    return builder_to_string(*digest);
+    return ohash;
 }
 
 

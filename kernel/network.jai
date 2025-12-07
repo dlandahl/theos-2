@@ -814,6 +814,9 @@ Tls_Version :: enum u16 {
 Tls_Random :: struct {
     random: [4] u64; @DontByteswap
 
+#place random;
+    bytes:  [32] u8; @DontByteswap
+
     // Todo: once we update the compiler we can change this to #overlay, and skip overlays in byte_swap_protocol_header.
     // #place random;
     //     unix_time: u32;
@@ -863,6 +866,9 @@ Tls_Connection :: struct {
     server_public_key: [32] u8;
 
     shared_key: [32] u8;
+
+    client_random: Tls_Random;
+    server_random: Tls_Random;
 
     handshake_state: enum {
         INVALID;
@@ -929,7 +935,56 @@ initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> T
     tls: Tls_Connection;
     tls.tcp = tcp;
     tls.handshake_state = .CLIENT_HELLO_SENT;
+    tls.client_random = hello.random;
     return tls;
+}
+
+transmit_tls_client_handshake :: (tls: *Tls_Connection) {
+    write :: (value: $T) #expand {
+        #if type_info(T).type == .STRUCT {
+            byte_swap_protocol_header(*value);
+        } else #if T != [32]u8 {
+            value = byte_swap(value);
+        }
+
+        buffer := []u8.{size_of(T), cast(*u8) *value};
+        blocking_write_tcp_bytes(tls.tcp, buffer);
+    }
+
+    assert(tls.handshake_state == .SERVER_HELLO_DONE);
+
+    record: Tls_Record_Header;
+    record.content_type = .HANDSHAKE;
+    record.version = .TLS_1_2;
+    record.length = 37; // Todo: hardcoded.
+    write(record);
+
+    cce: Tls_Handshake_Header;
+    cce.type = .CLIENT_KEY_EXCHANGE;
+    set(*cce.length, 33); // Todo: hardcoded.
+    write(cce);
+
+    write(tls.our_public_key);
+
+    premaster_secret := cast(string)Curve25519.x25519(
+        *tls.server_public_key,
+        *tls.our_secret_key,
+    );
+
+    client_random := string.{size_of(Tls_Random), tls.client_random.bytes.data};
+    server_random := string.{size_of(Tls_Random), tls.server_random.bytes.data};
+
+    seed := join("master secret", client_random, server_random);
+
+    a0 := seed;
+    a1 := hmac_sha256(premaster_secret, a0);
+    a2 := hmac_sha256(premaster_secret, a1);
+    p1 := hmac_sha256(premaster_secret, join(a1, seed));
+    p2 := hmac_sha256(premaster_secret, join(a2, seed));
+
+    Master_Secret: [48]u8;
+    memcpy(Master_Secret.data,      p1.data, 32);
+    memcpy(Master_Secret.data + 32, p2.data, 16);
 }
 
 handle_tls_message :: (tls: *Tls_Connection) {
@@ -954,6 +1009,8 @@ handle_tls_message :: (tls: *Tls_Connection) {
 
     net := tls.tcp.net;
 
+    push_print_style().default_format_int.base = 16;
+
     record := read(Tls_Handshake_Header);
     log("Got handshake record: %", record);
 
@@ -963,6 +1020,8 @@ handle_tls_message :: (tls: *Tls_Connection) {
 
         version := read(Tls_Version);
         random  := read(Tls_Random);
+
+        tls.server_random = random;
 
         session_id_size := read(u8);
         session_id      := read(u8, session_id_size);
@@ -978,7 +1037,6 @@ handle_tls_message :: (tls: *Tls_Connection) {
 
         extensions_length := read(u16);
 
-        // Todo: very lazy.
         while extensions_length > 0 {
             extension_type := read(Tls_Extension);
             extensions_length -= size_of(Tls_Extension);
@@ -1020,7 +1078,6 @@ handle_tls_message :: (tls: *Tls_Connection) {
         key := read(u8, key_length);
         memcpy(tls.server_public_key.data, key.data, 32);
 
-        push_print_style().default_format_int.base = 16;
         log("Got public key %", key);
 
         // Todo: validate key against security certificate.
@@ -1044,6 +1101,9 @@ handle_tls_message :: (tls: *Tls_Connection) {
 
         log("Our secret key: %", tls.our_secret_key);
         log("Our public key: %", tls.our_public_key);
+
+        for< tls.our_secret_key print("%", it);
+        print("\n");
 
         tls.handshake_state = .SERVER_HELLO_DONE;
         while true {}
