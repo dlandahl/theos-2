@@ -1,6 +1,4 @@
 
-#import "Ring_Buffer";
-
 byte_swap_int :: #procedure_of_call byte_swap(1);
 
 bs16 :: #bake_constants (#procedure_of_call(byte_swap(1)))(T=u16);
@@ -738,6 +736,14 @@ Tls_Handshake_Type :: enum u8 {
     FINISHED               :: 20;
 }
 
+Tls_Named_Curve :: enum u16 {
+    secp256r1  :: 23;
+    secp384r1  :: 24;
+    secp521r1  :: 25;
+    x25519     :: 29;
+    x448       :: 30;
+}
+
 Tls_Extension :: enum u16 {
     server_name :: 0x00_00;
     status_request :: 0x00_05;
@@ -848,18 +854,27 @@ Tls_Alert :: struct {
     }
 }
 
-Tls_Connection_State :: struct {
+Tls_Connection :: struct {
     tcp: *Tcp_Connection;
+
+    our_secret_key: [32] u8;
+    our_public_key: [32] u8;
+
+    server_public_key: [32] u8;
+
+    shared_key: [32] u8;
 
     handshake_state: enum {
         INVALID;
         CLIENT_HELLO_SENT;
         SERVER_HELLO_RECEIVED;
         CERTIFICATE_RECEIVED;
+        SERVER_KEY_RECEIVED;
+        SERVER_HELLO_DONE;
     }
 }
 
-initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> Tls_Connection_State {
+initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> Tls_Connection {
 
     if tcp.handshake_state != .COMPLETED {
         log_error("Trying to create a TLS connection without an established TCP connection.");
@@ -894,7 +909,7 @@ initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> T
     hello.extensions.ec_points_format          = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
     hello.extensions.renegotiation_info        = .[0xff, 0x1,  0x0,  0x1, 0x0];
 
-    hello.cipher_suites[0] = .ECDHE_RSA_WITH_AES128_CBC_SHA;
+    hello.cipher_suites[0] = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
 
     set(*hello.length, size_of(Tls_Client_Hello) - 4);
 
@@ -911,16 +926,13 @@ initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> T
 
     transmit_tcp_packet(tcp, .ACK | .PSH, payload);
 
-    return .{tcp, .CLIENT_HELLO_SENT};
+    tls: Tls_Connection;
+    tls.tcp = tcp;
+    tls.handshake_state = .CLIENT_HELLO_SENT;
+    return tls;
 }
 
-#if false {
-    session_id: u8;
-    cipher_suite: Tls_Cipher_Suite;
-    compression_method: u8;
-}
-
-handle_tls_message :: (tls: *Tls_Connection_State) {
+handle_tls_message :: (tls: *Tls_Connection) {
     read :: ($ type: Type) -> type #expand {
         buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type));
 
@@ -987,11 +999,54 @@ handle_tls_message :: (tls: *Tls_Connection_State) {
         all_certificates_length := read(tls_u24);
 
         // Assuming the server sends one certificate.
-        certificate_length  := get(*read(tls_u24));
+        certificate_length := get(*read(tls_u24));
 
         certificate := read(u8, certificate_length);
-        log("Got a security certificate of length %", certificate_length);
-        // Todo: parse certificate.
+
+        success, cert := parse_x509_certificate(certificate);
+        assert(success);
+
+        tls.handshake_state = .CERTIFICATE_RECEIVED;
+
+      case .SERVER_KEY_EXCHANGE;
+        assert(tls.handshake_state == .CERTIFICATE_RECEIVED);
+
+        assert(read(u8) == 3); // named_curve
+        assert(read(Tls_Named_Curve) == .x25519);
+
+        key_length := read(u8);
+        assert(key_length == 32);
+
+        key := read(u8, key_length);
+        memcpy(tls.server_public_key.data, key.data, 32);
+
+        push_print_style().default_format_int.base = 16;
+        log("Got public key %", key);
+
+        // Todo: validate key against security certificate.
+
+        signature_type := read(u16);
+        signature_length := read(u16);
+
+        signature := read(u8, signature_length);
+
+        tls.handshake_state = .SERVER_KEY_RECEIVED;
+
+      case .SERVER_HELLO_DONE;
+        assert(tls.handshake_state == .SERVER_KEY_RECEIVED);
+        log("Server hello done.");
+
+        // Generate our secret key.
+        key_u64 := cast(*[4]u64) tls.our_secret_key.data;
+        for 0..3 key_u64.*[it] = random_get();
+
+        tls.our_public_key = Curve25519.generate_keypair(*tls.our_secret_key);
+
+        log("Our secret key: %", tls.our_secret_key);
+        log("Our public key: %", tls.our_public_key);
+
+        tls.handshake_state = .SERVER_HELLO_DONE;
+        while true {}
     }
 }
 
@@ -1056,13 +1111,13 @@ get_dhcp_message_type :: (dhcp: *Dhcp_Message) -> Dhcp_Message_Type {
 
 init_dhcp_message :: (net: *Network_Connection) -> Dhcp_Message {
     dhcp: Dhcp_Message;
-    dhcp.opcode = 0x1;
+    dhcp.opcode        = 0x1;
     dhcp.hardware_type = 0x1;
-    dhcp.mac_length = 0x6;
-    dhcp.xid = net.dhcp_xid;
-    dhcp.client_mac = net.adapter.mac_address;
-    dhcp.server_ip = net.router_ip;
-    dhcp.magic = Dhcp_Message.MAGIC;
+    dhcp.mac_length    = 0x6;
+    dhcp.xid           = net.dhcp_xid;
+    dhcp.client_mac    = net.adapter.mac_address;
+    dhcp.server_ip     = net.router_ip;
+    dhcp.magic         = Dhcp_Message.MAGIC;
 
     byte_swap_protocol_header(*dhcp);
 
@@ -1227,7 +1282,7 @@ add_option :: (options: *Dhcp_Options_Builder, code: Dhcp_Option_Code, data: Any
     array_add(*options.buffer, cast(u8)code);
 
     if data.type.type == .STRING {
-        bytes := cast(*[]u8, data.value_pointer).*;
+        bytes := (.*) cast(*[]u8) data.value_pointer;
         array_add(*options.buffer, cast(u8)bytes.count);
         array_add(*options.buffer, ..bytes);
         return;
@@ -1549,7 +1604,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
 
         remaining = right;
     }
-    add_to_packet(*packet, (0).(u8));
+    add_to_packet(*packet, cast(u8) 0);
 
     add_to_packet(*packet, bs16(Dns_Record_Type.A.(u16)));
     add_to_packet(*packet, bs16(Dns_Class.IN.(u16)));

@@ -16,9 +16,12 @@ get :: bitfield_get;
 set_bit :: bitfield_set_bit;
 get_bit :: bitfield_get_bit;
 
+#import "Ring_Buffer";
+#import "ASN_1";
 #import "Aes";
 #import "Jai_Crypto";
-#import "Curve25519";
+
+Curve25519 :: #import "Curve25519";
 
 #load "../boot_data.jai";
 
@@ -375,7 +378,6 @@ network_test :: () {
 
         byte_swap_protocol_header(record);
 
-        // ... handle the TLS message in 'received'.
         handle_tls_message(*tls);
     }
 
