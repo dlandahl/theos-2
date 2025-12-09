@@ -325,7 +325,7 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
 
         tcp: Tcp_Header;
 
-        payload: [0x100] u8;
+        payload: [0x300] u8;
     }
 
     pseudo: Pseudo_Header;
@@ -340,7 +340,7 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
     count := payload.count;
     if count % 2 count += 1;
 
-    return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x100);
+    return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x300);
 }
 
 init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
@@ -351,7 +351,7 @@ init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := ""
     h.ack_number = tcp.ack_number+1;
     h.data_offset = 5 << 4;
     h.flags = flags;
-    h.window = 4096;
+    h.window = 4096 * 4;
 
     byte_swap_protocol_header(*h);
     h.checksum = tcp_checksum(h, tcp.net.our_ip, tcp.remote_ip, payload);
@@ -418,6 +418,7 @@ Tcp_Connection :: struct {
     out_data: Semaphore;
 
     do_flush: bool;
+    do_push:  bool;
 }
 
 blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
@@ -451,8 +452,9 @@ blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8) {
     }
 }
 
-tcp_flush :: (tcp: *Tcp_Connection) {
+tcp_flush :: (tcp: *Tcp_Connection, push := false) {
     tcp.do_flush = true;
+    tcp.do_push = push;
 }
 
 Tcp_Transmission_Info :: struct {
@@ -575,11 +577,17 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
             payload.count = bytes;
 
             if bytes {
-                transmit_tcp_packet(tcp, .ACK, payload);
+                if tcp.do_push {
+                    transmit_tcp_packet(tcp, .ACK | .PSH, payload);
+                } else {
+                    transmit_tcp_packet(tcp, .ACK, payload);
+                }
             }
 
             if bytes < bytes_per_packet break;
         }
+
+        tcp.do_push  = false;
     }
 }
 
@@ -909,7 +917,7 @@ Tls_Client_Hello :: struct {
 
     // Todo: hardcoded.
     extensions: struct {
-        supported_groups:      [14] u8;
+        supported_groups:      [8] u8;
         ec_points_format:      [6] u8;
         signature_algorithms:  [8] u8;
         sct:                   [4] u8;
@@ -996,7 +1004,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         extensions.signature_algorithms = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
         extensions.sct                  = .[0x0,  0x12, 0x0,  0x0];
-        extensions.supported_groups     = .[0x0,  0xa,  0x0,  0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
+        extensions.supported_groups     = .[0x0,  0xa,  0x0,  0x4, 0x0,  0x2, 0x0, 0x1d];
         extensions.ec_points_format     = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
         extensions.renegotiation_info   = .[0xff, 0x1,  0x0,  0x1, 0x0];
 
@@ -1053,22 +1061,29 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         receive(Tls_Record_Header);
         receive(Tls_Handshake_Header);
 
-        all_certificates_length := receive(tls_u24);
+        all_certificates_length := get(*receive(tls_u24));
 
-        // Assuming the server sends one certificate.
-        certificate_length := get(*receive(tls_u24));
+        while all_certificates_length > 0 {
+            certificate_length := get(*receive(tls_u24));
+            certificate := receive(u8, certificate_length);
 
-        certificate := receive(u8, certificate_length);
+            success, cert := parse_x509_certificate(certificate);
+            // log("Got security certificate: %", cert);
 
-        success, cert := parse_x509_certificate(certificate);
-        assert(success);
+            assert(success);
+
+            all_certificates_length -= certificate_length + 3;
+        }
     }
 
     {
         // Server Key Exchange.
 
-        receive(Tls_Record_Header);
-        receive(Tls_Handshake_Header);
+        record := receive(Tls_Record_Header);
+        assert(record.content_type == .HANDSHAKE);
+        header := receive(Tls_Handshake_Header);
+        assert(header.type == .SERVER_KEY_EXCHANGE);
+        
 
         assert(receive(u8) == 3); // named_curve
         assert(receive(Tls_Named_Curve) == .x25519);
@@ -1258,13 +1273,62 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         log("Received encrypted record: %", (.*) cast(*Tls_Record_Header)plaintext.data);
 
+        tls.server_sequence_number += 1;
+
         // Todo: Verify server handshake hash.
     }
 
     // Handshake completed.
 
+    {
+        context.print_style.default_format_int.base=10;
+        request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
+        log("Request: %", request);
+
+        ciphertext := tls_encrypt_message(*tls, cast([]u8)request, .APPLICATION_DATA);
+
+        record: Tls_Record_Header;
+        record.content_type = .APPLICATION_DATA;
+        record.version = .TLS_1_2;
+        record.length = cast(u16)ciphertext.count;
+
+        send(record);
+        send(ciphertext);
+        tcp_flush(tls.tcp, true);
+
+        tls.sequence_number += 1;
+    }
+
+    while true {
+        record := receive(Tls_Record_Header);
+        ciphertext := receive(u8, record.length);
+
+        success, plaintext := tls_decrypt_message(*tls, ciphertext, record.content_type);
+
+        assert(success);
+
+        log("Received application data: %", cast(string)plaintext);
+
+        tls.server_sequence_number += 1;
+    }
+
     return tls;
 }
+
+HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
+
+HTTP_MESSAGE :: #string,cr END
+POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
+Host: discord.com
+Authorization: %3
+Accept: */*
+Content-Type: application/json
+Content-Length: %1
+
+%2
+END;
+
+// */
 
 tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Content_Type) -> []u8 {
 
@@ -2214,6 +2278,6 @@ network_thread :: () {
             }
         }
 
-        sleep(5, .milliseconds);
+        sleep(5, .microseconds);
     }
 }

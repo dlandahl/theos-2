@@ -334,7 +334,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: false;
+    USE_DNS :: true;
 
     log_category("Test");
 
@@ -353,7 +353,7 @@ network_test :: () {
 
     #if USE_DNS {
         log("Sending DNS Query");
-        dns_query := transmit_dns_query(net, "google.com");
+        dns_query := transmit_dns_query(net, "discord.com");
 
         if Timeout(dns_query.complete, 60_000) {
             bluescreen();
@@ -364,7 +364,7 @@ network_test :: () {
 
     transmit_ping(net, ip_address);
 
-    connection := initiate_tcp_connection(net, ip_address, 4443);
+    connection := initiate_tcp_connection(net, ip_address, 443);
 
     Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
