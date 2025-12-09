@@ -2,7 +2,7 @@
 #import "Basic";
 
 #import "Machine_X64";
-#import "Bit_Operations";
+using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
 #import "Hash_Table";
 #import "String";
 #import "Random";
@@ -368,18 +368,7 @@ network_test :: () {
 
     Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
-    tls := initiate_tls_connection(net, connection);
-
-    while true {
-        auto_release_temp(); // Reading from a TCP stream uses temporary storage.
-
-        received := blocking_read_tcp_bytes(tls.tcp, size_of(Tls_Record_Header));
-        record := cast(*Tls_Record_Header)received.data;
-
-        byte_swap_protocol_header(record);
-
-        handle_tls_message(*tls);
-    }
+    tls := establish_tls_connection(connection);
 
     if false {
         request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
@@ -1893,4 +1882,17 @@ offset_of :: ($T: Type, $member: string) -> s64 #no_context {
     DONE
 
     #insert #run sprint(BODY, member);
+}
+
+fill_random :: (buffer: []u8) {
+    u64_buffer: []u64;
+    u64_buffer.count = buffer.count / 8;
+    u64_buffer.data  = cast(*u64)buffer.data;
+
+    for* u64_buffer it.* = random_get();
+
+    remainder := buffer.count % 8;
+    for 0..remainder-1 {
+        buffer[buffer.count-remainder + it] = xx random_get();
+    }
 }

@@ -28,8 +28,8 @@ Asn1_Reader :: struct {
     error: bool;
 }
 
-begin_construction :: (reader: *Asn1_Reader) {
-    container := read_value(reader, .SEQUENCE);
+begin_construction :: (reader: *Asn1_Reader, tag := Asn1_Tag.SEQUENCE) {
+    container := read_value(reader, tag);
 
     const := array_add(*reader.construction_stack);
 
@@ -175,11 +175,10 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
 
         parsed.version = 1;
         if peek_tag(reader) == Asn1_Tag.CONTEXT_0 {
-            version_container := read_value(*reader, .CONTEXT_0);
-            version_reader := Asn1_Reader.{data=version_container};
-
-            version_value := read_value(*version_reader, .INTEGER);
+            begin_construction(*reader, .CONTEXT_0);
+            version_value := read_value(*reader, .INTEGER);
             parsed.version = version_value[version_value.count - 1].(int) + 1;
+            end_construction(*reader);
         }
 
         parsed.serial_number = read_value(*reader, .INTEGER);
@@ -254,7 +253,8 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
     if cl.count == 2 && contains(cl[1], "ASN_1.jai") {
         set_build_options_dc(.{do_output = false});
 
-        cert := parse_x509_certificate(test_certificate);
+        result, cert := parse_x509_certificate(test_certificate);
+        assert(result);
 
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
         context.print_style.default_format_int.base = 16;

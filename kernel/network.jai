@@ -1,10 +1,15 @@
 
-byte_swap_int :: #procedure_of_call byte_swap(1);
+byte_swap_in_place :: (value: *$T) {
+    ti :: type_info(T);
 
-bs16 :: #bake_constants (#procedure_of_call(byte_swap(1)))(T=u16);
-bs32 :: #bake_constants (#procedure_of_call(byte_swap(1)))(T=u32);
-
-byte_swap :: byte_swap_protocol_header;
+    #if ti.type == .STRUCT {
+        byte_swap_protocol_header(value);
+    } else #if ti.type == .ARRAY {
+        for* value.* byte_swap_in_place(it);
+    } else {
+        value.* = byte_swap(value.*);
+    }
+}
 
 byte_swap_protocol_header :: (header: *$T) #modify {
     ti := cast(*Type_Info) T;
@@ -144,7 +149,7 @@ internet_checksum :: (bytes: *u8, count: int) -> u16 {
         sum = (sum >> 16) + (sum & 0xffff);
     }
 
-    return ~bs16(xx sum);
+    return ~byte_swap(cast(u16) sum);
 }
 
 init_ip_header :: (
@@ -159,7 +164,7 @@ init_ip_header :: (
     ip: Ipv4_Header;
     set(*ip, .version, 4);
     set(*ip, .ihl, 5);
-    set(*ip, .total_length, bs16(xx total_length));
+    set(*ip, .total_length, byte_swap(cast(u16) total_length));
 
     ip.time_to_live = 128;
     ip.protocol = protocol;
@@ -328,7 +333,7 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
     pseudo.source_address = source;
     pseudo.destination_address = dest;
     pseudo.protocol = .TCP;
-    pseudo.tcp_length = bs16(cast(u16, size_of(Tcp_Header) + payload.count));
+    pseudo.tcp_length = byte_swap(cast(u16, size_of(Tcp_Header) + payload.count));
 
     memcpy(pseudo.payload.data, payload.data, payload.count);
 
@@ -411,6 +416,8 @@ Tcp_Connection :: struct {
 
     out_stream: Ring_Buffer;
     out_data: Semaphore;
+
+    do_flush: bool;
 }
 
 blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
@@ -442,6 +449,10 @@ blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8) {
 
         wait_for(*tcp.out_data);
     }
+}
+
+tcp_flush :: (tcp: *Tcp_Connection) {
+    tcp.do_flush = true;
 }
 
 Tcp_Transmission_Info :: struct {
@@ -550,6 +561,26 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
             info.attempts += 1;
         }
     }
+
+    if tcp.do_flush {
+        tcp.do_flush = false;
+
+        bytes_per_packet :: 512;
+
+        while true {
+            payload: string;
+            payload.data = talloc(bytes_per_packet);
+
+            bytes := read_ring_buffer(*tcp.out_stream, payload.data, bytes_per_packet);
+            payload.count = bytes;
+
+            if bytes {
+                transmit_tcp_packet(tcp, .ACK, payload);
+            }
+
+            if bytes < bytes_per_packet break;
+        }
+    }
 }
 
 // Implementation of TCP that might give clues about how to improve this horrible code:
@@ -641,7 +672,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 
     if tcp_header.sequence_number == tcp.ack_number + 1 {
-        length := bs16(xx get(ip, .total_length)) - size_of(Ipv4_Header) - size_of(Tcp_Header);
+        length := byte_swap(cast(u16) get(ip, .total_length)) - size_of(Ipv4_Header) - size_of(Tcp_Header);
 
         if length == 0 {
             // It's just an ACK or FIN, handled above.
@@ -712,15 +743,21 @@ byte_swap :: (u24: tls_u24) -> tls_u24 {
 
 
 Tls_Record_Header :: struct {
-    content_type: enum u8 {
-        CHANGE_CIPHER_SPEC :: 20;
-        ALERT              :: 21;
-        HANDSHAKE          :: 22;
-        APPLICATION_DATA   :: 23;
-    }
-
+    content_type: Tls_Content_Type;
     version: Tls_Version #align 1;
     length: u16 #align 1;
+}
+
+Tls_Content_Type :: enum u8 {
+    CHANGE_CIPHER_SPEC :: 20;
+    ALERT              :: 21;
+    HANDSHAKE          :: 22;
+    APPLICATION_DATA   :: 23;
+}
+
+Tls_Handshake_Header :: struct {
+    type: Tls_Handshake_Type;
+    length: tls_u24;
 }
 
 Tls_Handshake_Type :: enum u8 {
@@ -752,38 +789,6 @@ Tls_Extension :: enum u16 {
     signature_algorithms :: 0x00_0d;
     renegotiation_info :: 0xff_01;
     signed_certificate_timestamp :: 0x00_12;
-}
-
-Tls_Client_Hello :: struct {
-    type: Tls_Handshake_Type;
-    length: tls_u24;
-
-    client_version: Tls_Version;
-    random: Tls_Random #align 1;  @DontByteswap
-
-    session_id: u8;
-
-    num_cipher_suites: u16 #align 1;
-    cipher_suites: [1] Tls_Cipher_Suite #align 1;
-
-    num_compression_methods: u8;
-    compression_method: u8;
-
-    extensions_length: u16 #align 1;
-
-    // Todo: hardcoded.
-    extensions: struct {
-        supported_groups:      [14] u8;
-        ec_points_format:      [6] u8;
-        signature_algorithms:  [8] u8;
-        sct:                   [4] u8;
-        renegotiation_info:    [5] u8;
-    } @DontByteswap
-}
-
-Tls_Handshake_Header :: struct {
-    type: Tls_Handshake_Type;
-    length: tls_u24;
 }
 
 Tls_Cipher_Suite :: enum u16 {
@@ -860,6 +865,7 @@ Tls_Alert :: struct {
 Tls_Connection :: struct {
     tcp: *Tcp_Connection;
 
+    // Only used during key exchange. Maybe move this somewhere else.
     our_secret_key: [32] u8;
     our_public_key: [32] u8;
 
@@ -869,229 +875,225 @@ Tls_Connection :: struct {
 
     client_random: Tls_Random;
     server_random: Tls_Random;
+    // ===
 
-    handshake_state: enum {
-        INVALID;
-        CLIENT_HELLO_SENT;
-        SERVER_HELLO_RECEIVED;
-        CERTIFICATE_RECEIVED;
-        SERVER_KEY_RECEIVED;
-        SERVER_HELLO_DONE;
+    Master_Secret: [48] u8;
+
+    using encryption_keys: struct {
+        client_write_key: i128;
+        server_write_key: i128;
+        client_write_iv:  [4]u8;
+        server_write_iv:  [4]u8;
     }
+
+    sequence_number: u64;
+    server_sequence_number: u64;
 }
 
-initiate_tls_connection :: (net: *Network_Connection, tcp: *Tcp_Connection) -> Tls_Connection {
+Tls_Client_Hello :: struct {
+    type: Tls_Handshake_Type;
+    length: tls_u24;
+
+    client_version: Tls_Version;
+    random: Tls_Random #align 1;  @DontByteswap
+
+    session_id: u8;
+
+    num_cipher_suites: u16 #align 1;
+    cipher_suites: [1] Tls_Cipher_Suite #align 1;
+
+    num_compression_methods: u8;
+    compression_method: u8;
+
+    extensions_length: u16 #align 1;
+
+    // Todo: hardcoded.
+    extensions: struct {
+        supported_groups:      [14] u8;
+        ec_points_format:      [6] u8;
+        signature_algorithms:  [8] u8;
+        sct:                   [4] u8;
+        renegotiation_info:    [5] u8;
+    } @DontByteswap
+}
+
+establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
+    push_print_style().default_format_int.base = 16;
 
     if tcp.handshake_state != .COMPLETED {
         log_error("Trying to create a TLS connection without an established TCP connection.");
         return .{};
     }
 
-    // Send TLS client hello.
-    packet: Network_Packet;
-    packet.data = cast(*void)get_4k_page() + DIRECT_MAPPING_BASE;
+    // Near the end of the handshake we need to transmit a hash of all handshake messages up to that point.
+    all_handshake_payload: String_Builder;
+    hashing_enabled := true;
 
-    record := Tls_Record_Header.{
-        content_type = .HANDSHAKE,
-        version      = .TLS_1_0,
-        length       = size_of(Tls_Client_Hello),
-    };
-
-    byte_swap_protocol_header(*record);
-    add_to_packet(*packet, record);
-
-    hello: Tls_Client_Hello;
-    hello.type                      = .CLIENT_HELLO;
-    hello.client_version            = .TLS_1_2;
-    hello.session_id                = 0;
-    hello.num_cipher_suites         = size_of(type_of(hello.cipher_suites));
-    hello.num_compression_methods   = 1;
-    hello.compression_method        = 0;
-    hello.extensions_length         = size_of(type_of(hello.extensions));
-
-    hello.extensions.signature_algorithms      = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
-    hello.extensions.sct                       = .[0x0,  0x12, 0x0,  0x0];
-    hello.extensions.supported_groups          = .[0x0,  0xa,  0x0,  0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
-    hello.extensions.ec_points_format          = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
-    hello.extensions.renegotiation_info        = .[0xff, 0x1,  0x0,  0x1, 0x0];
-
-    hello.cipher_suites[0] = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
-
-    set(*hello.length, size_of(Tls_Client_Hello) - 4);
-
-    for* hello.random.random it.* = random_get();
-    ts := to_timespec(get_monotonic_time());
-    // hello.random.unix_time = bs32(xx ts.tv_sec);
-
-    byte_swap_protocol_header(*hello);
-    add_to_packet(*packet, hello);
-
-    payload: string;
-    payload.data = packet.data;
-    payload.count = packet.length;
-
-    transmit_tcp_packet(tcp, .ACK | .PSH, payload);
-
-    tls: Tls_Connection;
-    tls.tcp = tcp;
-    tls.handshake_state = .CLIENT_HELLO_SENT;
-    tls.client_random = hello.random;
-    return tls;
-}
-
-transmit_tls_client_handshake :: (tls: *Tls_Connection) {
-    write :: (value: $T) #expand {
-        #if type_info(T).type == .STRUCT {
-            byte_swap_protocol_header(*value);
-        } else #if T != [32]u8 {
-            value = byte_swap(value);
-        }
-
-        buffer := []u8.{size_of(T), cast(*u8) *value};
+    send :: (buffer: []u8) #expand {
         blocking_write_tcp_bytes(tls.tcp, buffer);
+
+        if hashing_enabled {
+            append(*all_handshake_payload, cast(string)buffer);
+        }
     }
 
-    assert(tls.handshake_state == .SERVER_HELLO_DONE);
+    send :: (value: $T) #expand {
+        stack_value := value;
+        byte_swap_in_place(*stack_value);
 
-    record: Tls_Record_Header;
-    record.content_type = .HANDSHAKE;
-    record.version = .TLS_1_2;
-    record.length = 37; // Todo: hardcoded.
-    write(record);
+        buffer := []u8.{size_of(T), cast(*u8) *stack_value};
+        blocking_write_tcp_bytes(tls.tcp, buffer);
 
-    cce: Tls_Handshake_Header;
-    cce.type = .CLIENT_KEY_EXCHANGE;
-    set(*cce.length, 33); // Todo: hardcoded.
-    write(cce);
+        if hashing_enabled && T != Tls_Record_Header {
+            append(*all_handshake_payload, cast(string)buffer);
+        }
+    }
 
-    write(tls.our_public_key);
-
-    premaster_secret := cast(string)Curve25519.x25519(
-        *tls.server_public_key,
-        *tls.our_secret_key,
-    );
-
-    client_random := string.{size_of(Tls_Random), tls.client_random.bytes.data};
-    server_random := string.{size_of(Tls_Random), tls.server_random.bytes.data};
-
-    seed := join("master secret", client_random, server_random);
-
-    a0 := seed;
-    a1 := hmac_sha256(premaster_secret, a0);
-    a2 := hmac_sha256(premaster_secret, a1);
-    p1 := hmac_sha256(premaster_secret, join(a1, seed));
-    p2 := hmac_sha256(premaster_secret, join(a2, seed));
-
-    Master_Secret: [48]u8;
-    memcpy(Master_Secret.data,      p1.data, 32);
-    memcpy(Master_Secret.data + 32, p2.data, 16);
-}
-
-handle_tls_message :: (tls: *Tls_Connection) {
-    read :: ($ type: Type) -> type #expand {
+    receive :: ($ type: Type) -> type #expand {
         buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type));
 
-        item := (.*) cast(*type) buffer.data;
-
-        #if type_info(type).type == .STRUCT {
-            byte_swap_protocol_header(*item);
-        } else {
-            item = byte_swap(item);
+        if hashing_enabled && type != Tls_Record_Header {
+            append(*all_handshake_payload, cast(string)buffer);
         }
 
-        return item;
+        item := cast(*type) buffer.data;
+        byte_swap_in_place(item);
+        return item.*;
     }
 
-    read :: ($ type: Type, count: int) -> []type #expand {
+    receive :: ($ type: Type, count: int) -> []type #expand {
+        #assert size_of(type) == 1 "Byteswapping.";
+
         buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type) * count);
+
+        if hashing_enabled {
+            append(*all_handshake_payload, cast(string)buffer);
+        }
+
         return .{count, cast(*type) buffer.data};
     }
 
-    net := tls.tcp.net;
+    tls: Tls_Connection;
+    tls.tcp = tcp;
 
-    push_print_style().default_format_int.base = 16;
+    {
+        // Send ClientHello.
 
-    record := read(Tls_Handshake_Header);
-    log("Got handshake record: %", record);
+        record: Tls_Record_Header;
+        record.content_type = .HANDSHAKE;
+        record.version      = .TLS_1_0;
+        record.length       = size_of(Tls_Client_Hello);
+        send(record);
 
-    if record.type == {
-      case .SERVER_HELLO;
-        assert(tls.handshake_state == .CLIENT_HELLO_SENT);
+        using hello: Tls_Client_Hello;
 
-        version := read(Tls_Version);
-        random  := read(Tls_Random);
+        type                      = .CLIENT_HELLO;
+        client_version            = .TLS_1_2;
+        num_cipher_suites         = size_of(Tls_Cipher_Suite);
+        cipher_suites[0]          = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
+        num_compression_methods   = 1;
+        extensions_length         = size_of(type_of(extensions));
+
+        extensions.signature_algorithms = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
+        extensions.sct                  = .[0x0,  0x12, 0x0,  0x0];
+        extensions.supported_groups     = .[0x0,  0xa,  0x0,  0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19];
+        extensions.ec_points_format     = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
+        extensions.renegotiation_info   = .[0xff, 0x1,  0x0,  0x1, 0x0];
+
+        set(*length, size_of(Tls_Client_Hello) - 4);
+
+        for* random.random it.* = random_get();
+        tls.client_random = random;
+
+        send(hello);
+        tcp_flush(tcp);
+    }
+
+    {
+        // Receive ServerHello.
+
+        record    := receive(Tls_Record_Header);
+        handshake := receive(Tls_Handshake_Header);
+
+        version := receive(Tls_Version);
+        random  := receive(Tls_Random);
 
         tls.server_random = random;
 
-        session_id_size := read(u8);
-        session_id      := read(u8, session_id_size);
+        session_id_size := receive(u8);
+        session_id      := receive(u8, session_id_size);
 
         push_print_style().default_format_int.base = 16;
         log("Got session ID: %", session_id);
 
-        cipher_suite := read(Tls_Cipher_Suite);
+        cipher_suite := receive(Tls_Cipher_Suite);
         log("Requested cipher suite: %", cipher_suite);
 
-        compression_method := read(u8);
+        compression_method := receive(u8);
         assert(compression_method == 0);
 
-        extensions_length := read(u16);
+        extensions_length := receive(u16);
 
         while extensions_length > 0 {
-            extension_type := read(Tls_Extension);
+            extension_type := receive(Tls_Extension);
             extensions_length -= size_of(Tls_Extension);
             log("Server hello provided extension %", extension_type);
 
-            extension_size := read(u16);
+            extension_size := receive(u16);
             extensions_length -= size_of(u16);
 
-            extension_bytes := read(u8, extension_size);
+            extension_bytes := receive(u8, extension_size);
             extensions_length -= extension_size;
         }
+    }
 
-        tls.handshake_state = .SERVER_HELLO_RECEIVED;
+    {
+        // Receive security certificate.
 
-      case .CERTIFICATE;
-        assert(tls.handshake_state == .SERVER_HELLO_RECEIVED);
+        receive(Tls_Record_Header);
+        receive(Tls_Handshake_Header);
 
-        all_certificates_length := read(tls_u24);
+        all_certificates_length := receive(tls_u24);
 
         // Assuming the server sends one certificate.
-        certificate_length := get(*read(tls_u24));
+        certificate_length := get(*receive(tls_u24));
 
-        certificate := read(u8, certificate_length);
+        certificate := receive(u8, certificate_length);
 
         success, cert := parse_x509_certificate(certificate);
         assert(success);
+    }
 
-        tls.handshake_state = .CERTIFICATE_RECEIVED;
+    {
+        // Server Key Exchange.
 
-      case .SERVER_KEY_EXCHANGE;
-        assert(tls.handshake_state == .CERTIFICATE_RECEIVED);
+        receive(Tls_Record_Header);
+        receive(Tls_Handshake_Header);
 
-        assert(read(u8) == 3); // named_curve
-        assert(read(Tls_Named_Curve) == .x25519);
+        assert(receive(u8) == 3); // named_curve
+        assert(receive(Tls_Named_Curve) == .x25519);
 
-        key_length := read(u8);
+        key_length := receive(u8);
         assert(key_length == 32);
 
-        key := read(u8, key_length);
+        key := receive(u8, key_length);
         memcpy(tls.server_public_key.data, key.data, 32);
 
         log("Got public key %", key);
 
         // Todo: validate key against security certificate.
 
-        signature_type := read(u16);
-        signature_length := read(u16);
+        signature_type := receive(u16);
+        signature_length := receive(u16);
 
-        signature := read(u8, signature_length);
+        signature := receive(u8, signature_length);
+    }
 
-        tls.handshake_state = .SERVER_KEY_RECEIVED;
+    {
+        // Server Hello Done.
 
-      case .SERVER_HELLO_DONE;
-        assert(tls.handshake_state == .SERVER_KEY_RECEIVED);
-        log("Server hello done.");
+        receive(Tls_Record_Header);
+        receive(Tls_Handshake_Header);
 
         // Generate our secret key.
         key_u64 := cast(*[4]u64) tls.our_secret_key.data;
@@ -1104,11 +1106,238 @@ handle_tls_message :: (tls: *Tls_Connection) {
 
         for< tls.our_secret_key print("%", it);
         print("\n");
-
-        tls.handshake_state = .SERVER_HELLO_DONE;
-        while true {}
     }
+
+    {
+        // Transmit Client Key Exchange.
+
+        KEY_EXCHANGE_SIZE :: size_of([32]u8) + size_of(u8);
+
+        record: Tls_Record_Header;
+        record.content_type = .HANDSHAKE;
+        record.version = .TLS_1_2;
+        record.length = KEY_EXCHANGE_SIZE + size_of(Tls_Handshake_Header);
+        send(record);
+
+        cke: Tls_Handshake_Header;
+        cke.type = .CLIENT_KEY_EXCHANGE;
+        set(*cke.length, KEY_EXCHANGE_SIZE);
+        send(cke);
+
+        send(cast(u8) 32);
+        send(tls.our_public_key);
+
+        tcp_flush(tls.tcp);
+    }
+
+    {
+        // Calculate encryption keys.
+
+        premaster_secret := cast(string)Curve25519.x25519(
+            *tls.server_public_key,
+            *tls.our_secret_key,
+        );
+
+        client_random := cast(string)tls.client_random.bytes;
+        server_random := cast(string)tls.server_random.bytes;
+
+        seed := join("master secret", client_random, server_random,, temp);
+
+        a0 := seed;
+        a1 := cast(string)hmac_sha256(premaster_secret, a0);
+        a2 := cast(string)hmac_sha256(premaster_secret, a1);
+        p1 := cast(string)hmac_sha256(premaster_secret, join(a1, seed,, temp));
+        p2 := cast(string)hmac_sha256(premaster_secret, join(a2, seed,, temp));
+
+        master_secret: [48]u8;
+        memcpy(master_secret.data,      p1.data, 32);
+        memcpy(master_secret.data + 32, p2.data, 16);
+
+        Master_Secret := cast(string)master_secret;
+
+        seed = join("key expansion", server_random, client_random,, temp);
+
+        a0  = seed;
+        a1  = cast(string)hmac_sha256(Master_Secret, a0);
+        a2  = cast(string)hmac_sha256(Master_Secret, a1);
+        a3 := cast(string)hmac_sha256(Master_Secret, a2);
+        a4 := cast(string)hmac_sha256(Master_Secret, a3);
+
+        p1  = cast(string)hmac_sha256(Master_Secret, join(a1, seed,, temp));
+        p2  = cast(string)hmac_sha256(Master_Secret, join(a2, seed,, temp));
+        p3 := cast(string)hmac_sha256(Master_Secret, join(a3, seed,, temp));
+        p4 := cast(string)hmac_sha256(Master_Secret, join(a4, seed,, temp));
+
+        buffer := join(p1, p2, p3, p4,, temp);
+
+        memcpy(*tls.encryption_keys, buffer.data, size_of(type_of(tls.encryption_keys)));
+
+        memcpy(tls.Master_Secret.data, Master_Secret.data, 48);
+    }
+
+    verify_data_input := builder_to_string(*all_handshake_payload);
+    hashing_enabled = false;
+
+    {
+        // Client Change Cipher Spec.
+
+        record: Tls_Record_Header;
+        record.content_type = .CHANGE_CIPHER_SPEC;
+        record.version = .TLS_1_2;
+        record.length = 1;
+
+        send(record);
+        send(cast(u8) 0x1);
+
+        tcp_flush(tls.tcp);
+    }
+
+    {
+        // Client Handshake Finished.
+
+        // First, create the handshake message to be encrypted.
+
+        message: struct {
+            header: Tls_Handshake_Header;
+            verify_data: [12]u8;
+        }
+
+        message.header.type = .FINISHED;
+        set(*message.header.length, 12);
+        byte_swap_in_place(*message.header);
+
+        {
+            // Calculate verify_data.
+
+            sha_all_messages := cast(string)bit_cast(sha256_base_flipped(verify_data_input), [32]u8);
+
+            seed := join("client finished", sha_all_messages,, temp);
+            a0   := seed;
+            a1   := cast(string)hmac_sha256(cast(string)tls.Master_Secret, a0);
+            p1   := cast(string)hmac_sha256(cast(string)tls.Master_Secret, join(a1, seed,, temp));
+
+            memcpy(message.verify_data.data, p1.data, 12);
+        }
+
+        // Encrypt the message we've just created using AES128-GCM.
+
+        text: []u8;
+        text.data = cast(*u8) *message;
+        text.count = size_of(type_of(message));
+
+        ciphertext := tls_encrypt_message(*tls, text, .HANDSHAKE);
+
+        record: Tls_Record_Header;
+        record.content_type = .HANDSHAKE;
+        record.version = .TLS_1_2;
+        record.length = cast(u16) ciphertext.count;
+
+        send(record);
+        tls.sequence_number += 1;
+
+        send(ciphertext);
+        tcp_flush(tls.tcp);
+    }
+
+    {
+        // Server Change Cipher Spec.
+
+        receive(Tls_Record_Header);
+        assert(receive(u8) == 1);
+    }
+
+    {
+        // Server Hanshake Finished.
+
+        record := receive(Tls_Record_Header);
+        text   := receive(u8, record.length);
+
+        success, plaintext := tls_decrypt_message(*tls, text, .HANDSHAKE);
+
+        assert(success);
+
+        log("Received encrypted record: %", (.*) cast(*Tls_Record_Header)plaintext.data);
+
+        // Todo: Verify server handshake hash.
+    }
+
+    // Handshake completed.
+
+    return tls;
 }
+
+tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Content_Type) -> []u8 {
+
+    // Note this destructively modifies 'text'. 
+
+    sequence_be := byte_swap(tls.sequence_number);
+
+    iv: [12]u8;
+    for 0..3 iv[it] = tls.client_write_iv[it];
+    memcpy(iv.data + 4, *sequence_be, 8);
+
+    aad: [13]u8;
+
+    {
+        // Fill in Additional Authenticated Data.
+
+        memcpy(aad.data, *sequence_be, size_of(u64));
+
+        aad[8] = cast(u8) content_type;
+        aad[9] = 0x03; aad[10] = 0x03;
+
+        text_size := byte_swap(cast(u16)text.count);
+        memcpy(aad.data + 11, *text_size, 2);
+    }
+
+    auth_tag := aes128_gcm_encrypt_stream(text, tls.client_write_key, iv, aad);
+
+    bytes := text.count + 8 + 16; // Add room for explicit IV and auth tag.
+
+    result: []u8;
+    result.data = talloc(bytes);
+    result.count = bytes;
+
+    memcpy(result.data, iv.data + 4, iv.count - 4);
+    memcpy(result.data + 8, text.data, text.count);
+    memcpy(result.data + 8 + text.count, auth_tag.bytes.data, 16);
+
+    return result;
+}
+
+tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Content_Type) -> bool, []u8 {
+
+    aad: [13]u8;
+
+    {
+        // Fill in Additional Authenticated Data.
+
+        sequence_be := byte_swap(tls.server_sequence_number);
+        memcpy(aad.data, *sequence_be, size_of(u64));
+
+        aad[8] = cast(u8) content_type;
+        aad[9] = 0x03; aad[10] = 0x03;
+
+        text_size := byte_swap(cast(u16)text.count - 8 - 16);
+        memcpy(aad.data + 11, *text_size, 2);
+    }
+
+    iv: [12]u8;
+    memcpy(iv.data, tls.server_write_iv.data, 4);
+    memcpy(iv.data + 4, text.data, 8);
+
+    ciphertext: []u8;
+    ciphertext.count = text.count - 8 - size_of(i128);
+    ciphertext.data = text.data + 8;
+
+    auth_tag: i128;
+    memcpy(*auth_tag, text.data + 8 + ciphertext.count, 16);
+
+    success := aes128_gcm_decrypt_stream(ciphertext, tls.server_write_key, iv, aad, auth_tag);
+
+    return success, ciphertext;
+}
+
 
 
 
@@ -1666,8 +1895,8 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     }
     add_to_packet(*packet, cast(u8) 0);
 
-    add_to_packet(*packet, bs16(Dns_Record_Type.A.(u16)));
-    add_to_packet(*packet, bs16(Dns_Class.IN.(u16)));
+    add_to_packet(*packet, byte_swap(Dns_Record_Type.A.(u16)));
+    add_to_packet(*packet, byte_swap(Dns_Class.IN.(u16)));
 
     i8254x_transmit_packet(*net.adapter, packet);
 
@@ -1780,10 +2009,10 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                 Skip_Name();
             }
 
-            type := cast(Dns_Record_Type) bs16(cursor.(*u16).*);
+            type := cast(Dns_Record_Type) byte_swap(cursor.(*u16).*);
 
             cursor += 8; // Class, type, TTL
-            data_length := bs16(cursor.(*u16).*);
+            data_length := byte_swap(cursor.(*u16).*);
 
             cursor += 2; // Data length
 
@@ -1818,12 +2047,15 @@ Network_Packet :: struct {
 add_to_packet :: (packet: *Network_Packet, data: Any) {
     if data.type.type == .STRING {
         s := data.value_pointer.(*string).*;
+        assert(packet.length + s.count <= 4096); // Todo
 
         memcpy(packet.data + packet.length, s.data, s.count);
         packet.length += s.count;
 
         return;
     }
+
+    assert(packet.length + data.type.runtime_size <= 4096); // Todo
 
     memcpy(packet.data + packet.length, data.value_pointer, data.type.runtime_size);
     packet.length += data.type.runtime_size;
@@ -1917,6 +2149,10 @@ network_thread :: () {
     while true  {
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);
+        }
+
+        for* net.tcp_connections {
+            update_tcp_connection(it);
         }
 
         packets := i8254x_get_newly_received_packets(*adapter);
