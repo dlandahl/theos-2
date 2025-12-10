@@ -1,15 +1,16 @@
 
-generate_keypair :: (secret_key: *[32]u8) -> [32]u8 {
-    clamp25519(secret_key);
+generate_keypair :: (random_bytes: [32]u8) -> public: [32]u8, secret: [32]u8 {
+    secret_key := random_bytes;
+    clamp25519(*secret_key);
 
     public_key: [32]u8;
 
     _9: [32]u8;
     _9[0] = 9;
 
-    scalarmult(*public_key, secret_key, *_9);
+    scalarmult(*public_key, *secret_key, *_9);
 
-    return public_key;
+    return public_key, secret_key;
 }
 
 x25519 :: (public_key: *[32]u8, secret_key: *[32]u8) -> [32]u8 {
@@ -27,11 +28,9 @@ x25519 :: (public_key: *[32]u8, secret_key: *[32]u8) -> [32]u8 {
 
 field_elem :: [16]s64;
 
-#no_reset _121665: field_elem;
-#run {
-    _121665[0] = 0xdb41;
-    _121665[1] = 1;
-}
+_121665 : field_elem : .[
+    0xdb41, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+];
 
 scalarmult :: (out: *[32]u8, scalar: *[32]u8, point: *[32]u8) {
     clamp25519(scalar);
@@ -187,6 +186,6 @@ pack25519 :: (out: *[32]u8, in: field_elem) {
         secret_key[0] = 1;
 
         context.print_style.default_format_int.base = 16;
-        log("%", generate_keypair(*secret_key));
+        log("%", generate_keypair(secret_key));
     }
 }

@@ -418,7 +418,6 @@ Tcp_Connection :: struct {
     out_data: Semaphore;
 
     do_flush: bool;
-    do_push:  bool;
 }
 
 blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
@@ -452,9 +451,8 @@ blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8) {
     }
 }
 
-tcp_flush :: (tcp: *Tcp_Connection, push := false) {
+tcp_flush :: (tcp: *Tcp_Connection) {
     tcp.do_flush = true;
-    tcp.do_push = push;
 }
 
 Tcp_Transmission_Info :: struct {
@@ -577,17 +575,11 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
             payload.count = bytes;
 
             if bytes {
-                if tcp.do_push {
-                    transmit_tcp_packet(tcp, .ACK | .PSH, payload);
-                } else {
-                    transmit_tcp_packet(tcp, .ACK, payload);
-                }
+                transmit_tcp_packet(tcp, .ACK, payload);
             }
 
             if bytes < bytes_per_packet break;
         }
-
-        tcp.do_push  = false;
     }
 }
 
@@ -873,20 +865,6 @@ Tls_Alert :: struct {
 Tls_Connection :: struct {
     tcp: *Tcp_Connection;
 
-    // Only used during key exchange. Maybe move this somewhere else.
-    our_secret_key: [32] u8;
-    our_public_key: [32] u8;
-
-    server_public_key: [32] u8;
-
-    shared_key: [32] u8;
-
-    client_random: Tls_Random;
-    server_random: Tls_Random;
-    // ===
-
-    Master_Secret: [48] u8;
-
     using encryption_keys: struct {
         client_write_key: i128;
         server_write_key: i128;
@@ -933,23 +911,22 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         return .{};
     }
 
+
+
     // Near the end of the handshake we need to transmit a hash of all handshake messages up to that point.
     all_handshake_payload: String_Builder;
     hashing_enabled := true;
 
-    send :: (buffer: []u8) #expand {
-        blocking_write_tcp_bytes(tls.tcp, buffer);
-
-        if hashing_enabled {
-            append(*all_handshake_payload, cast(string)buffer);
-        }
-    }
-
     send :: (value: $T) #expand {
-        stack_value := value;
-        byte_swap_in_place(*stack_value);
+        #if type_info(T).type != .ARRAY {
+            stack_value := value;
+            byte_swap_in_place(*stack_value);
 
-        buffer := []u8.{size_of(T), cast(*u8) *stack_value};
+            buffer := []u8.{size_of(T), cast(*u8) *stack_value};
+        } else {
+            buffer := cast([]u8)value;
+        }
+
         blocking_write_tcp_bytes(tls.tcp, buffer);
 
         if hashing_enabled && T != Tls_Record_Header {
@@ -969,17 +946,33 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         return item.*;
     }
 
-    receive :: ($ type: Type, count: int) -> []type #expand {
-        #assert size_of(type) == 1 "Byteswapping.";
-
-        buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type) * count);
+    receive :: (count: int) -> []u8 #expand {
+        buffer := blocking_read_tcp_bytes(tls.tcp, count);
 
         if hashing_enabled {
             append(*all_handshake_payload, cast(string)buffer);
         }
 
-        return .{count, cast(*type) buffer.data};
+        return buffer;
     }
+
+
+
+    // Key exchange parameters:
+
+    our_secret_key: [32] u8;
+    our_public_key: [32] u8;
+
+    server_public_key: [32] u8;
+
+    shared_key: [32] u8;
+
+    client_random: Tls_Random;
+    server_random: Tls_Random;
+
+    Master_Secret: [48] u8;
+
+
 
     tls: Tls_Connection;
     tls.tcp = tcp;
@@ -1011,7 +1004,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         set(*length, size_of(Tls_Client_Hello) - 4);
 
         for* random.random it.* = random_get();
-        tls.client_random = random;
+        client_random = random;
 
         send(hello);
         tcp_flush(tcp);
@@ -1026,10 +1019,10 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         version := receive(Tls_Version);
         random  := receive(Tls_Random);
 
-        tls.server_random = random;
+        server_random = random;
 
         session_id_size := receive(u8);
-        session_id      := receive(u8, session_id_size);
+        session_id      := receive(session_id_size);
 
         push_print_style().default_format_int.base = 16;
         log("Got session ID: %", session_id);
@@ -1050,7 +1043,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
             extension_size := receive(u16);
             extensions_length -= size_of(u16);
 
-            extension_bytes := receive(u8, extension_size);
+            extension_bytes := receive(extension_size);
             extensions_length -= extension_size;
         }
     }
@@ -1065,14 +1058,15 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         while all_certificates_length > 0 {
             certificate_length := get(*receive(tls_u24));
-            certificate := receive(u8, certificate_length);
+            certificate := receive(certificate_length);
 
             success, cert := parse_x509_certificate(certificate);
             // log("Got security certificate: %", cert);
 
             assert(success);
 
-            all_certificates_length -= certificate_length + 3;
+            all_certificates_length -= size_of(tls_u24);
+            all_certificates_length -= certificate_length;
         }
     }
 
@@ -1080,10 +1074,10 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         // Server Key Exchange.
 
         record := receive(Tls_Record_Header);
-        assert(record.content_type == .HANDSHAKE);
         header := receive(Tls_Handshake_Header);
+
+        assert(record.content_type == .HANDSHAKE);
         assert(header.type == .SERVER_KEY_EXCHANGE);
-        
 
         assert(receive(u8) == 3); // named_curve
         assert(receive(Tls_Named_Curve) == .x25519);
@@ -1091,8 +1085,8 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         key_length := receive(u8);
         assert(key_length == 32);
 
-        key := receive(u8, key_length);
-        memcpy(tls.server_public_key.data, key.data, 32);
+        key := receive(key_length);
+        memcpy(server_public_key.data, key.data, 32);
 
         log("Got public key %", key);
 
@@ -1101,7 +1095,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         signature_type := receive(u16);
         signature_length := receive(u16);
 
-        signature := receive(u8, signature_length);
+        signature := receive(signature_length);
     }
 
     {
@@ -1111,16 +1105,13 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         receive(Tls_Handshake_Header);
 
         // Generate our secret key.
-        key_u64 := cast(*[4]u64) tls.our_secret_key.data;
-        for 0..3 key_u64.*[it] = random_get();
+        random_bytes: [32]u8;
+        fill_random(random_bytes);
 
-        tls.our_public_key = Curve25519.generate_keypair(*tls.our_secret_key);
+        our_public_key, our_secret_key = Curve25519.generate_keypair(random_bytes);
 
-        log("Our secret key: %", tls.our_secret_key);
-        log("Our public key: %", tls.our_public_key);
-
-        for< tls.our_secret_key print("%", it);
-        print("\n");
+        log("Our secret key: %", our_secret_key);
+        log("Our public key: %", our_public_key);
     }
 
     {
@@ -1140,7 +1131,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         send(cke);
 
         send(cast(u8) 32);
-        send(tls.our_public_key);
+        send(our_public_key);
 
         tcp_flush(tls.tcp);
     }
@@ -1149,14 +1140,14 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         // Calculate encryption keys.
 
         premaster_secret := cast(string)Curve25519.x25519(
-            *tls.server_public_key,
-            *tls.our_secret_key,
+            *server_public_key,
+            *our_secret_key,
         );
 
-        client_random := cast(string)tls.client_random.bytes;
-        server_random := cast(string)tls.server_random.bytes;
+        cr := cast(string)client_random.bytes;
+        sr := cast(string)server_random.bytes;
 
-        seed := join("master secret", client_random, server_random,, temp);
+        seed := join("master secret", cr, sr,, temp);
 
         a0 := seed;
         a1 := cast(string)hmac_sha256(premaster_secret, a0);
@@ -1164,30 +1155,27 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         p1 := cast(string)hmac_sha256(premaster_secret, join(a1, seed,, temp));
         p2 := cast(string)hmac_sha256(premaster_secret, join(a2, seed,, temp));
 
-        master_secret: [48]u8;
-        memcpy(master_secret.data,      p1.data, 32);
-        memcpy(master_secret.data + 32, p2.data, 16);
+        memcpy(Master_Secret.data,      p1.data, 32);
+        memcpy(Master_Secret.data + 32, p2.data, 16);
 
-        Master_Secret := cast(string)master_secret;
+        ms := cast(string)Master_Secret;
 
-        seed = join("key expansion", server_random, client_random,, temp);
+        seed = join("key expansion", sr, cr,, temp);
 
         a0  = seed;
-        a1  = cast(string)hmac_sha256(Master_Secret, a0);
-        a2  = cast(string)hmac_sha256(Master_Secret, a1);
-        a3 := cast(string)hmac_sha256(Master_Secret, a2);
-        a4 := cast(string)hmac_sha256(Master_Secret, a3);
+        a1  = cast(string)hmac_sha256(ms, a0);
+        a2  = cast(string)hmac_sha256(ms, a1);
+        a3 := cast(string)hmac_sha256(ms, a2);
+        a4 := cast(string)hmac_sha256(ms, a3);
 
-        p1  = cast(string)hmac_sha256(Master_Secret, join(a1, seed,, temp));
-        p2  = cast(string)hmac_sha256(Master_Secret, join(a2, seed,, temp));
-        p3 := cast(string)hmac_sha256(Master_Secret, join(a3, seed,, temp));
-        p4 := cast(string)hmac_sha256(Master_Secret, join(a4, seed,, temp));
+        p1  = cast(string)hmac_sha256(ms, join(a1, seed,, temp));
+        p2  = cast(string)hmac_sha256(ms, join(a2, seed,, temp));
+        p3 := cast(string)hmac_sha256(ms, join(a3, seed,, temp));
+        p4 := cast(string)hmac_sha256(ms, join(a4, seed,, temp));
 
         buffer := join(p1, p2, p3, p4,, temp);
 
         memcpy(*tls.encryption_keys, buffer.data, size_of(type_of(tls.encryption_keys)));
-
-        memcpy(tls.Master_Secret.data, Master_Secret.data, 48);
     }
 
     verify_data_input := builder_to_string(*all_handshake_payload);
@@ -1210,8 +1198,6 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Client Handshake Finished.
 
-        // First, create the handshake message to be encrypted.
-
         message: struct {
             header: Tls_Handshake_Header;
             verify_data: [12]u8;
@@ -1224,17 +1210,15 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         {
             // Calculate verify_data.
 
-            sha_all_messages := cast(string)bit_cast(sha256_base_flipped(verify_data_input), [32]u8);
+            sha_all_messages := cast,force([32]u8)sha256_base_flipped(verify_data_input);
 
-            seed := join("client finished", sha_all_messages,, temp);
+            seed := join("client finished", cast(string)sha_all_messages,, temp);
             a0   := seed;
-            a1   := cast(string)hmac_sha256(cast(string)tls.Master_Secret, a0);
-            p1   := cast(string)hmac_sha256(cast(string)tls.Master_Secret, join(a1, seed,, temp));
+            a1   := cast(string)hmac_sha256(cast(string)Master_Secret, a0);
+            p1   := cast(string)hmac_sha256(cast(string)Master_Secret, join(a1, seed,, temp));
 
             memcpy(message.verify_data.data, p1.data, 12);
         }
-
-        // Encrypt the message we've just created using AES128-GCM.
 
         text: []u8;
         text.data = cast(*u8) *message;
@@ -1248,10 +1232,10 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         record.length = cast(u16) ciphertext.count;
 
         send(record);
-        tls.sequence_number += 1;
-
         send(ciphertext);
         tcp_flush(tls.tcp);
+
+        tls.sequence_number += 1;
     }
 
     {
@@ -1265,10 +1249,9 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         // Server Hanshake Finished.
 
         record := receive(Tls_Record_Header);
-        text   := receive(u8, record.length);
+        text   := receive(record.length);
 
         success, plaintext := tls_decrypt_message(*tls, text, .HANDSHAKE);
-
         assert(success);
 
         log("Received encrypted record: %", (.*) cast(*Tls_Record_Header)plaintext.data);
@@ -1278,12 +1261,10 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         // Todo: Verify server handshake hash.
     }
 
-    // Handshake completed.
-
     {
         context.print_style.default_format_int.base=10;
         request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-        log("Request: %", request);
+        request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
 
         ciphertext := tls_encrypt_message(*tls, cast([]u8)request, .APPLICATION_DATA);
 
@@ -1294,17 +1275,16 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         send(record);
         send(ciphertext);
-        tcp_flush(tls.tcp, true);
+        tcp_flush(tls.tcp);
 
         tls.sequence_number += 1;
     }
 
     while true {
-        record := receive(Tls_Record_Header);
-        ciphertext := receive(u8, record.length);
+        record     := receive(Tls_Record_Header);
+        ciphertext := receive(record.length);
 
         success, plaintext := tls_decrypt_message(*tls, ciphertext, record.content_type);
-
         assert(success);
 
         log("Received application data: %", cast(string)plaintext);
@@ -1321,14 +1301,12 @@ HTTP_MESSAGE :: #string,cr END
 POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
 Host: discord.com
 Authorization: %3
-Accept: */*
+Accept: application/json
 Content-Type: application/json
 Content-Length: %1
 
 %2
 END;
-
-// */
 
 tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Content_Type) -> []u8 {
 
@@ -1356,7 +1334,7 @@ tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
 
     auth_tag := aes128_gcm_encrypt_stream(text, tls.client_write_key, iv, aad);
 
-    bytes := text.count + 8 + 16; // Add room for explicit IV and auth tag.
+    bytes := text.count + 8 + size_of(i128); // Add room for explicit IV and auth tag.
 
     result: []u8;
     result.data = talloc(bytes);
@@ -1382,7 +1360,7 @@ tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
         aad[8] = cast(u8) content_type;
         aad[9] = 0x03; aad[10] = 0x03;
 
-        text_size := byte_swap(cast(u16)text.count - 8 - 16);
+        text_size := byte_swap(cast(u16)text.count - 8 - size_of(i128));
         memcpy(aad.data + 11, *text_size, 2);
     }
 
@@ -1395,7 +1373,7 @@ tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
     ciphertext.data = text.data + 8;
 
     auth_tag: i128;
-    memcpy(*auth_tag, text.data + 8 + ciphertext.count, 16);
+    memcpy(*auth_tag, text.data + 8 + ciphertext.count, size_of(i128));
 
     success := aes128_gcm_decrypt_stream(ciphertext, tls.server_write_key, iv, aad, auth_tag);
 

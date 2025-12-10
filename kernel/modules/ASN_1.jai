@@ -15,7 +15,7 @@ Asn1_Tag :: enum u8 {
     CONTEXT_0          :: 0xa0;
 }
 
-Asn1_Reader :: struct {
+Asn1_Parser :: struct {
     using root: Construction;
 
     construction_stack: [..] Construction;
@@ -28,44 +28,44 @@ Asn1_Reader :: struct {
     error: bool;
 }
 
-begin_construction :: (reader: *Asn1_Reader, tag := Asn1_Tag.SEQUENCE) {
-    container := read_value(reader, tag);
+begin_construction :: (parser: *Asn1_Parser, tag := Asn1_Tag.SEQUENCE) {
+    container := read_value(parser, tag);
 
-    const := array_add(*reader.construction_stack);
+    const := array_add(*parser.construction_stack);
 
     const.data = container;
 }
 
-end_construction :: (reader: *Asn1_Reader) {
-    pop(*reader.construction_stack);
+end_construction :: (parser: *Asn1_Parser) {
+    pop(*parser.construction_stack);
 }
 
-get_current_construction :: (reader: Asn1_Reader) -> *Asn1_Reader.Construction {
-    if reader.construction_stack {
-        return *reader.construction_stack[reader.construction_stack.count-1];
+get_current_construction :: (parser: Asn1_Parser) -> *Asn1_Parser.Construction {
+    if parser.construction_stack {
+        return *parser.construction_stack[parser.construction_stack.count-1];
     }
 
-    return *reader.root;
+    return *parser.root;
 }
 
-peek_tag :: (reader: Asn1_Reader) -> Asn1_Tag {
-    if reader.error return 0;
+peek_tag :: (parser: Asn1_Parser) -> Asn1_Tag {
+    if parser.error return 0;
 
-    using get_current_construction(reader);
+    using get_current_construction(parser);
 
     // if cursor >= data.count return 0xff;
     return cast(Asn1_Tag) data[cursor];
 }
 
 parse_error :: () #expand {
-    `reader.error = true;
+    `parser.error = true;
     `return 0;
 }
 
-read_length :: (reader: *Asn1_Reader) -> int {
-    if reader.error return 0;
+read_length :: (parser: *Asn1_Parser) -> int {
+    if parser.error return 0;
 
-    using get_current_construction(reader);
+    using get_current_construction(parser);
 
     if cursor >= data.count {
         parse_error();
@@ -99,22 +99,22 @@ read_length :: (reader: *Asn1_Reader) -> int {
     cursor += octets;
     return length;
 
-    // Todo error: return reader.cursor + length.* <= reader.data.count;
+    // Todo error: return parser.cursor + length.* <= parser.data.count;
 }
 
-read_value :: (reader: *Asn1_Reader, expected_tag: Asn1_Tag) -> [] u8 {
-    if reader.error return .{};
+read_value :: (parser: *Asn1_Parser, expected_tag: Asn1_Tag) -> [] u8 {
+    if parser.error return .{};
 
-    using get_current_construction(reader);
+    using get_current_construction(parser);
 
-    // Todo: if reader.cursor >= reader.data.count return false;
+    // Todo: if parser.cursor >= parser.data.count return false;
 
     tag := cast(Asn1_Tag)data[cursor];
     cursor += 1;
 
     assert(tag == expected_tag); // Todo
 
-    length := read_length(reader);
+    length := read_length(parser);
 
     result := []u8.{length, data.data + cursor};
     cursor += length;
@@ -122,10 +122,10 @@ read_value :: (reader: *Asn1_Reader, expected_tag: Asn1_Tag) -> [] u8 {
     return result;
 }
 
-read_bit_string :: (reader: *Asn1_Reader, bytes: *[]u8, unused_bits: *u8) -> bool {
-    if reader.error return false;
+read_bit_string :: (parser: *Asn1_Parser, bytes: *[]u8, unused_bits: *u8) -> bool {
+    if parser.error return false;
 
-    raw := read_value(reader, .BIT_STRING);
+    raw := read_value(parser, .BIT_STRING);
     if raw.count == 0 return false;
 
     unused_bits.* = raw.data.*;
@@ -165,72 +165,72 @@ X509_Certificate :: struct {
 }
 
 parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
-    reader := Asn1_Reader.{data=certificate};
+    parser := Asn1_Parser.{data=certificate};
     parsed: X509_Certificate;
 
-    begin_construction(*reader);
+    begin_construction(*parser);
 
     {
-        begin_construction(*reader);
+        begin_construction(*parser);
 
         parsed.version = 1;
-        if peek_tag(reader) == Asn1_Tag.CONTEXT_0 {
-            begin_construction(*reader, .CONTEXT_0);
-            version_value := read_value(*reader, .INTEGER);
+        if peek_tag(parser) == Asn1_Tag.CONTEXT_0 {
+            begin_construction(*parser, .CONTEXT_0);
+            version_value := read_value(*parser, .INTEGER);
             parsed.version = version_value[version_value.count - 1].(int) + 1;
-            end_construction(*reader);
+            end_construction(*parser);
         }
 
-        parsed.serial_number = read_value(*reader, .INTEGER);
+        parsed.serial_number = read_value(*parser, .INTEGER);
 
-        begin_construction(*reader);
-        parsed.tbs_signature_algorithm_oid = read_value(*reader, .OBJECT_IDENTIFIER);
-        end_construction(*reader);
+        begin_construction(*parser);
+        parsed.tbs_signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+        end_construction(*parser);
 
-        parsed.issuer = read_value(*reader, .SEQUENCE);
+        parsed.issuer = read_value(*parser, .SEQUENCE);
 
         {
-            begin_construction(*reader);
+            begin_construction(*parser);
 
-            tag := peek_tag(reader);
+            tag := peek_tag(parser);
             // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
-            parsed.not_valid_before = cast(string) read_value(*reader, tag);
+            parsed.not_valid_before = cast(string) read_value(*parser, tag);
 
-            tag = peek_tag(reader);
+            tag = peek_tag(parser);
             // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
-            parsed.not_valid_after = cast(string) read_value(*reader, tag);
+            parsed.not_valid_after = cast(string) read_value(*parser, tag);
 
-            end_construction(*reader);
+            end_construction(*parser);
         }
 
-        parsed.subject = read_value(*reader, .SEQUENCE);
+        parsed.subject = read_value(*parser, .SEQUENCE);
 
         {
-            begin_construction(*reader);
+            begin_construction(*parser);
 
-            begin_construction(*reader);
-            parsed.subject_public_key_algorithm_oid = read_value(*reader, .OBJECT_IDENTIFIER);
-            end_construction(*reader);
+            begin_construction(*parser);
+            parsed.subject_public_key_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+            end_construction(*parser);
 
-            read_bit_string(*reader, *parsed.subject_public_key, *parsed.subject_public_key_unused_bits);
+            read_bit_string(*parser, *parsed.subject_public_key, *parsed.subject_public_key_unused_bits);
 
-            end_construction(*reader);
+            end_construction(*parser);
         }
 
-        end_construction(*reader);
+        end_construction(*parser);
     }
 
     // Todo: additional optional IDs and extensions.
 
-    begin_construction(*reader);
-    parsed.signature_algorithm_oid = read_value(*reader, .OBJECT_IDENTIFIER);
-    end_construction(*reader);
+    begin_construction(*parser);
+    parsed.signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+    end_construction(*parser);
 
-    read_bit_string(*reader, *parsed.signature_value, *parsed.signature_unused_bits);
+    read_bit_string(*parser, *parsed.signature_value, *parsed.signature_unused_bits);
 
-    end_construction(*reader);
+    end_construction(*parser);
 
-    return !reader.error, parsed;
+    return !parser.error, parsed;
 }
 
 
