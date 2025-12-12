@@ -24,7 +24,7 @@ Task_Info :: struct {
 
     sleep_until: Apollo_Time;
 
-    next_sleeping: *Task_Info;
+    #as queue_node: List_Queue(*Task_Info).Node;
 
     on_core: *X64_Core;
 
@@ -35,9 +35,8 @@ Scheduler :: struct {
     current_task: *Task_Info;
     idle_task:    *Task_Info;
 
-    sleep_queue:  *Task_Info;
-
-    waiting_to_run: Queue(*Task_Info);
+    sleeping:       List_Queue(*Task_Info);
+    waiting_to_run: List_Queue(*Task_Info);
 
     spinlock: Spinlock;
 
@@ -99,13 +98,12 @@ core_begin_multitasking :: () {
     core := get_current_core();
     using core.scheduler;
 
-    queue_reserve(*waiting_to_run, 256);
-
     current_task = allocate_task_info();
     current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
     current_task._context = *context;
     current_task.name = "Idle";
     current_task.on_core = core;
+    current_task.queue_node.item = current_task;
 
     idle_task = current_task;
 
@@ -176,6 +174,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
     new_task.entry_point = entry_point;
     new_task.name = name;
     new_task.user_data = user_data;
+    new_task.queue_node.item = new_task;
 
     return new_task;
 }
@@ -191,14 +190,14 @@ schedule_tasks :: () {
         // Wake sleeping tasks.
         using scheduler;
 
-        while sleep_queue && sleep_queue.sleep_until < time_now {
-            to_wake := sleep_queue;
+        for* sleeping {
+            if it.sleep_until > time_now continue;
 
-            sleep_queue = sleep_queue.next_sleeping;
+            it.sleeping = false;
 
-            to_wake.sleeping = false;
-            to_wake.next_sleeping = null;
-            queue_push(*waiting_to_run, to_wake);
+            remove it;
+
+            queue_push(*waiting_to_run, it);
         }
     }
 
@@ -208,7 +207,7 @@ schedule_tasks :: () {
     {
         // Pick next task to run.
         if !queue_is_empty(scheduler.waiting_to_run) {
-            next = queue_pop(*scheduler.waiting_to_run);
+            next = queue_pop(*scheduler.waiting_to_run).item;
         }
 
         else if current_task_wants_to_run {
@@ -308,23 +307,17 @@ sleep_until :: (time: Apollo_Time) {
     task.sleeping = true;
     task.sleep_until = time;
 
-    queue := scheduler.sleep_queue;
-    previous: *Task_Info;
+    inserted: bool;
 
-    while true {
-        if !queue || queue.sleep_until > time {
-            if queue == scheduler.sleep_queue {
-                scheduler.sleep_queue = task;
-            }
+    for* scheduler.sleeping {
+        if it.sleep_until < time continue;
+        queue_insert(*scheduler.sleeping, it_prev, task);
+        inserted = true;
+        break;
+    }
 
-            if previous previous.next_sleeping = task;
-            task.next_sleeping = queue;
-
-            break;
-        }
-
-        previous = queue;
-        queue = queue.next_sleeping;
+    if !inserted {
+        queue_push(*scheduler.sleeping, task);
     }
 
     release(*scheduler.spinlock, flags);
@@ -342,24 +335,9 @@ wake_task :: (task: *Task_Info) {
 
     task.sleeping = false;
 
-    // Remove from sleep queue. Todo: hardcoded.
-    curr := scheduler.sleep_queue;
-    prev: *Task_Info;
-    while true {
-        assert(curr != null);
-
-        if curr == task {
-            if prev   prev.next_sleeping    = task.next_sleeping;
-            else      scheduler.sleep_queue = task.next_sleeping;
-
-            break;
-        }
-
-        prev = curr;
-        curr = curr.next_sleeping;
-    }
-
+    queue_remove(*scheduler.sleeping, task);
     queue_push(*scheduler.waiting_to_run, task);
+
     release(*scheduler.spinlock, flags);
 }
 
@@ -407,12 +385,11 @@ release_mutex :: (using mutex: *Mutex) {
     held_by = next;
     release(*spinlock, flags);
 
-    flags = lock_scheduler_for_task(next);
+    flags=, scheduler := lock_scheduler_for_task(next);
 
     assert(next.blocked);
     next.blocked = false;
 
-    scheduler := *next.on_core.scheduler;
     queue_push(*scheduler.waiting_to_run, next);
     release(*scheduler.spinlock, flags);
 
@@ -762,7 +739,7 @@ List_Queue :: struct (Item_Type: Type) {
 for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
     #assert !(flags & .REVERSE);
 
-    prev: *queue.Node;
+    `it_prev: *queue.Node;
 
     `it := queue.first;
     `it_index: int;
@@ -772,19 +749,42 @@ for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
             break;
         }
 
+        // Inserted code must be allowed to edit it.next, e.g. to remove it and put it into a different queue.
+        it_next := it.next;
+
+        defer {
+            // To allow 'continue' to be #inserted below.
+            it_prev = it;
+            it = it_next;
+            it_index += 1;
+        }
+
         #insert (remove={
-            if prev   prev.next   = it.next;
-            else      queue.first = it.next;
+            if it_prev it_prev.next = it.next;
+            else       queue.first  = it.next;
 
             if queue.last == it {
-                queue.last = prev;
+                queue.last = it_prev;
             }
-        }) body;
 
-        prev = it;
-        it = it.next;
-        it_index += 1;
+            it.next = null;
+        }) body;
     }
+}
+
+queue_insert :: (queue: *List_Queue, after: *queue.Node, item: *queue.Node) {
+    if queue.last == after then queue.last = item;
+
+    if after == null {
+        // If 'after' is null, that means put it at as the first item in the queue. This enables calling 'queue_insert' using 'it_prev' from the for_expansion.
+        item.next = queue.first;
+        queue.first = item;
+
+        return;
+    }
+
+    item.next = after.next;
+    after.next = item;
 }
 
 queue_push :: (queue: *List_Queue, item: *queue.Node) {
