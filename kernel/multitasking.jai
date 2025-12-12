@@ -64,6 +64,19 @@ lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags, *Scheduler {
     return 0, null;
 }
 
+lock_scheduler_for_current_task :: () -> X64_Flags, *Task_Info, *Scheduler {
+    preempt_disable();
+
+    current := get_current_task();
+    scheduler := *current.on_core.scheduler;
+
+    flags := acquire(*scheduler.spinlock);
+
+    preempt_restore();
+
+    return flags, current, scheduler;
+}
+
 get_current_task :: () -> *Task_Info #no_context {
     offset :: #run offset_of(X64_Core, "scheduler.current_task");
     return cast(*Task_Info)gs_relative_read(offset);
@@ -93,6 +106,7 @@ core_begin_multitasking :: () {
     current_task._context = *context;
     current_task.name = "Idle";
     current_task.on_core = core;
+
     idle_task = current_task;
 
     if core.id == 0 {
@@ -169,10 +183,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
-    current := get_current_task();
-    scheduler := *current.on_core.scheduler;
-
-    flags := acquire(*scheduler.spinlock);
+    flags, current, scheduler := lock_scheduler_for_current_task();
 
     time_now := get_monotonic_system_time();
 
@@ -276,7 +287,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
 
 
 
-SLEEP_INDEFINITELY :: Apollo_Time.{0xffffffff_ffffffff, 0x7fffffff_ffffffff};
+INFINITE_TIMEOUT :: Apollo_Time.{0xffffffff_ffffffff, 0x7fffffff_ffffffff};
 
 sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
     time := #insert #run tprint("%_to_apollo(n);", units);
@@ -284,16 +295,15 @@ sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds
 }
 
 sleep :: (time: Apollo_Time) {
-    if time == SLEEP_INDEFINITELY {
-        sleep_until(SLEEP_INDEFINITELY);
+    if time == INFINITE_TIMEOUT {
+        sleep_until(INFINITE_TIMEOUT);
     }
 
     sleep_until(get_monotonic_system_time() + time);
 }
 
 sleep_until :: (time: Apollo_Time) {
-    task := get_current_task();
-    flags, scheduler := lock_scheduler_for_task(task);
+    flags, task, scheduler := lock_scheduler_for_current_task();
 
     task.sleeping = true;
     task.sleep_until = time;
@@ -301,7 +311,7 @@ sleep_until :: (time: Apollo_Time) {
     queue := scheduler.sleep_queue;
     previous: *Task_Info;
 
-    while (true) {
+    while true {
         if !queue || queue.sleep_until > time {
             if queue == scheduler.sleep_queue {
                 scheduler.sleep_queue = task;
@@ -442,7 +452,7 @@ Semaphore :: struct {
     queue: List_Queue(Waiter);
 }
 
-wait_for :: (using sema: *Semaphore, timeout := SLEEP_INDEFINITELY) -> bool {
+wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
     flags := acquire(*spinlock);
 
@@ -479,7 +489,7 @@ wait_for :: (using sema: *Semaphore, timeout := SLEEP_INDEFINITELY) -> bool {
             return true;
         }
 
-        if timeout == SLEEP_INDEFINITELY {
+        if timeout == INFINITE_TIMEOUT {
             continue;
         }
 
@@ -519,10 +529,6 @@ signal :: (using sema: *Semaphore) {
     release(*spinlock, flags);
 
     wake_task(to_wake);
-}
-
-is_up :: (using sema: Semaphore) -> bool {
-    return counter > 0;
 }
 
 

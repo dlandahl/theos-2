@@ -420,8 +420,7 @@ Tcp_Connection :: struct {
     do_flush: bool;
 }
 
-blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
-    // Todo: timeout
+blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> []u8 {
 
     buffer := talloc(bytes);
     cursor: int;
@@ -431,13 +430,15 @@ blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int) -> []u8 {
 
         if cursor == bytes break;
 
-        wait_for(*tcp.in_data);
+        if !wait_for(*tcp.in_data, timeout) {
+            return .{};
+        }
     }
 
     return .{bytes, buffer};
 }
 
-blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8) {
+blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool {
     cursor: int;
 
     while true {
@@ -447,8 +448,12 @@ blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8) {
 
         if cursor == bytes.count break;
 
-        wait_for(*tcp.out_data);
+        if !wait_for(*tcp.out_data, timeout) {
+            return false;
+        }
     }
+
+    return true;
 }
 
 tcp_flush :: (tcp: *Tcp_Connection) {
@@ -912,7 +917,6 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     }
 
 
-
     // Near the end of the handshake we need to transmit a hash of all handshake messages up to that point.
     all_handshake_payload: String_Builder;
     hashing_enabled := true;
@@ -957,7 +961,6 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     }
 
 
-
     // Key exchange parameters:
 
     our_secret_key: [32] u8;
@@ -965,13 +968,10 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
     server_public_key: [32] u8;
 
-    shared_key: [32] u8;
-
     client_random: Tls_Random;
     server_random: Tls_Random;
 
     Master_Secret: [48] u8;
-
 
 
     tls: Tls_Connection;

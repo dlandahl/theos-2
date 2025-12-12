@@ -17,8 +17,7 @@
 #run,stallable main();
 
 kernel_only := false;
-use_codex   := false;
-compiler_performance_report := false;
+bootloader_only := false;
 
 main :: () {
     set_build_options_dc(.{ do_output = false });
@@ -32,6 +31,7 @@ main :: () {
         command_line := get_build_options().compile_time_command_line;
         context.print_style.default_format_array.begin_string = "";
         context.print_style.default_format_array.end_string = "";
+        context.print_style.default_format_array.separator = " ";
 
         jai_command := tprint("%/bin/jai-linux first.jai - %", JAI_ROOT_DIR, command_line);
 
@@ -57,21 +57,32 @@ main :: () {
 
     args := get_build_options().compile_time_command_line;
 
-    for args if it == {
-        case "kernel_only"; kernel_only = true;
-        case "perf";        compiler_performance_report = true;
-        case "codex";       use_codex = true;
+    success, to_create, remaining_args := parse_plugin_arguments(args);
+    if !success {
+        log_error("Failed to parse plugin arguments.");
+        return;
+    }
+
+    for remaining_args if it == {
+        case "kernel";     kernel_only = true;
+        case "bootloader"; bootloader_only = true;
         case; log_error("Command line argument not understood: %", it);
+    }
+
+    if to_create.count && !(bootloader_only ^ kernel_only) {
+        log_error("Cannot use plugins with multiple targets. Specify either 'bootloader' or 'kernel' to use metaprogram plugins.");
+        init_plugins(.[], null, -1);
+        return;
     }
 
     make_directory_if_it_does_not_exist(".build/");
 
-    if !kernel_only && !compile_bootloader() {
+    if (!kernel_only || bootloader_only) && !compile_bootloader(to_create) {
         log_error("Failed to compile the bootloader.\n");
         exit(1);
     }
 
-    if !compile_kernel() {
+    if (!bootloader_only || kernel_only) && !compile_kernel(to_create) {
         log_error("Failed to compile the kernel.\n");
         exit(1);
     }
@@ -82,9 +93,12 @@ main :: () {
     }
 }
 
-compile_bootloader :: () -> success: bool {
+compile_bootloader :: (to_create: [..] Plugin_To_Create) -> success: bool {
     log("Compiling UEFI bootloader");
     workspace := compiler_create_workspace("Bootloader");
+
+    plugins: [..] *Metaprogram_Plugin;
+    init_plugins(to_create, *plugins, workspace);
 
     {
         options := get_build_options(workspace);
@@ -108,13 +122,19 @@ compile_bootloader :: () -> success: bool {
     }
 
     intercept_flags := Intercept_Flags.SKIP_ALL;
+    for plugins if it.before_intercept it.before_intercept(it, *intercept_flags);
+
     compiler_begin_intercept(workspace, intercept_flags);
+
+    for plugins if it.add_source it.add_source(it);
     add_build_file("bootloader/bootloader.jai", workspace);
 
     success: bool;
 
     while true {
         message := compiler_wait_for_message();
+
+        for plugins if it.message it.message(it, message);
 
         if message.kind == {
           case .COMPLETE;
@@ -142,6 +162,9 @@ compile_bootloader :: () -> success: bool {
 
     compiler_end_intercept(workspace);
 
+    for plugins if it.finish   it.finish  (it);
+    for plugins if it.shutdown it.shutdown(it);
+
     if success {
         command := break_command_into_strings("objdump -x .build/bootx64.efi -d -M intel --source");
         result, stdout := run_command(.. command, capture_and_return_output=true);
@@ -151,7 +174,7 @@ compile_bootloader :: () -> success: bool {
     return success;
 }
 
-compile_kernel :: () -> success: bool {
+compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     if !kernel_only {
         log("Assembling AP Startup Code");
 
@@ -171,16 +194,6 @@ compile_kernel :: () -> success: bool {
     workspace := compiler_create_workspace("Kernel");
 
     plugins: [..] *Metaprogram_Plugin;
-    to_create: [..] Plugin_To_Create;
-
-    if use_codex {
-        array_add(*to_create, Plugin_To_Create.{ name = "Codex" });
-    }
-
-    if compiler_performance_report {
-        array_add(*to_create, Plugin_To_Create.{ name = "Performance_Report" });
-    }
-
     init_plugins(to_create, *plugins, workspace);
 
     {

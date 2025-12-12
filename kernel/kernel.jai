@@ -1202,21 +1202,21 @@ Acpi_Table_Header :: struct {
 find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
     table_size := global.root_acpi_table.length - size_of(Acpi_Table_Header);
 
-    pointer_size := cast(u64, ifx global.acpi_version then 8 else 4);
+    pointer_size := cast(u64) ifx global.acpi_version then 8 else 4;
     pointer_count := table_size / pointer_size;
 
-    table_base := cast(u64, global.root_acpi_table + 1);
+    table_base := cast(u64) (global.root_acpi_table + 1);
 
     for table_index: 0..pointer_count - 1 {
         offset := table_index * pointer_size + table_base;
 
-        physical_address := cast(u64) cast(*u32, offset).*;
+        physical_address: u64 = (.*) cast(*u32)offset;
 
         if global.acpi_version {
-            physical_address = cast(*u64, offset).*;
+            physical_address = (.*) cast(*u64)offset;
         }
 
-        header := cast(*Acpi_Table_Header, physical_address + DIRECT_MAPPING_BASE);
+        header := cast(*Acpi_Table_Header) (physical_address + DIRECT_MAPPING_BASE);
 
         for 0..3 if header.signature[it] != signature[it] {
             continue table_index;
