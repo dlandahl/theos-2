@@ -63,6 +63,10 @@ main :: () {
         return;
     }
 
+    if !to_create {
+        init_plugins(.[], null, -1); // Workaround for error messages when using plugins with multiple workspaces.
+    }
+
     for remaining_args if it == {
         case "kernel";     kernel_only = true;
         case "bootloader"; bootloader_only = true;
@@ -98,7 +102,7 @@ compile_bootloader :: (to_create: [..] Plugin_To_Create) -> success: bool {
     workspace := compiler_create_workspace("Bootloader");
 
     plugins: [..] *Metaprogram_Plugin;
-    init_plugins(to_create, *plugins, workspace);
+    if to_create init_plugins(to_create, *plugins, workspace);
 
     {
         options := get_build_options(workspace);
@@ -178,9 +182,8 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     if !kernel_only {
         log("Assembling AP Startup Code");
 
-        write_entire_file(".build/ap_startup.asm", AP_STARTUP_CODE);
         command := break_command_into_strings(
-            "nasm .build/ap_startup.asm -o .build/ap_startup.bin -f bin"
+            "nasm kernel/ap_startup.asm -o .build/ap_startup.bin -f bin"
         );
 
         result := run_command(.. command);
@@ -194,7 +197,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     workspace := compiler_create_workspace("Kernel");
 
     plugins: [..] *Metaprogram_Plugin;
-    init_plugins(to_create, *plugins, workspace);
+    if to_create init_plugins(to_create, *plugins, workspace);
 
     {
         options := get_build_options(workspace);
@@ -225,7 +228,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     add_build_file("kernel/kernel.jai", workspace);
 
     interrupt_assembly: String_Builder;
-    append(*interrupt_assembly, ASSEMBLY_HEADER);
+    append(*interrupt_assembly, read_entire_file("kernel/assembly.asm"));
     found_interrupts: [..] string;
 
     success: bool;
@@ -273,7 +276,6 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     write_entire_file(".build/assembly.asm", builder_to_string(*interrupt_assembly));
                     command := break_command_into_strings("nasm .build/assembly.asm -o .build/assembly.so -f elf64");
 
-                    // Generate assembly wrappers for interrupts handlers using metaprogramming
                     result := run_command(.. command);
                     if result.exit_code != 0 {
                         log_error("Failed to assemble interrupt routines.");
@@ -342,175 +344,6 @@ format_disk :: () -> success: bool {
     return true;
 }
 
-
-
-ASSEMBLY_HEADER :: #string END
-
-section .text
-
-[bits 64]
-
-%macro push_all 0
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-%endmacro
-
-%macro pop_all 0
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-%endmacro
-
-
-global context_switch
-
-; *current_task is in rdi
-; *new_task is in rsi
-
-struc Task_Info
-    .rsp:   resq 1
-    .cr3:   resq 1
-    .xsave: resq 1
-endstruc
-
-align 0x8
-context_switch:
-    ; Save RFLAGS and GPRs on the stack
-    pushfq
-    push_all
-
-    ; Store FPU state in the old task's xsave_area
-    fxsave64 [rdi + Task_Info.xsave]
-
-    ; Store current stack on the old task
-    mov [rdi + Task_Info.rsp], rsp
-
-    ; Load FPU state from the new task's xsave_area
-    fxrstor64 [rsi + Task_Info.xsave]
-
-    ; Restore the stack pointer from the new task
-    mov rsp, [rsi + Task_Info.rsp]
-
-    ; Load the address space of the new task
-    mov rdx, [rsi + Task_Info.cr3]
-    mov cr3, rdx
-
-    ; Restore RFLAGS and GPRs from the stack
-    pop_all
-    popfq
-
-    ret
-
-
-
-extern get_kernel_stack
-extern syscall_handler
-global syscall_entry
-
-align 0x10
-syscall_entry:
-    pushfq
-    push_all
-    mov r12, rsp
-
-    call get_kernel_stack
-    mov rsp, rax
-
-    mov rdi, r12
-    call syscall_handler
-
-    mov rsp, r12
-    pop_all
-    popfq
-
-    o64 sysret
-
-
-global enter_user_mode
-align 0x10
-enter_user_mode:
-    mov rsp, rsi
-    mov rcx, rdi
-    mov r11, rdx
-
-    o64 sysret
-
-
-global get_rflags
-align 0x10
-get_rflags:
-    pushfq
-    pop rax
-    ret
-
-
-global init_segment_registers
-align 0x10
-init_segment_registers:
-    push 0x8
-    lea rax, [rel .reload_cs]
-    push rax
-    retfq
-  .reload_cs:
-    mov ax, 0x10
-    mov ds, ax
-    mov ss, ax
-    ret
-
-
-global gs_relative_read
-global gs_relative_write
-global gs_relative_inc
-global gs_relative_dec
-
-align 0x10;
-gs_relative_read:
-    mov rax, [gs:rdi]
-    ret
-
-align 0x10;
-gs_relative_write:
-    mov [gs:rdi], rsi
-    ret
-
-align 0x10;
-gs_relative_inc:
-    inc qword [gs:rdi]
-    ret
-
-align 0x10;
-gs_relative_dec:
-    dec qword [gs:rdi]
-    ret
-
-END;
-
-
 INTERRUPT_STUB_FORMAT :: #string END
 
 extern %1
@@ -527,95 +360,6 @@ isr__%1:
     pop_all
     %2
     iretq
-
-END;
-
-
-AP_STARTUP_CODE :: #string END
-
-[org 0x8000]
-[bits 16]
-
-%define code_segment     0x0008
-%define data_segment     0x0010
-
-ap_startup_asm:
-start equ $
-    cli
-    cld
-
-    lidt [idt]
-
-    ; Enable paging and memory protection
-    mov eax, 10100000b
-    mov cr4, eax
-
-    mov edx, [pml4]
-    mov cr3, edx
-
-    mov ecx, 0xc0000080
-    rdmsr
-
-    or eax, 0x00000100
-    wrmsr
-
-    mov ebx, cr0
-    or ebx, 0x80000001
-    mov cr0, ebx
-
-    lgdt [gdt]
-
-    jmp code_segment:ap_long_mode_start
-
-align 8
-gdt:
-    dw .end - .start - 1
-    dd .start
-
-align 8
-  .start:
-    dq 0x0000000000000000
-    dq 0x00209a0000000000
-    dq 0x0000920000000000
-  .end:
-
-align 8
-idt:
-  .length       dw 0
-  .base         dd 0
-
-times 512-($-start) db 0
-stack: dq 0
-jai:   dq 0
-pml4:  dq 0
-
-serial:
-    mov ax, 66
-    mov dx, 0x3f8
-    out dx, al
-  .end:
-    cli
-    hlt
-    jmp .end
-
-[bits 64]
-
-ap_long_mode_start:
-    mov ax, data_segment
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-
-    mov rsp, [stack]
-    mov rbp, rsp
-
-    call [jai]
-    int3
-    jmp $
-
-times 4096-($-$$) db 0
 
 END;
 

@@ -43,7 +43,7 @@ Scheduler :: struct {
     last_task_switch_timestamp: Apollo_Time;
 }
 
-lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags, *Scheduler {
+lock_scheduler_for_task :: (task: *Task_Info) -> Lock_Token, *Scheduler {
     // We need to dereference on_core to lock a task, but it can be stale by the time we
     // get the lock. In practice it should almost always work the first time.
     assert(task.on_core != null);
@@ -51,29 +51,27 @@ lock_scheduler_for_task :: (task: *Task_Info) -> X64_Flags, *Scheduler {
     while true {
         core := task.on_core;
 
-        flags := acquire(*core.scheduler.spinlock);
+        token := acquire(*core.scheduler.spinlock);
 
         if task.on_core == core {
-            return flags, *core.scheduler;
+            return token, *core.scheduler;
         }
 
-        release(*core.scheduler.spinlock, flags);
+        release(*core.scheduler.spinlock, token);
     }
 
     return 0, null;
 }
 
-lock_scheduler_for_current_task :: () -> X64_Flags, *Task_Info, *Scheduler {
-    preempt_disable();
+lock_scheduler_for_current_task :: () -> Lock_Token, *Task_Info, *Scheduler {
+    token := cast(Lock_Token)preempt_disable();
 
     current := get_current_task();
     scheduler := *current.on_core.scheduler;
 
-    flags := acquire(*scheduler.spinlock);
+    acquire(*scheduler.spinlock, .RAW);
 
-    preempt_restore();
-
-    return flags, current, scheduler;
+    return token, current, scheduler;
 }
 
 get_current_task :: () -> *Task_Info #no_context {
@@ -159,7 +157,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
     }
 
     Context_Switch_Stack :: struct {
-        // Represents the stack layout used by the context_switch routine in first.jai
+        // Represents the stack layout used by the context_switch routine written in assembly.
         registers: General_Registers;
         flags: X64_Flags;
         return_address: *void;
@@ -182,7 +180,11 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
-    flags, current, scheduler := lock_scheduler_for_current_task();
+    // assert(get_rflags() & .IF__interrupt > 0); // We could get stuck forever if we call the scheduler with interrupts disabled.
+
+    token, current, scheduler := lock_scheduler_for_current_task();
+
+    // assert(get_current_core().preempt_disable_count == 0);
 
     time_now := get_monotonic_system_time();
 
@@ -218,7 +220,7 @@ schedule_tasks :: () {
     }
 
     if next == current {
-        release(*scheduler.spinlock, flags);
+        release(*scheduler.spinlock, token);
         return;
     }
 
@@ -234,7 +236,7 @@ schedule_tasks :: () {
 
     context_switch(current, next);
 
-    release(*scheduler.spinlock, flags);
+    release(*scheduler.spinlock, token);
 }
 
 context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
@@ -302,7 +304,7 @@ sleep :: (time: Apollo_Time) {
 }
 
 sleep_until :: (time: Apollo_Time) {
-    flags, task, scheduler := lock_scheduler_for_current_task();
+    token, task, scheduler := lock_scheduler_for_current_task();
 
     task.sleeping = true;
     task.sleep_until = time;
@@ -320,16 +322,16 @@ sleep_until :: (time: Apollo_Time) {
         queue_push(*scheduler.sleeping, task);
     }
 
-    release(*scheduler.spinlock, flags);
+    release(*scheduler.spinlock, token);
     yield_execution();
 }
 
 wake_task :: (task: *Task_Info) {
-    flags, scheduler := lock_scheduler_for_task(task);
+    token, scheduler := lock_scheduler_for_task(task);
 
     // By the time we got the lock, the task might not be sleeping anymore.
     if !task.sleeping {
-        release(*scheduler.spinlock, flags);
+        release(*scheduler.spinlock, token);
         return;
     }
 
@@ -338,7 +340,7 @@ wake_task :: (task: *Task_Info) {
     queue_remove(*scheduler.sleeping, task);
     queue_push(*scheduler.waiting_to_run, task);
 
-    release(*scheduler.spinlock, flags);
+    release(*scheduler.spinlock, token);
 }
 
 
@@ -346,11 +348,11 @@ wake_task :: (task: *Task_Info) {
 Mutex :: struct {
     spinlock: Spinlock;
     held_by: *Task_Info;
-    queue: Queue(*Task_Info);
+    queue: List_Queue(*Task_Info);
 }
 
 acquire_mutex :: (using mutex: *Mutex) {
-    flags := acquire(*spinlock);
+    token := acquire(*spinlock);
     task := get_current_task();
 
     if held_by == null {
@@ -358,42 +360,40 @@ acquire_mutex :: (using mutex: *Mutex) {
 
         held_by = task;
 
-        release(*spinlock, flags);
+        release(*spinlock, token);
         return;
     }
 
     queue_push(*queue, task);
     task.blocked = true;
 
-    release(*spinlock, flags);
+    release(*spinlock, token);
     yield_execution();
 }
 
 release_mutex :: (using mutex: *Mutex) {
-    flags := acquire(*spinlock);
+    token := acquire(*spinlock);
     task := get_current_task();
 
     assert(held_by == task);
     held_by = null;
 
     if queue_is_empty(queue) {
-        release(*spinlock, flags);
+        release(*spinlock, token);
         return;
     }
 
-    next := queue_pop(*queue);
+    next := queue_pop(*mutex.queue).item;
     held_by = next;
-    release(*spinlock, flags);
+    release(*spinlock, token);
 
-    flags=, scheduler := lock_scheduler_for_task(next);
+    token=, scheduler := lock_scheduler_for_task(next);
 
     assert(next.blocked);
     next.blocked = false;
 
     queue_push(*scheduler.waiting_to_run, next);
-    release(*scheduler.spinlock, flags);
-
-    // Todo: IPI to wake/preempt the other core.
+    release(*scheduler.spinlock, token);
 }
 
 trylock_mutex :: (using mutex: *Mutex) -> bool {
@@ -431,11 +431,11 @@ Semaphore :: struct {
 
 wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
-    flags := acquire(*spinlock);
+    token := acquire(*spinlock);
 
     if counter > 0 {
         counter -= 1;
-        release(*spinlock, flags);
+        release(*spinlock, token);
         return true;
     }
 
@@ -451,7 +451,7 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
     remaining_timeout := timeout;
 
     while true {
-        release(*spinlock, flags);
+        release(*spinlock, token);
 
         // Todo: Lost wake-up. If we get signalled right here before going to sleep we DO get unblocked correctly, but we wait to the end of the timeout for no reason.
         // Normally you fix this by setting the state of the task that the scheduler bases its actions upon before calling into the scheduler. But here it happens
@@ -459,10 +459,10 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
         sleep(remaining_timeout);
 
-        flags = acquire(*spinlock);
+        token = acquire(*spinlock);
 
         if waiter.signalled {
-            release(*spinlock, flags);
+            release(*spinlock, token);
             return true;
         }
 
@@ -478,13 +478,13 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         }
 
         queue_remove(*queue, *waiter);
-        release(*spinlock, flags);
+        release(*spinlock, token);
         return false;
     }
 }
 
 signal :: (using sema: *Semaphore) {
-    flags := acquire(*spinlock);
+    token := acquire(*spinlock);
 
     if queue_is_empty(queue) {
         counter += 1;
@@ -493,7 +493,7 @@ signal :: (using sema: *Semaphore) {
             counter = counter_max;
         }
 
-        release(*spinlock, flags);
+        release(*spinlock, token);
         return;
     }
 
@@ -503,7 +503,7 @@ signal :: (using sema: *Semaphore) {
 
     to_wake := waiter.task; // 'waiter' may become stale once we release the spinlock.
 
-    release(*spinlock, flags);
+    release(*spinlock, token);
 
     wake_task(to_wake);
 }
@@ -645,11 +645,11 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
       case 6;
         mutex := cast(*Mutex) data.rbx;
-        data.rax = cast(u64) trylock_mutex(mutex);
+        // data.rax = cast(u64) trylock_mutex(mutex);
 
       case 7;
         mutex := cast(*Mutex) data.rbx;
-        release_mutex(mutex);
+        // release_mutex(mutex);
         
       case;
         write_string("Invalid syscall parameter.\n");
@@ -659,7 +659,7 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     }
 }
 
-// This is needed by the syscall handler implemented in assembly in first.jai
+// This is needed by the syscall handler implemented in assembly.
 #program_export
 get_kernel_stack :: () -> *void #c_call {
     task := get_current_task();
@@ -749,7 +749,7 @@ for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
             break;
         }
 
-        // Inserted code must be allowed to edit it.next, e.g. to remove it and put it into a different queue.
+        // Inserted code must be allowed to edit it.next, e.g. to remove 'it' and put it into a different queue.
         it_next := it.next;
 
         defer {
@@ -773,7 +773,9 @@ for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
 }
 
 queue_insert :: (queue: *List_Queue, after: *queue.Node, item: *queue.Node) {
-    if queue.last == after then queue.last = item;
+    if queue.last == after {
+        queue.last = item;
+    }
 
     if after == null {
         // If 'after' is null, that means put it at as the first item in the queue. This enables calling 'queue_insert' using 'it_prev' from the for_expansion.

@@ -420,7 +420,7 @@ Tcp_Connection :: struct {
     do_flush: bool;
 }
 
-blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> []u8 {
+blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> []u8 {
 
     buffer := talloc(bytes);
     cursor: int;
@@ -438,7 +438,7 @@ blocking_read_tcp_bytes :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINIT
     return .{bytes, buffer};
 }
 
-blocking_write_tcp_bytes :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool {
+blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool {
     cursor: int;
 
     while true {
@@ -568,11 +568,11 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
     }
 
     if tcp.do_flush {
-        tcp.do_flush = false;
-
         bytes_per_packet :: 512;
 
         while true {
+            tcp.do_flush = false;
+
             payload: string;
             payload.data = talloc(bytes_per_packet);
 
@@ -779,11 +779,11 @@ Tls_Handshake_Type :: enum u8 {
 }
 
 Tls_Named_Curve :: enum u16 {
-    secp256r1  :: 23;
-    secp384r1  :: 24;
-    secp521r1  :: 25;
-    x25519     :: 29;
-    x448       :: 30;
+    SECP256R1  :: 23;
+    SECP384R1  :: 24;
+    SECP521R1  :: 25;
+    X25519     :: 29;
+    X448       :: 30;
 }
 
 Tls_Extension :: enum u16 {
@@ -931,7 +931,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
             buffer := cast([]u8)value;
         }
 
-        blocking_write_tcp_bytes(tls.tcp, buffer);
+        blocking_write_tcp(tls.tcp, buffer);
 
         if hashing_enabled && T != Tls_Record_Header {
             append(*all_handshake_payload, cast(string)buffer);
@@ -939,7 +939,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     }
 
     receive :: ($ type: Type) -> type #expand {
-        buffer := blocking_read_tcp_bytes(tls.tcp, size_of(type));
+        buffer := blocking_read_tcp(tls.tcp, size_of(type));
 
         if hashing_enabled && type != Tls_Record_Header {
             append(*all_handshake_payload, cast(string)buffer);
@@ -951,7 +951,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     }
 
     receive :: (count: int) -> []u8 #expand {
-        buffer := blocking_read_tcp_bytes(tls.tcp, count);
+        buffer := blocking_read_tcp(tls.tcp, count);
 
         if hashing_enabled {
             append(*all_handshake_payload, cast(string)buffer);
@@ -1080,7 +1080,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         assert(header.type == .SERVER_KEY_EXCHANGE);
 
         assert(receive(u8) == 3); // named_curve
-        assert(receive(Tls_Named_Curve) == .x25519);
+        assert(receive(Tls_Named_Curve) == .X25519);
 
         key_length := receive(u8);
         assert(key_length == 32);

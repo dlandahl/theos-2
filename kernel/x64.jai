@@ -13,7 +13,7 @@ X64_Flags :: enum_flags u64 {
 }
 
 General_Registers :: struct {
-    // The stack layout resulting from the push_all assembly macro defined in first.jai
+    // The stack layout resulting from the push_all assembly macro.
 
     r15:  u64;
     r14:  u64;

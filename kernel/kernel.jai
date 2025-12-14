@@ -289,8 +289,9 @@ kernel_entry :: () #no_context {
             while !core.online pause();
         }
 
+        #asm { sti; }
+
         for* pci_devices {
-            #asm { sti; }
 
             if false if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
@@ -310,7 +311,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        network_test();
+        user_mode_stress_test();
 
         while true {
             schedule_tasks();
@@ -397,7 +398,7 @@ set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
  
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        flags := acquire(*global.text_output_spinlock);
+        token := acquire(*global.text_output_spinlock);
 
         write_string("Assertion failure");
         if message.count {
@@ -405,9 +406,9 @@ set_global_context_callbacks :: () #no_context {
         }
         write_string("\n");
 
-        release(*global.text_output_spinlock, flags);
-
         bluescreen(location);
+
+        release(*global.text_output_spinlock, token);
         return true;
     };
 
@@ -613,7 +614,7 @@ bluescreen :: (loc := #caller_location) #no_context {
         write_string("\n");
     }
 
-    {
+    if false {
         // Temporary hack to make debugging easier. If one core dies and leaks
         // the serial port spinlock, other CPU cores should still be able to
         // keep running.
@@ -1295,14 +1296,30 @@ fetch_store :: (target: *$T, value: T) -> old_value: T #no_context {
 
 
 
-// Todo: should programatically detect when these don't get paired up correctly.
-
-preempt_disable :: () #no_context {
+preempt_disable :: () -> int #no_context {
     offset := offset_of(X64_Core, "preempt_disable_count");
     gs_relative_inc(offset);
+
+    /*
+    if global.multiprocessing_initialized {
+        return get_current_core().preempt_disable_count;
+    }
+    */
+
+    return 0;
 }
 
-preempt_restore :: () #no_context {
+preempt_restore :: (expected: int, loc := #caller_location) #no_context {
+    /*
+    if global.multiprocessing_initialized {
+        core := get_current_core();
+
+        if core.preempt_disable_count != expected {
+            bluescreen(loc);
+        }
+    }
+    */
+
     offset := offset_of(X64_Core, "preempt_disable_count");
     gs_relative_dec(offset);
 }
@@ -1324,6 +1341,14 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
 }
 
 
+
+Lock_Type :: enum {
+    RAW     :: 1;
+    PREEMPT :: 2;
+    IRQ     :: 3;
+}
+
+Lock_Token :: #type,distinct int;
 
 // MCS lock based on https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf
 
@@ -1385,12 +1410,14 @@ is_held :: (lock: Spinlock) -> bool #no_context {
     return now_serving != next_ticket;
 }
 
-acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
+acquire :: (lock: *Spinlock, $lock_type := Lock_Type.PREEMPT) -> token: Lock_Token #no_context {
 
-    // Todo: For now, spinlocks disable all IRQs. Really, if the same spinlock will not be used from interrupt handlers, we only need to disable preemption.
-    // flags := disable_interrupts();
+    token: Lock_Token;
 
-    preempt_disable();
+    #if lock_type == {
+        case .PREEMPT; token = cast(Lock_Token)preempt_disable();
+        case .IRQ;     token = cast(Lock_Token)disable_interrupts();
+    }
 
     now_serving := cast(*u16)lock;
     next_ticket := cast(*u16)lock + 1;
@@ -1401,21 +1428,23 @@ acquire :: (lock: *Spinlock) -> flags: X64_Flags #no_context {
         #asm { pause; }
     }
 
-    return 0;
+    return token;
 }
 
-release :: (lock: *Spinlock, flags: X64_Flags) #no_context {
+release :: (lock: *Spinlock, token: Lock_Token, $lock_type := Lock_Type.PREEMPT) #no_context {
 
     now_serving := cast(*u16)lock;
     now_serving.* += 1;
 
-    preempt_restore();
-    // restore_interrupts(flags);
+    #if lock_type == {
+        case .PREEMPT; preempt_restore(cast(int)token);
+        case .IRQ;     restore_interrupts(cast(X64_Flags)token);
+    }
 }
 
 Scoped_Acquire :: (lock: *Spinlock) #expand {
-    flags := acquire(lock);
-    `defer release(lock, flags);
+    token := acquire(lock);
+    `defer release(lock, token);
 }
 
 
@@ -1446,7 +1475,7 @@ acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
         return 0;
     }
 
-    acquire(*lock.lock);
+    acquire(*lock.lock, .RAW);
     lock.held_by_core = core_id;
 
     return flags;
@@ -1471,7 +1500,8 @@ release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
     }
 
     lock.held_by_core = -1; // Prevent a race due to acquiring the lock, then setting held_by_core immediately afterwards.
-    release(*lock.lock, flags);
+    release(*lock.lock, 0, .RAW);
+    restore_interrupts(flags);
 }
 
 Scoped_Acquire :: (lock: *Recursive_Spinlock) #expand {
