@@ -145,11 +145,11 @@ initialize_apic :: () {
         return builder_to_string(*builder);
     };
 
-    register_interrupt_gate(isr__debug_exception,               1,  true);
-    register_interrupt_gate(isr__breakpoint_handler,            3,  true);
-    register_interrupt_gate(isr__general_protection_fault,      13, true);
-    register_interrupt_gate(isr__page_fault,                    14, true);
-    register_interrupt_gate(isr__floating_point_exception,      19, true);
+    register_interrupt_gate(isr__debug_exception,          1,  true);
+    register_interrupt_gate(isr__breakpoint_handler,       3,  true);
+    register_interrupt_gate(isr__general_protection_fault, 13, true);
+    register_interrupt_gate(isr__page_fault,               14, true);
+    register_interrupt_gate(isr__floating_point_exception, 19, true);
 
     //
     // Iterate interrupt controller structures
@@ -266,7 +266,7 @@ ap_startup_spinlock: Spinlock;
 
 ap_entry_point :: () #c_call {
 
-    release(*ap_startup_spinlock, 0, .RAW);
+    release(*ap_startup_spinlock, .RAW);
 
     push_context {
         init_processor_core();
@@ -543,39 +543,41 @@ Uacpi_State :: struct {
     }
 
     work_queue: Queue(Work_Item);
-    work_queue_spinlock: Spinlock;
+    work_queue_lock: Spinlock;
     work_thread: *Task_Info;
+
+    work_added:     Condition_Variable;
+    work_completed: Condition_Variable;
 
     work_thread_proc :: () {
         using global.uacpi_state;
+
+        log_category("uACPI");
 
         // uACPI uses thread local storage.
         tls := get_4k_page() + DIRECT_MAPPING_BASE;
         #asm FSGSBASE { wrfsbase tls; }
 
         while true {
-            token := acquire(*work_queue_spinlock);
+            acquire(*work_queue_lock);
 
-            while !queue_is_empty(work_queue) {
-                item := queue_pop(*work_queue);
-
-                log("Beginning uACPI work item.\n");
-
-                release(*work_queue_spinlock, token);
-                item.handler(item.ctx);
-                token = acquire(*work_queue_spinlock);
-
-                log("uACPI work item completed.\n");
+            while queue_is_empty(work_queue) { // I believe technically 'if' would be fine because our condition variables don't currently have spurious wakeups, as they're implemented using our semaphores that take care of the issue.
+                wait_for(*work_added, *work_queue_lock);
             }
 
-            release(*work_queue_spinlock, token);
+            item := queue_pop(*work_queue);
+            release(*work_queue_lock);
 
-            yield_execution();
+            log("Beginning work item.\n");
+            item.handler(item.ctx);
+            log("Work item completed.\n");
+
+            broadcast(*work_completed);
         }
     }
 }
 
-#import "Uacpi";
+#import "uACPI";
 
 #program_export uacpi_do_atomic_cmpxchg64 :: () #c_call {
     write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg64\"\n");
@@ -967,7 +969,7 @@ uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
     using global.uacpi_state;
     push_context {
 
-        locator, _ := bucket_array_add(*spinlock_storage, 0);
+        locator, _ := bucket_array_add(*spinlock_storage, .{});
         locator.slot_index += 1; // Because we return this in a pointer, if this value is zero, uACPI assumes we ran out of memory.
 
         // ucapi_handle is *void, Bucket_Locator is two 32-bit integers. We can store the locator using the pointer value.
@@ -1000,9 +1002,11 @@ uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call 
         locator.slot_index -= 1;
 
         lock := bucket_array_find_pointer(*spinlock_storage, locator);
-        token := acquire(lock, .IRQ);
+        acquire(lock, .IRQ);
 
-        return cast,trunc(uacpi_cpu_flags) token;
+        flags := ifx lock.irq_state then X64_Flags.IF__interrupt else 0;
+
+        return cast,trunc(uacpi_cpu_flags) flags;
     }
 }
 
@@ -1015,7 +1019,9 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
         locator.slot_index -= 1;
 
         lock := bucket_array_find_pointer(*spinlock_storage, locator);
-        release(lock, cast(Lock_Token) flags, .IRQ);
+
+        lock.irq_state = (cast(X64_Flags)flags) & .IF__interrupt > 0;
+        release(lock, .IRQ);
     }
 }
 
@@ -1029,9 +1035,11 @@ uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handle
     item.ctx = ctx;
 
     push_context {
-        token := acquire(*work_queue_spinlock);
+        acquire(*work_queue_lock);
         queue_push(*work_queue, item);
-        release(*work_queue_spinlock, token);
+        release(*work_queue_lock);
+
+        notify(*work_added);
     }
 
     return .OK;
@@ -1042,18 +1050,13 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
     using global.uacpi_state;
 
     push_context {
-        while true {
+        acquire(*work_queue_lock);
 
-            token := acquire(*work_queue_spinlock);
-            empty := queue_is_empty(work_queue);
-            release(*work_queue_spinlock, token);
-
-            if empty {
-                break;
-            }
-
-            yield_execution();
+        while !queue_is_empty(work_queue) {
+            wait_for(*work_completed, *work_queue_lock);
         }
+
+        release(*work_queue_lock);
     }
 }
 

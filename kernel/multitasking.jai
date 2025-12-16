@@ -43,7 +43,7 @@ Scheduler :: struct {
     last_task_switch_timestamp: Apollo_Time;
 }
 
-lock_scheduler_for_task :: (task: *Task_Info) -> Lock_Token, *Scheduler {
+lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
     // We need to dereference on_core to lock a task, but it can be stale by the time we
     // get the lock. In practice it should almost always work the first time.
     assert(task.on_core != null);
@@ -51,27 +51,27 @@ lock_scheduler_for_task :: (task: *Task_Info) -> Lock_Token, *Scheduler {
     while true {
         core := task.on_core;
 
-        token := acquire(*core.scheduler.spinlock);
+        acquire(*core.scheduler.spinlock);
 
         if task.on_core == core {
-            return token, *core.scheduler;
+            return *core.scheduler;
         }
 
-        release(*core.scheduler.spinlock, token);
+        release(*core.scheduler.spinlock);
     }
 
-    return 0, null;
+    return null;
 }
 
-lock_scheduler_for_current_task :: () -> Lock_Token, *Task_Info, *Scheduler {
-    token := cast(Lock_Token)preempt_disable();
+lock_scheduler_for_current_task :: () -> *Task_Info, *Scheduler {
+    preempt_disable();
 
     current := get_current_task();
     scheduler := *current.on_core.scheduler;
 
     acquire(*scheduler.spinlock, .RAW);
 
-    return token, current, scheduler;
+    return current, scheduler;
 }
 
 get_current_task :: () -> *Task_Info #no_context {
@@ -119,6 +119,9 @@ core_begin_multitasking :: () {
         idle_task.on_core = core;
         current_task.name = "Kernel Main";
     }
+
+    waiting_to_run.name = sprint("Run Queue (%)", core.id);
+    sleeping.name       = sprint("Sleep Queue (%)", core.id);
 
     core.online = true;
 
@@ -180,11 +183,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
-    // assert(get_rflags() & .IF__interrupt > 0); // We could get stuck forever if we call the scheduler with interrupts disabled.
-
-    token, current, scheduler := lock_scheduler_for_current_task();
-
-    // assert(get_current_core().preempt_disable_count == 0);
+    current, scheduler := lock_scheduler_for_current_task();
 
     time_now := get_monotonic_system_time();
 
@@ -199,7 +198,9 @@ schedule_tasks :: () {
 
             remove it;
 
-            queue_push(*waiting_to_run, it);
+            if it != current {
+                queue_push(*waiting_to_run, it);
+            }
         }
     }
 
@@ -220,7 +221,7 @@ schedule_tasks :: () {
     }
 
     if next == current {
-        release(*scheduler.spinlock, token);
+        release(*scheduler.spinlock);
         return;
     }
 
@@ -236,7 +237,7 @@ schedule_tasks :: () {
 
     context_switch(current, next);
 
-    release(*scheduler.spinlock, token);
+    release(*scheduler.spinlock);
 }
 
 context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
@@ -304,7 +305,7 @@ sleep :: (time: Apollo_Time) {
 }
 
 sleep_until :: (time: Apollo_Time) {
-    token, task, scheduler := lock_scheduler_for_current_task();
+    task, scheduler := lock_scheduler_for_current_task();
 
     task.sleeping = true;
     task.sleep_until = time;
@@ -322,16 +323,16 @@ sleep_until :: (time: Apollo_Time) {
         queue_push(*scheduler.sleeping, task);
     }
 
-    release(*scheduler.spinlock, token);
+    release(*scheduler.spinlock);
     yield_execution();
 }
 
 wake_task :: (task: *Task_Info) {
-    token, scheduler := lock_scheduler_for_task(task);
+    scheduler := lock_scheduler_for_task(task);
 
     // By the time we got the lock, the task might not be sleeping anymore.
     if !task.sleeping {
-        release(*scheduler.spinlock, token);
+        release(*scheduler.spinlock);
         return;
     }
 
@@ -340,7 +341,7 @@ wake_task :: (task: *Task_Info) {
     queue_remove(*scheduler.sleeping, task);
     queue_push(*scheduler.waiting_to_run, task);
 
-    release(*scheduler.spinlock, token);
+    release(*scheduler.spinlock);
 }
 
 
@@ -351,8 +352,8 @@ Mutex :: struct {
     queue: List_Queue(*Task_Info);
 }
 
-acquire_mutex :: (using mutex: *Mutex) {
-    token := acquire(*spinlock);
+acquire :: (using mutex: *Mutex) {
+    acquire(*spinlock);
     task := get_current_task();
 
     if held_by == null {
@@ -360,43 +361,43 @@ acquire_mutex :: (using mutex: *Mutex) {
 
         held_by = task;
 
-        release(*spinlock, token);
+        release(*spinlock);
         return;
     }
 
     queue_push(*queue, task);
     task.blocked = true;
 
-    release(*spinlock, token);
+    release(*spinlock);
     yield_execution();
 }
 
-release_mutex :: (using mutex: *Mutex) {
-    token := acquire(*spinlock);
+release :: (using mutex: *Mutex) {
+    acquire(*spinlock);
     task := get_current_task();
 
     assert(held_by == task);
     held_by = null;
 
     if queue_is_empty(queue) {
-        release(*spinlock, token);
+        release(*spinlock);
         return;
     }
 
     next := queue_pop(*mutex.queue).item;
     held_by = next;
-    release(*spinlock, token);
+    release(*spinlock);
 
-    token=, scheduler := lock_scheduler_for_task(next);
+    scheduler := lock_scheduler_for_task(next);
 
     assert(next.blocked);
     next.blocked = false;
 
     queue_push(*scheduler.waiting_to_run, next);
-    release(*scheduler.spinlock, token);
+    release(*scheduler.spinlock);
 }
 
-trylock_mutex :: (using mutex: *Mutex) -> bool {
+trylock :: (using mutex: *Mutex) -> bool {
     Scoped_Acquire(*spinlock);
 
     task := get_current_task();
@@ -431,11 +432,11 @@ Semaphore :: struct {
 
 wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
-    token := acquire(*spinlock);
+    acquire(*spinlock);
 
     if counter > 0 {
         counter -= 1;
-        release(*spinlock, token);
+        release(*spinlock);
         return true;
     }
 
@@ -451,7 +452,7 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
     remaining_timeout := timeout;
 
     while true {
-        release(*spinlock, token);
+        release(*spinlock);
 
         // Todo: Lost wake-up. If we get signalled right here before going to sleep we DO get unblocked correctly, but we wait to the end of the timeout for no reason.
         // Normally you fix this by setting the state of the task that the scheduler bases its actions upon before calling into the scheduler. But here it happens
@@ -459,10 +460,10 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
         sleep(remaining_timeout);
 
-        token = acquire(*spinlock);
+        acquire(*spinlock);
 
         if waiter.signalled {
-            release(*spinlock, token);
+            release(*spinlock);
             return true;
         }
 
@@ -478,13 +479,13 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         }
 
         queue_remove(*queue, *waiter);
-        release(*spinlock, token);
+        release(*spinlock);
         return false;
     }
 }
 
 signal :: (using sema: *Semaphore) {
-    token := acquire(*spinlock);
+    acquire(*spinlock);
 
     if queue_is_empty(queue) {
         counter += 1;
@@ -493,7 +494,7 @@ signal :: (using sema: *Semaphore) {
             counter = counter_max;
         }
 
-        release(*spinlock, token);
+        release(*spinlock);
         return;
     }
 
@@ -503,9 +504,60 @@ signal :: (using sema: *Semaphore) {
 
     to_wake := waiter.task; // 'waiter' may become stale once we release the spinlock.
 
-    release(*spinlock, token);
+    release(*spinlock);
 
     wake_task(to_wake);
+}
+
+
+
+Condition_Variable :: struct {
+    // Not using a mutex, so that we can broadcast and notify in interrupt contexts.
+    lock: Spinlock;
+
+    waiters: List_Queue(Semaphore);
+}
+
+notify :: (using var: *Condition_Variable) {
+    acquire(*lock);
+
+    waiter := queue_pop(*waiters);
+    signal(*waiter.item);
+
+    release(*lock);
+}
+
+broadcast :: (using var: *Condition_Variable) {
+    acquire(*lock);
+
+    for* waiters {
+        // Remove before signal because waiters may become stale as soon as they get signalled.
+        remove it;
+        signal(*it.item);
+    }
+
+    release(*lock);
+}
+
+wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, timeout := INFINITE_TIMEOUT) -> bool {
+    acquire(*lock);
+
+    waiter: waiters.Node;
+    waiter.item.counter_max = 1;
+    queue_push(*waiters, *waiter);
+
+    release(*lock);
+
+    if user_lock release(user_lock);
+
+    signalled := wait_for(*waiter.item, timeout);
+    if !signalled {
+        // Timed out.
+        return false;
+    }
+
+    if user_lock acquire(user_lock);
+    return true;
 }
 
 
@@ -645,11 +697,11 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
       case 6;
         mutex := cast(*Mutex) data.rbx;
-        // data.rax = cast(u64) trylock_mutex(mutex);
+        data.rax = cast(u64) trylock(mutex);
 
       case 7;
         mutex := cast(*Mutex) data.rbx;
-        // release_mutex(mutex);
+        release(mutex);
         
       case;
         write_string("Invalid syscall parameter.\n");
@@ -713,6 +765,7 @@ task_do_work_in_ring_3 :: () #c_call {
             if core.id != 0 if trylock_from_user_mode(*ring_3_work_mutex) {
                 print_from_user_mode("Thread \"%\" got the mutex - holding for one second.\n", thread.name);
                 sleep_from_user_mode(seconds_to_apollo(1));
+                print_from_user_mode("Thread \"%\" releasing mutex.\n", thread.name);
                 unlock_from_user_mode(*ring_3_work_mutex);
             }
 
@@ -730,10 +783,15 @@ List_Queue :: struct (Item_Type: Type) {
     Node :: struct {
         next: *Node;
         using item: Item_Type;
+
+        // For debugging:
+        in_list_queue: *List_Queue(Item_Type);
     }
 
     first: *Node;
     last:  *Node;
+
+    name: string;
 }
 
 for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
@@ -749,12 +807,19 @@ for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
             break;
         }
 
+        assert(it.in_list_queue == queue);
+
         // Inserted code must be allowed to edit it.next, e.g. to remove 'it' and put it into a different queue.
         it_next := it.next;
 
+        removed: bool;
+
         defer {
-            // To allow 'continue' to be #inserted below.
-            it_prev = it;
+            // Defer, to allow 'continue' to be #inserted below.
+
+            // If the item was removed, the previous item in the list is still the same one as the last iteration.
+            it_prev = ifx removed then it_prev else it;
+
             it = it_next;
             it_index += 1;
         }
@@ -768,11 +833,18 @@ for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
             }
 
             it.next = null;
+            it.in_list_queue = null;
+
+            removed = true;
         }) body;
     }
 }
 
 queue_insert :: (queue: *List_Queue, after: *queue.Node, item: *queue.Node) {
+
+    assert(item.in_list_queue == null);
+    item.in_list_queue = queue;
+
     if queue.last == after {
         queue.last = item;
     }
@@ -785,12 +857,16 @@ queue_insert :: (queue: *List_Queue, after: *queue.Node, item: *queue.Node) {
         return;
     }
 
+    assert(after.in_list_queue == queue);
+
     item.next = after.next;
     after.next = item;
 }
 
 queue_push :: (queue: *List_Queue, item: *queue.Node) {
-    item.next = null;
+
+    assert(item.in_list_queue == null);
+    item.in_list_queue = queue;
 
     if queue.first == null {
         assert(queue.last == null);
@@ -808,17 +884,22 @@ queue_push :: (queue: *List_Queue, item: *queue.Node) {
 }
 
 queue_pop :: (queue: *List_Queue) -> *queue.Node {
+
     assert(queue.first != null);
     result := queue.first;
 
     queue.first = queue.first.next;
     if queue.first == null queue.last = null;
 
+    assert(result.in_list_queue == queue);
+
+    result.in_list_queue = null;
+    result.next = null;
     return result;
 }
 
 queue_remove :: (queue: *List_Queue, item: *queue.Node) {
-    for queue.* if it == item {
+    for* queue.* if it == item {
         remove it;
         break;
     }
@@ -830,6 +911,7 @@ queue_is_empty :: (queue: List_Queue) -> bool {
         return true;
     }
 
+    assert(queue.last != null);
     return false;
 }
 

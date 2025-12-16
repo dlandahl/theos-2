@@ -12,7 +12,6 @@ using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
 
 set :: bitfield_set;
 get :: bitfield_get;
-
 set_bit :: bitfield_set_bit;
 get_bit :: bitfield_get_bit;
 
@@ -57,7 +56,7 @@ X64_Core :: struct {
 // reserve 8Mb in the executable, all of which is zero. Todo: is there really a reason not to dynamically allocate this?
 space_for_processor_cores: [1024] X64_Core;
 
-// For the same reason this struct shouldn't have default values.
+// For the same reason this struct shouldn't have default values. Todo: move the IOPB.
 #assert initializer_of(X64_Core) == null;
 
 Kernel_Globals :: struct {
@@ -324,6 +323,8 @@ user_mode_stress_test :: () {
     thread_index := 1;
 
     for *core: global.processor_cores {
+        // if core.id != 0 continue;
+
         for 1..4 {
             name := tprint("Do Work %:%", core.id, thread_index);
             task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
@@ -398,7 +399,7 @@ set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
  
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        token := acquire(*global.text_output_spinlock);
+        acquire(*global.text_output_spinlock);
 
         write_string("Assertion failure");
         if message.count {
@@ -408,7 +409,7 @@ set_global_context_callbacks :: () #no_context {
 
         bluescreen(location);
 
-        release(*global.text_output_spinlock, token);
+        release(*global.text_output_spinlock);
         return true;
     };
 
@@ -604,7 +605,7 @@ bluescreen :: (loc := #caller_location) #no_context {
 
     stack_trace_is_available := task && task._context && task._context.stack_trace;
 
-    if stack_trace_is_available  {
+    if stack_trace_is_available && false {
         push_context {
             print_stack_trace(task._context.stack_trace);
         }
@@ -621,9 +622,9 @@ bluescreen :: (loc := #caller_location) #no_context {
 
         lock := *global.text_output_spinlock;
 
-        if lock.lock && lock.held_by_core == core.id {
+        if is_held(lock.lock) && lock.held_by_core == core.id {
             lock.recursion_count = 0;
-            release(lock, 0);
+            release(lock);
         }
     }
 
@@ -1022,7 +1023,7 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
 }
 
 find_block :: (using allocator: *Block_Allocator, address: u64) -> *Block_Desc, index: int {
-    assert(spinlock != 0); // Caller should take the lock.
+    assert(is_held(spinlock)); // Caller should take the lock.
 
     // Find the block corresponding to that address using linear search
     looking_for := address - allocator.base_address;
@@ -1342,13 +1343,16 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
 
 
 
+// Things that have 'acquire' and 'release' procedures defined. For use with polymorphic type restrictions.
+Any_Lock :: Type.[MCS_Spinlock, Spinlock, Mutex];
+
+
+
 Lock_Type :: enum {
     RAW     :: 1;
     PREEMPT :: 2;
     IRQ     :: 3;
 }
-
-Lock_Token :: #type,distinct int;
 
 // MCS lock based on https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf
 
@@ -1401,50 +1405,49 @@ release :: (lock: *MCS_Spinlock, flags: X64_Flags) #no_context {
 
 
 
-Spinlock :: #type,distinct u32;
+Spinlock :: struct {
+    now_serving: u16;
+    next_ticket: u16;
+    irq_state: bool; // Todo: this could go in the high bit of one of the fields above to save cache space.
+}
 
 is_held :: (lock: Spinlock) -> bool #no_context {
-    now_serving := cast(u16) (lock & 0xffff);
-    next_ticket := cast(u16) (lock >> 16);
-
-    return now_serving != next_ticket;
+    return lock.now_serving != lock.next_ticket;
 }
 
-acquire :: (lock: *Spinlock, $lock_type := Lock_Type.PREEMPT) -> token: Lock_Token #no_context {
-
-    token: Lock_Token;
+acquire :: (lock: *Spinlock, $lock_type := Lock_Type.PREEMPT) #no_context {
 
     #if lock_type == {
-        case .PREEMPT; token = cast(Lock_Token)preempt_disable();
-        case .IRQ;     token = cast(Lock_Token)disable_interrupts();
+      case .PREEMPT;
+        preempt_disable();
+      case .IRQ;
+        flags := disable_interrupts();
+        lock.irq_state = flags & .IF__interrupt > 0;
     }
 
-    now_serving := cast(*u16)lock;
-    next_ticket := cast(*u16)lock + 1;
+    my_ticket := fetch_add(*lock.next_ticket, 1);
 
-    my_ticket := fetch_add(next_ticket, 1);
-
-    while now_serving.* != my_ticket {
+    while lock.now_serving != my_ticket {
         #asm { pause; }
     }
-
-    return token;
 }
 
-release :: (lock: *Spinlock, token: Lock_Token, $lock_type := Lock_Type.PREEMPT) #no_context {
+release :: (lock: *Spinlock, $lock_type := Lock_Type.PREEMPT) #no_context {
 
-    now_serving := cast(*u16)lock;
-    now_serving.* += 1;
+    lock.now_serving += 1;
 
     #if lock_type == {
-        case .PREEMPT; preempt_restore(cast(int)token);
-        case .IRQ;     restore_interrupts(cast(X64_Flags)token);
+      case .PREEMPT;
+        preempt_restore(0 /* Todo */);
+      case .IRQ;
+        flags := ifx lock.irq_state then X64_Flags.IF__interrupt else 0;
+        restore_interrupts(flags);
     }
 }
 
 Scoped_Acquire :: (lock: *Spinlock) #expand {
-    token := acquire(lock);
-    `defer release(lock, token);
+    acquire(lock);
+    `defer release(lock);
 }
 
 
@@ -1458,7 +1461,7 @@ Recursive_Spinlock :: struct {
     recursion_count: int;
 }
 
-acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
+acquire :: (lock: *Recursive_Spinlock) #no_context {
 
     flags := disable_interrupts();
     core_id := 0;
@@ -1472,16 +1475,15 @@ acquire :: (lock: *Recursive_Spinlock) -> X64_Flags #no_context {
 
     if is_held(lock.lock) && lock.held_by_core == core_id {
         lock.recursion_count += 1;
-        return 0;
+        return;
     }
 
     acquire(*lock.lock, .RAW);
     lock.held_by_core = core_id;
-
-    return flags;
+    lock.lock.irq_state = flags & .IF__interrupt > 0;
 }
 
-release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
+release :: (lock: *Recursive_Spinlock) #no_context {
 
     core_id := 0;
 
@@ -1500,13 +1502,15 @@ release :: (lock: *Recursive_Spinlock, flags: X64_Flags) #no_context {
     }
 
     lock.held_by_core = -1; // Prevent a race due to acquiring the lock, then setting held_by_core immediately afterwards.
-    release(*lock.lock, 0, .RAW);
+    release(*lock.lock, .RAW);
+
+    flags := ifx lock.lock.irq_state then X64_Flags.IF__interrupt else 0;
     restore_interrupts(flags);
 }
 
 Scoped_Acquire :: (lock: *Recursive_Spinlock) #expand {
-    flags := acquire(lock);
-    `defer release(lock, flags);
+    acquire(lock);
+    `defer release(lock);
 }
 
 

@@ -671,7 +671,7 @@ calibrate_tsc :: () -> hz: u64 {
         }
     }
 
-    log("Failed to calibrate the Timestamp Counter in good time."); // In the future this routine should never fail, but while the calibration algorithm is not final we'll print this message.
+    log_error("Failed to calibrate the Timestamp Counter in good time."); // In the future this routine should never fail, but while the calibration algorithm is not final we'll print this message.
     bluescreen();
     return 0;
 }

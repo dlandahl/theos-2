@@ -51,7 +51,7 @@ struc Task_Info
     .xsave: resq 1
 endstruc
 
-align 0x8
+align 16
 context_switch:
     ; Save RFLAGS and GPRs on the stack
     pushfq
@@ -85,7 +85,7 @@ extern get_kernel_stack
 extern syscall_handler
 global syscall_entry
 
-align 0x10
+align 16
 syscall_entry:
     pushfq
     push_all
@@ -105,7 +105,7 @@ syscall_entry:
 
 
 global enter_user_mode
-align 0x10
+align 16
 enter_user_mode:
     mov rsp, rsi
     mov rcx, rdi
@@ -115,7 +115,7 @@ enter_user_mode:
 
 
 global get_rflags
-align 0x10
+align 16
 get_rflags:
     pushfq
     pop rax
@@ -123,7 +123,7 @@ get_rflags:
 
 
 global init_segment_registers
-align 0x10
+align 16
 init_segment_registers:
     push 0x8
     lea rax, [rel .reload_cs]
@@ -141,22 +141,22 @@ global gs_relative_write
 global gs_relative_inc
 global gs_relative_dec
 
-align 0x10;
+align 16
 gs_relative_read:
     mov rax, [gs:rdi]
     ret
 
-align 0x10;
+align 16
 gs_relative_write:
     mov [gs:rdi], rsi
     ret
 
-align 0x10;
+align 16
 gs_relative_inc:
     inc qword [gs:rdi]
     ret
 
-align 0x10;
+align 16
 gs_relative_dec:
     dec qword [gs:rdi]
     ret

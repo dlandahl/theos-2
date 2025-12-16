@@ -75,7 +75,7 @@ file_table :: string.[
             }
 
             assert(false, loc.fully_pathed_filename);
-            return 0;
+            return 255;
         }
 
         trace_internal(tag, file_id, cast(u16)loc.line_number);
