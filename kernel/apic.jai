@@ -574,7 +574,7 @@ Uacpi_State :: struct {
             acquire(*work_queue_lock);
             work_in_progress = false;
             if queue_is_empty(work_queue) {
-                broadcast(*work_completed);
+                notify_all(*work_completed);
             }
             release(*work_queue_lock);
         }

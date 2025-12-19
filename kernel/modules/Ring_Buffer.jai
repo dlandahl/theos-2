@@ -1,4 +1,6 @@
 
+// Todo: "Virtual stream" https://fgiesen.wordpress.com/2010/12/14/ring-buffers-and-queues/
+
 Ring_Buffer :: struct {
     buffer: [] u8;
     read_cursor:  int;

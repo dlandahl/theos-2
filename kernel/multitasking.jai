@@ -198,6 +198,7 @@ schedule_tasks :: () {
 
             remove it;
 
+            // We can get here if the sleep time of the current task was so short that it wakes itself before context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the current task.
             if it != current {
                 queue_push(*waiting_to_run, it);
             }
@@ -256,10 +257,9 @@ new_task_start :: () #no_context {
 
         task.entry_point();
 
-        while true {
-            // Todo: remove the task from the scheduler properly
-            yield_execution();
-        }
+        // Todo: Hack. This stops the scheduler from putting the task back on the run queue.
+        task.blocked = true;
+        yield_execution();
     }
 }
 
@@ -297,23 +297,30 @@ sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds
 }
 
 sleep :: (time: Apollo_Time) {
-    if time == INFINITE_TIMEOUT {
-        sleep_until(INFINITE_TIMEOUT);
-    }
+    until := ifx time == INFINITE_TIMEOUT then INFINITE_TIMEOUT else get_monotonic_time() + time;
 
-    sleep_until(get_monotonic_system_time() + time);
+    set_task_sleep_state(until);
+    yield_execution();
 }
 
 sleep_until :: (time: Apollo_Time) {
+    set_task_sleep_state(time);
+    yield_execution();
+}
+
+set_task_sleep_state :: (until: Apollo_Time) {
+
+    // This is separate from sleep-and-yield above, because often you need to put the task to sleep under a lock, but not hold the lock while sleeping, to prevent lost wakeups.
+    // Todo: Since this will be called while holding other locks, it may be necessary for this to work without taking the scheduler lock.
     task, scheduler := lock_scheduler_for_current_task();
 
     task.sleeping = true;
-    task.sleep_until = time;
+    task.sleep_until = until;
 
     inserted: bool;
 
     for* scheduler.sleeping {
-        if it.sleep_until < time continue;
+        if it.sleep_until < until continue;
         queue_insert(*scheduler.sleeping, it_prev, task);
         inserted = true;
         break;
@@ -324,7 +331,6 @@ sleep_until :: (time: Apollo_Time) {
     }
 
     release(*scheduler.spinlock);
-    yield_execution();
 }
 
 wake_task :: (task: *Task_Info) {
@@ -449,16 +455,15 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
     queue_push(*queue, *waiter);
 
     end_time := get_monotonic_time() + timeout;
-    remaining_timeout := timeout;
+    remaining_timeout := timeout; // We need to track the timeout over multiple sleep calls due to spurious wakeups.
 
     while true {
+        // Prevent lost-wakeup by setting the task to sleep while still holding the lock.
+        set_task_sleep_state(remaining_timeout);
+
         release(*spinlock);
 
-        // Todo: Lost wake-up. If we get signalled right here before going to sleep we DO get unblocked correctly, but we wait to the end of the timeout for no reason.
-        // Normally you fix this by setting the state of the task that the scheduler bases its actions upon before calling into the scheduler. But here it happens
-        // inside the 'sleep' call.
-
-        sleep(remaining_timeout);
+        yield_execution();
 
         acquire(*spinlock);
 
@@ -480,7 +485,7 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
         queue_remove(*queue, *waiter);
         release(*spinlock);
-        return false;
+        return false; // Timeout hit.
     }
 }
 
@@ -512,7 +517,7 @@ signal :: (using sema: *Semaphore) {
 
 
 Condition_Variable :: struct {
-    // Not using a mutex, so that we can broadcast and notify in interrupt contexts.
+    // Not using a mutex, so that we can notify in interrupt contexts.
     lock: Spinlock;
 
     waiters: List_Queue(Semaphore);
@@ -527,7 +532,7 @@ notify :: (using var: *Condition_Variable) {
     release(*lock);
 }
 
-broadcast :: (using var: *Condition_Variable) {
+notify_all :: (using var: *Condition_Variable) {
     acquire(*lock);
 
     for* waiters {
