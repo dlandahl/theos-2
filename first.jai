@@ -74,7 +74,7 @@ main :: () {
     }
 
     if to_create.count && !(bootloader_only ^ kernel_only) {
-        log_error("Cannot use plugins with multiple targets. Specify either 'bootloader' or 'kernel' to use metaprogram plugins.");
+        log_error("Cannot use plugins with multiple targets. Specify either '- bootloader' or '- kernel' to use metaprogram plugins.");
         init_plugins(.[], null, -1);
         return;
     }

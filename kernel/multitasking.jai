@@ -560,6 +560,12 @@ wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, timeout :=
     return true;
 }
 
+wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, $predicate: Code, timeout := INFINITE_TIMEOUT) -> bool {
+    while !(#insert predicate) {
+        return wait_for(var, user_lock, timeout=timeout);
+    }
+}
+
 
 
 // In the future we should generate these using metaprogramming, from a table.

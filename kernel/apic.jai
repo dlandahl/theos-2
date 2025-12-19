@@ -545,8 +545,9 @@ Uacpi_State :: struct {
     work_queue: Queue(Work_Item);
     work_queue_lock: Spinlock;
     work_thread: *Task_Info;
+    work_in_progress: bool;
 
-    work_added:     Condition_Variable;
+    work_added:     Semaphore;
     work_completed: Condition_Variable;
 
     work_thread_proc :: () {
@@ -559,20 +560,23 @@ Uacpi_State :: struct {
         #asm FSGSBASE { wrfsbase tls; }
 
         while true {
+            wait_for(*work_added);
+
             acquire(*work_queue_lock);
-
-            while queue_is_empty(work_queue) { // I believe technically 'if' would be fine because our condition variables don't currently have spurious wakeups, as they're implemented using our semaphores that take care of the issue.
-                wait_for(*work_added, *work_queue_lock);
-            }
-
             item := queue_pop(*work_queue);
+            work_in_progress = true;
             release(*work_queue_lock);
 
             log("Beginning work item.\n");
             item.handler(item.ctx);
             log("Work item completed.\n");
 
-            broadcast(*work_completed);
+            acquire(*work_queue_lock);
+            work_in_progress = false;
+            if queue_is_empty(work_queue) {
+                broadcast(*work_completed);
+            }
+            release(*work_queue_lock);
         }
     }
 }
@@ -1039,7 +1043,7 @@ uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handle
         queue_push(*work_queue, item);
         release(*work_queue_lock);
 
-        notify(*work_added);
+        signal(*work_added);
     }
 
     return .OK;
@@ -1052,9 +1056,8 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
     push_context {
         acquire(*work_queue_lock);
 
-        while !queue_is_empty(work_queue) {
-            wait_for(*work_completed, *work_queue_lock);
-        }
+        predicate :: #code queue_is_empty(work_queue) && !work_in_progress;
+        wait_for(*work_completed, *work_queue_lock, predicate);
 
         release(*work_queue_lock);
     }
