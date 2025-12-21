@@ -121,12 +121,14 @@ Kernel_Globals :: struct {
     COM1: Serial_Port(0x3f8); // Used for writing to log files and the host console on VirtualBox and QEMU.
     COM2: Serial_Port(0x2f8); // Used for writing trace data.
 
-    text_output_spinlock: Recursive_Spinlock; // Used to prevent multiple calls to write_string from different cores becoming interleaved, in cases where this makes the output harder to interpret.
+    text_output_spinlock: Recursive_Spinlock; // Used to prevent multiple calls to write_string from different cores becoming interleaved.
 
     network_connection: Network_Connection;
 
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
+
+    first_context: *#Context; // To have access to calls stacks early in boot.
 }
 
 global: Kernel_Globals;
@@ -209,6 +211,7 @@ kernel_entry :: () #no_context {
 
 
     push_context {
+        global.first_context = *context;
 
         using framebuffer;
 
@@ -222,24 +225,23 @@ kernel_entry :: () #no_context {
             }
         }
 
+        {
+            // Init virtual memory heap.
+            GB :: 0x4000_0000;
+            direct_mapping_size := cast(u64) boot_data.page_tables.direct_pd.count * GB;
 
+            heap_base: u64 = DIRECT_MAPPING_BASE + direct_mapping_size;
+            heap_size: u64 = 64 * GB;
 
-        // Put a virtual memory heap after the direct mapping
-        GB :: 0x4000_0000;
-        direct_mapping_size := cast(u64) boot_data.page_tables.direct_pd.count * GB;
+            // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
+            init_block_allocator(*virtual_block_allocator, heap_base, heap_size, alignment=4096);
+        }
 
-        heap_base: u64 = DIRECT_MAPPING_BASE + direct_mapping_size;
-        heap_size: u64 = 64 * GB;
-
-        // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
-        init_block_allocator(*virtual_block_allocator, heap_base, heap_size, alignment=4096);
-
-
-
-        // Sequentially allocating interrupt gates, starting after the ISA exceptions
-        memset(interrupt_descriptor_table.data, 0, size_of(type_of(interrupt_descriptor_table)));
-        next_free_interrupt_gate = 32;
-
+        {
+            // Sequentially allocating interrupt gates, starting after the ISA exceptions
+            memset(interrupt_descriptor_table.data, 0, size_of(type_of(interrupt_descriptor_table)));
+            next_free_interrupt_gate = 32;
+        }
 
         rsdp := cast(*Acpi_Rsdp) boot_data.acpi_rsdp;
         acpi_version = rsdp.revision;
@@ -310,11 +312,64 @@ kernel_entry :: () #no_context {
             }
         }
 
-        user_mode_stress_test();
+        // user_mode_stress_test();
+        semaphore_test();
+        network_test();
 
         while true {
             schedule_tasks();
             #asm { sti; hlt; }
+        }
+    }
+}
+
+semaphore_test :: () {
+
+    User_Data :: struct {
+        sem: Semaphore;
+        holders: int;
+    }
+
+    user_data := New(User_Data);
+    user_data.sem.counter = 2;
+
+    proc :: () {
+        task := get_current_task();
+        data := cast(*User_Data) task.user_data;
+
+        while true {
+            us := cast(s64)rdtsc() % 1_000_000;
+            busy_wait(us);
+
+            log("[%] Trying to take the semaphore.", task.name);
+
+            us = cast(s64)rdtsc() % 200_000;
+            if wait_for(*data.sem, microseconds_to_apollo(us)) {
+                data.holders += 1;
+                log("[%] Got the semaphore. Holders: %", task.name, data.holders);
+
+                us := cast(s64)rdtsc() % 500_000;
+                busy_wait(us);
+
+                data.holders -= 1;
+                signal(*data.sem);
+            } else {
+                log("[%] Timed out after %ms", task.name, us / 1000);
+            }
+        }
+    }
+
+    thread_index := 1;
+
+    #asm { sti; }
+
+    for *core: global.processor_cores {
+        for 1..2 {
+            name := tprint("Sem test %:%", core.id, thread_index);
+            task := create_task(proc, kernel_stack_size = 0x4_0000, name = name, user_data = user_data);
+            put_task_on_core(task, core);
+
+            thread_index += 1;
         }
     }
 }
@@ -350,6 +405,8 @@ network_test :: () {
 
     log("Waiting for DHCP handshake.");
     Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
+
+    log("Got IP.");
 
     ip_address := bit_cast(u8.[192, 168, 1, 65], u32);
 
@@ -600,14 +657,24 @@ bluescreen :: (loc := #caller_location) #no_context {
 
     write_string("\nBluescreen!\n");
 
-    core := get_current_core();
-    task := core.scheduler.current_task;
+    stack_trace: *Stack_Trace_Node;
 
-    stack_trace_is_available := task && task._context && task._context.stack_trace;
+    if global.multiprocessing_initialized {
+        task := get_current_task();
+        stack_trace_is_available := task && task._context && task._context.stack_trace;
 
-    if stack_trace_is_available && false {
+        if stack_trace_is_available {
+            stack_trace = task._context.stack_trace;
+        }
+    }
+
+    else if global.first_context {
+        stack_trace = global.first_context.stack_trace;
+    }
+
+    if stack_trace && false {
         push_context {
-            print_stack_trace(task._context.stack_trace);
+            print_stack_trace(global.first_context.stack_trace);
         }
     } else {
         write_string("Source code location:\n");
@@ -621,6 +688,7 @@ bluescreen :: (loc := #caller_location) #no_context {
         // keep running.
 
         lock := *global.text_output_spinlock;
+        core := get_current_core();
 
         if is_held(lock.lock) && lock.held_by_core == core.id {
             lock.recursion_count = 0;
@@ -1692,7 +1760,6 @@ log_category :: (category: string) #expand {
 
 font_file :: #run,host -> [] u8 {
     image := read_entire_file("font.pgm");
-    // Beware memory does not currently actually get marked as read-only if it's in the read-only section.
     return add_global_data(cast([] u8) image, .READ_ONLY);
 }
 

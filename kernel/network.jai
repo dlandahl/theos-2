@@ -824,12 +824,10 @@ Tls_Version :: enum u16 {
 Tls_Random :: struct {
     random: [4] u64; @DontByteswap
 
-#place random;
+#overlay(random)
     bytes:  [32] u8; @DontByteswap
 
-    // Todo: once we update the compiler we can change this to #overlay, and skip overlays in byte_swap_protocol_header.
-    // #place random;
-    //     unix_time: u32;
+    // Some implementations/RFCs put a unix timestamp in the low bits of random, but apparently this is not being recommended anymore.
 }
 
 Tls_Alert :: struct {

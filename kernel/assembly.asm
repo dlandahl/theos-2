@@ -39,7 +39,6 @@ section .text
     pop rax
 %endmacro
 
-
 global context_switch
 
 ; *current_task is in rdi

@@ -71,8 +71,7 @@ pci_devices: [..] Pci_Device;
 Pci_Device :: struct {
     using configuration_space: *Pci_Configuration_Space;
 
-#place configuration_space;
-    registers: *u32;
+    #overlay(configuration_space) registers: *u32;
 
     bus_address: Pci_Bus_Address;
 
@@ -126,14 +125,20 @@ Pci_Configuration_Space :: struct {
     header_type:     u8;
     bist:            u8;
 
-    // Todo: probably just put BARs here to simplify the BAR reading code.
+    // Todo: probably put BARs here to simplify the BAR reading code.
 
-#place start; _: [0x34] u8;
-    capability_pointer: u32;
+    space_for_overlays: [0x100] u8;
 
-#place start; _: [0x3c] u8;
-    interrupt_line: u8;
-    interrupt_pin:  u8;
+    #overlay(start) using _: struct {
+        _: [0x34] u8;
+        capability_pointer: u32;
+    }
+
+    #overlay(start) using _: struct {
+        _: [0x3c] u8;
+        interrupt_line: u8;
+        interrupt_pin:  u8;
+    }
 }
 
 Pci_Capability :: struct {
@@ -400,73 +405,103 @@ I8254x_Registers :: struct {
     CTRL__device_control: I8254x_CTRL__Device_Control;
     STATUS__device_status: u32 #align 8;
 
-#place start; _: [0x28] u8;
-    FCAL__flow_control_address_low: u32;
-    FCAH__flow_control_address_high: u32;
-    FCT__flow_control_type:  u32;
+    // Create enough room for overlay.
+    _: [0x6000] u8;
 
-#place start; _: [0xc0] u8;
-    ICR__interrupt_cause_read: u32;
-    ITR: u32;
-    ICS: u32;
-    IMS__interrupt_mask_set: u32 #align 8;
-    IMC__interrupt_mask_clear: u32 #align 8;
+    // This code was prettier with #place.
+    #overlay(start) using _: struct {
+        _: [0x28] u8;
 
-#place start; _: [0x100] u8;
-    RCTL__receive_control: I8254x_RCTL__Receive_Control;
+        FCAL__flow_control_address_low: u32;
+        FCAH__flow_control_address_high: u32;
+        FCT__flow_control_type:  u32;
+    }
 
-#place start; _: [0x400] u8;
-    TCTL__transmit_control: I8254x_TCTL__Transmit_Control;
+    #overlay(start) using _: struct {
+        _: [0xc0] u8;
 
-    // Inter-packet-gap configuration
-    TIPG__transmit_ipg: enum u32 {
-        IPGT__ipg_transmit_time   :: 10;
-        IPGR1__ipg_receive_time_1 :: 10;
-        IPGR2__ipg_receive_time_2 :: 10;
-        __reserved                :: 2;
-    } #align 16;
+        ICR__interrupt_cause_read: u32;
+        ITR: u32;
+        ICS: u32;
+        IMS__interrupt_mask_set: u32 #align 8;
+        IMC__interrupt_mask_clear: u32 #align 8;
+    }
 
-#place start; _: [0x2800] u8;
-    RDBAL__receive_descriptor_base_low: u32;
-    RDBAH__receive_descriptor_base_high: u32;
+    #overlay(start) using _: struct {
+        _: [0x100] u8;
+        RCTL__receive_control: I8254x_RCTL__Receive_Control;
+    }
 
-    RDLEN__receive_descriptor_length: u32;
-    RDH__receive_descriptor_head: u32 #align 8;
-    RDT__receive_descriptor_tail: u32 #align 8;
+    #overlay(start) using _: struct {
+        _: [0x400] u8;
+        TCTL__transmit_control: I8254x_TCTL__Transmit_Control;
 
-    RDTR__receive_delay_timer_register: enum_flags {
-        FPD__flush_partial_descriptor_block :: 0x8000_0000;
-    } #align 8;
+        // Inter-packet-gap configuration
+        TIPG__transmit_ipg: enum u32 {
+            IPGT__ipg_transmit_time   :: 10;
+            IPGR1__ipg_receive_time_1 :: 10;
+            IPGR2__ipg_receive_time_2 :: 10;
+            __reserved                :: 2;
+        } #align 16;
+    }
 
-#place start; _: [0x3800] u8;
-    TDBAL__transmit_descriptor_base_low: u32;
-    TDBAH__transmit_descriptor_base_high: u32;
+    #overlay(start) using _: struct {
+        _: [0x2800] u8;
+        RDBAL__receive_descriptor_base_low: u32;
+        RDBAH__receive_descriptor_base_high: u32;
 
-    TDLEN__transmit_descriptor_length: u32;
-    TDH__transmit_descriptor_head: u32 #align 8;
-    TDT__transmit_descriptor_tail: u32 #align 8;
-#place start; _: [0x3828] u8;
-    TXDCTL__transmit_descriptor_control: I8254x_TXDCTL__Transmit_Descriptor_Control;
+        RDLEN__receive_descriptor_length: u32;
+        RDH__receive_descriptor_head: u32 #align 8;
+        RDT__receive_descriptor_tail: u32 #align 8;
 
-#place start; _: [0x4000] u8;
-    CRCERRS__crc_error_count: u32;
-    ALGNERRC__alignment_error_count: u32;
-#place start; _: [0x40c0] u8;
-    TORL__total_octets_received_low: u32;
-    TORH__total_octets_received_high: u32;
-    TOTL__total_octets_transmitted_low: u32;
-    TOTH__total_octets_transmitted_high: u32;
-    TPR__total_packets_received: u32;
+        RDTR__receive_delay_timer_register: enum_flags {
+            FPD__flush_partial_descriptor_block :: 0x8000_0000;
+        } #align 8;
+    }
 
-#place start; _: [0x40d4] u8;
-    TPT__total_packets_transmitted: u32;
-    PTC64__packets_transmitted_64_count: u32;
+    #overlay(start) using _: struct {
+        _: [0x3800] u8;
+        TDBAL__transmit_descriptor_base_low: u32;
+        TDBAH__transmit_descriptor_base_high: u32;
 
-#place start; _: [0x5200] u8;
-    MTA__multicast_table_array: [128] u32;
+        TDLEN__transmit_descriptor_length: u32;
+        TDH__transmit_descriptor_head: u32 #align 8;
+        TDT__transmit_descriptor_tail: u32 #align 8;
+    }
 
-    RAL__receive_address_low: u32;
-    RAH__receive_address_high: u32;
+    #overlay(start) using _: struct {
+        _: [0x3828] u8;
+        TXDCTL__transmit_descriptor_control: I8254x_TXDCTL__Transmit_Descriptor_Control;
+    }
+
+    #overlay(start) using _: struct {
+        _: [0x4000] u8;
+        CRCERRS__crc_error_count: u32;
+        ALGNERRC__alignment_error_count: u32;
+    }
+
+    #overlay(start) using _: struct {
+        _: [0x40c0] u8;
+        TORL__total_octets_received_low: u32;
+        TORH__total_octets_received_high: u32;
+        TOTL__total_octets_transmitted_low: u32;
+        TOTH__total_octets_transmitted_high: u32;
+        TPR__total_packets_received: u32;
+    }
+
+    #overlay(start) using _: struct {
+        _: [0x40d4] u8;
+        TPT__total_packets_transmitted: u32;
+        PTC64__packets_transmitted_64_count: u32;
+    }
+
+    #overlay(start) using _: struct {
+        _: [0x5200] u8;
+        MTA__multicast_table_array: [128] u32;
+
+        RAL__receive_address_low: u32;
+        RAH__receive_address_high: u32;
+    }
 }
 
 I8254x_CTRL__Device_Control :: enum_flags u32 {
@@ -847,7 +882,7 @@ Nvme_Controller :: struct {
 }
 
 Nvme_Property_Memory_Map :: struct {
-    start_marker: void;
+    start: void;
 
     CAP__capabilities:            Nvme_Controller_Capabilities;
     VS__version:                  Nvme_Specification_Version_Descriptor;
@@ -861,13 +896,16 @@ Nvme_Property_Memory_Map :: struct {
     ASQ__admin_sq:  u64;
     ACQ__admin_cq:  u64;
 
-    // Would be nice to be able to give a constant to #place
-#place start_marker;
-    offset_for_transport_specific_properties: [0x1000] u8;
-    doorbell_base: void;
+    space_for_overlay: [0x2000] u8;
 
-    SQ0TDBL__submission_queue_0_tail_doorbell: u32;
-    CQ0HDBL__completion_queue_0_head_doorbell: u32;
+    // Would be nice to be able to give a constant to #place
+    #overlay(start) using _: struct {
+        offset_for_transport_specific_properties: [0x1000] u8;
+        doorbell_base: void;
+
+        SQ0TDBL__submission_queue_0_tail_doorbell: u32;
+        CQ0HDBL__completion_queue_0_head_doorbell: u32;
+    }
 }
 
 Nvme_Controller_Capabilities :: enum u64 {
@@ -1756,29 +1794,37 @@ Intel_HDA_Memory_Region :: struct {
     OUTSTRMPAY: u16 #align 8;
     INSTRMPAY:  u16;
 
-#place start; _: [0x40] u8;
-    CORBLBASE__corb_lower_base: u32;
-    CORBUBASE__corb_upper_base: u32;
+    overlay_space: [0x100] u8;
 
-    CORBWP__corb_write_pointer: u16;
-    CORBRP__corb_read_pointer: u16;
-    CORBCTL__corb_control: enum_flags u8 {
-        CMEIE   :: 1;
-        CORBRUN :: 2;
-    };
+    #overlay(start) using _: struct {
+        _: [0x40] u8;
 
-    CORBSTS__corb_status: u8;
-    CORBSIZE__corb_size: HDA_RB_Size;
+        CORBLBASE__corb_lower_base: u32;
+        CORBUBASE__corb_upper_base: u32;
 
-#place start; _: [0x50] u8;
-    RIRBBLBASE__rirb_lower_base: u32;
-    RIRBBUBASE__rirb_upper_base: u32;
+        CORBWP__corb_write_pointer: u16;
+        CORBRP__corb_read_pointer: u16;
+        CORBCTL__corb_control: enum_flags u8 {
+            CMEIE   :: 1;
+            CORBRUN :: 2;
+        };
 
-    RIRBWP__rirb_write_pointer: u16;
-    RINTCNT__interrupt_count: u16;
-    RIRBCTL__rirb_control: u8;
-    RIRBSTS__rirb_status: u8;
-    RIRBSIZE__rirb_size: HDA_RB_Size;
+        CORBSTS__corb_status: u8;
+        CORBSIZE__corb_size: HDA_RB_Size;
+    }
+
+    #overlay(start) using _: struct {
+        _: [0x50] u8;
+
+        RIRBBLBASE__rirb_lower_base: u32;
+        RIRBBUBASE__rirb_upper_base: u32;
+
+        RIRBWP__rirb_write_pointer: u16;
+        RINTCNT__interrupt_count: u16;
+        RIRBCTL__rirb_control: u8;
+        RIRBSTS__rirb_status: u8;
+        RIRBSIZE__rirb_size: HDA_RB_Size;
+    }
 }
 
 HDA_RB_Size :: enum u8 {

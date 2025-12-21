@@ -563,8 +563,10 @@ Uacpi_State :: struct {
             wait_for(*work_added);
 
             acquire(*work_queue_lock);
+
             item := queue_pop(*work_queue);
             work_in_progress = true;
+
             release(*work_queue_lock);
 
             log("Beginning work item.\n");
@@ -572,10 +574,12 @@ Uacpi_State :: struct {
             log("Work item completed.\n");
 
             acquire(*work_queue_lock);
+
             work_in_progress = false;
             if queue_is_empty(work_queue) {
                 notify_all(*work_completed);
             }
+
             release(*work_queue_lock);
         }
     }

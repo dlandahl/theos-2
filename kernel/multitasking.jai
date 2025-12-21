@@ -148,7 +148,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "", user_data: *void = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "", user_data: *void = null) -> *Task_Info {
 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
@@ -250,7 +250,7 @@ new_task_start :: () #no_context {
     push_context {
         core := get_current_core();
 
-        release(*core.scheduler.spinlock, 0);
+        release(*core.scheduler.spinlock);
 
         task := get_current_task();
         task._context = *context;
@@ -297,30 +297,31 @@ sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds
 }
 
 sleep :: (time: Apollo_Time) {
-    until := ifx time == INFINITE_TIMEOUT then INFINITE_TIMEOUT else get_monotonic_time() + time;
-
-    set_task_sleep_state(until);
+    prepare_task_sleep(time);
     yield_execution();
 }
 
 sleep_until :: (time: Apollo_Time) {
-    set_task_sleep_state(time);
+    prepare_task_sleep_until(time);
     yield_execution();
 }
 
-set_task_sleep_state :: (until: Apollo_Time) {
+// This is separate from prepare-and-yield above, because often you need to put the task to sleep under a lock, but not hold the lock while sleeping, to prevent lost wakeups.
+prepare_task_sleep :: (time: Apollo_Time) {
+    until := ifx time == INFINITE_TIMEOUT then INFINITE_TIMEOUT else get_monotonic_time() + time;
+    prepare_task_sleep_until(until);
+}
 
-    // This is separate from sleep-and-yield above, because often you need to put the task to sleep under a lock, but not hold the lock while sleeping, to prevent lost wakeups.
-    // Todo: Since this will be called while holding other locks, it may be necessary for this to work without taking the scheduler lock.
+prepare_task_sleep_until :: (time: Apollo_Time) {
     task, scheduler := lock_scheduler_for_current_task();
 
     task.sleeping = true;
-    task.sleep_until = until;
+    task.sleep_until = time;
 
     inserted: bool;
 
     for* scheduler.sleeping {
-        if it.sleep_until < until continue;
+        if it.sleep_until < time continue;
         queue_insert(*scheduler.sleeping, it_prev, task);
         inserted = true;
         break;
@@ -459,7 +460,7 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
     while true {
         // Prevent lost-wakeup by setting the task to sleep while still holding the lock.
-        set_task_sleep_state(remaining_timeout);
+        prepare_task_sleep(remaining_timeout);
 
         release(*spinlock);
 
