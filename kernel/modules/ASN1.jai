@@ -28,18 +28,6 @@ Asn1_Parser :: struct {
     error: bool;
 }
 
-begin_construction :: (parser: *Asn1_Parser, tag := Asn1_Tag.SEQUENCE) {
-    container := read_value(parser, tag);
-
-    const := array_add(*parser.construction_stack);
-
-    const.data = container;
-}
-
-end_construction :: (parser: *Asn1_Parser) {
-    pop(*parser.construction_stack);
-}
-
 get_current_construction :: (parser: Asn1_Parser) -> *Asn1_Parser.Construction {
     if parser.construction_stack {
         return *parser.construction_stack[parser.construction_stack.count-1];
@@ -141,6 +129,32 @@ read_bit_string :: (parser: *Asn1_Parser, bytes: *[]u8, unused_bits: *u8) -> boo
 
 
 
+asn1_construction :: (parser: *Asn1_Parser, tag: Asn1_Tag, call := #caller_code) #expand {
+    container := read_value(parser, tag);
+
+    const := array_add(*parser.construction_stack);
+    const.data = container;
+
+    #insert,scope(call) #code {
+        `it := null;
+        `it_index := 0;
+    };
+
+    `defer pop(*parser.construction_stack);
+}
+
+asn1_sequence :: (parser: *Asn1_Parser, body: Code, flags: For_Flags) #expand {
+    asn1_construction(parser, .SEQUENCE);
+    #insert body;
+}
+
+asn1_context :: (parser: *Asn1_Parser, body: Code, flags: For_Flags) #expand {
+    asn1_construction(parser, .CONTEXT_0);
+    #insert body;
+}
+
+
+
 X509_Certificate :: struct {
     version: int;
     serial_number: []u8;
@@ -166,71 +180,56 @@ X509_Certificate :: struct {
 
 parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
     parser := Asn1_Parser.{data=certificate};
-    parsed: X509_Certificate;
+    cert: X509_Certificate;
 
-    begin_construction(*parser);
+    for :asn1_sequence parser {
+        for :asn1_sequence parser {
+            cert.version = 1;
 
-    {
-        begin_construction(*parser);
+            for :asn1_context parser {
+                version_value := read_value(*parser, .INTEGER);
+                cert.version = version_value[version_value.count - 1].(int) + 1;
+            }
 
-        parsed.version = 1;
-        if peek_tag(parser) == Asn1_Tag.CONTEXT_0 {
-            begin_construction(*parser, .CONTEXT_0);
-            version_value := read_value(*parser, .INTEGER);
-            parsed.version = version_value[version_value.count - 1].(int) + 1;
-            end_construction(*parser);
+            cert.serial_number = read_value(*parser, .INTEGER);
+
+            for :asn1_sequence parser {
+                cert.tbs_signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+            }
+
+            cert.issuer = read_value(*parser, .SEQUENCE);
+
+            for :asn1_sequence parser {
+                tag := peek_tag(parser);
+                // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
+                cert.not_valid_before = cast(string) read_value(*parser, tag);
+
+                tag = peek_tag(parser);
+                // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
+                cert.not_valid_after = cast(string) read_value(*parser, tag);
+            }
+
+            cert.subject = read_value(*parser, .SEQUENCE);
+
+            for :asn1_sequence parser {
+                for :asn1_sequence parser {
+                    cert.subject_public_key_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+                }
+
+                read_bit_string(*parser, *cert.subject_public_key, *cert.subject_public_key_unused_bits);
+            }
         }
 
-        parsed.serial_number = read_value(*parser, .INTEGER);
+        // Todo: additional optional IDs and extensions.
 
-        begin_construction(*parser);
-        parsed.tbs_signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
-        end_construction(*parser);
-
-        parsed.issuer = read_value(*parser, .SEQUENCE);
-
-        {
-            begin_construction(*parser);
-
-            tag := peek_tag(parser);
-            // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
-            parsed.not_valid_before = cast(string) read_value(*parser, tag);
-
-            tag = peek_tag(parser);
-            // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
-            parsed.not_valid_after = cast(string) read_value(*parser, tag);
-
-            end_construction(*parser);
+        for :asn1_sequence parser {
+            cert.signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
         }
 
-        parsed.subject = read_value(*parser, .SEQUENCE);
-
-        {
-            begin_construction(*parser);
-
-            begin_construction(*parser);
-            parsed.subject_public_key_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
-            end_construction(*parser);
-
-            read_bit_string(*parser, *parsed.subject_public_key, *parsed.subject_public_key_unused_bits);
-
-            end_construction(*parser);
-        }
-
-        end_construction(*parser);
+        read_bit_string(*parser, *cert.signature_value, *cert.signature_unused_bits);
     }
 
-    // Todo: additional optional IDs and extensions.
-
-    begin_construction(*parser);
-    parsed.signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
-    end_construction(*parser);
-
-    read_bit_string(*parser, *parsed.signature_value, *parsed.signature_unused_bits);
-
-    end_construction(*parser);
-
-    return !parser.error, parsed;
+    return !parser.error, cert;
 }
 
 
@@ -253,7 +252,7 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
     if cl.count == 2 && contains(cl[1], "ASN_1.jai") {
         set_build_options_dc(.{do_output = false});
 
-        result, cert := parse_x509_certificate(test_certificate);
+        result, cert := parse_x509_certificate(test_cert);
         assert(result);
 
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
@@ -262,7 +261,7 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
     }
 }
 
-test_certificate :: u8.[
+test_cert :: u8.[
     0x30, 0x82, 0x03, 0x21, 0x30, 0x82, 0x02, 0x09, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x08, 0x15,
     0x5a, 0x92, 0xad, 0xc2, 0x04, 0x8f, 0x90, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
     0x0d, 0x01, 0x01, 0x0b, 0x05, 0x00, 0x30, 0x22, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04,

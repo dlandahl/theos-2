@@ -1059,7 +1059,6 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
             certificate := receive(certificate_length);
 
             success, cert := parse_x509_certificate(certificate);
-            // log("Got security certificate: %", cert);
 
             assert(success);
 
@@ -1252,7 +1251,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         success, plaintext := tls_decrypt_message(*tls, text, .HANDSHAKE);
         assert(success);
 
-        log("Received encrypted record: %", (.*) cast(*Tls_Record_Header)plaintext.data);
+        log("Received encrypted record: %", (.*) cast(*Tls_Record_Header) plaintext.data);
 
         tls.server_sequence_number += 1;
 
@@ -1264,12 +1263,12 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
         request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
 
-        ciphertext := tls_encrypt_message(*tls, cast([]u8)request, .APPLICATION_DATA);
+        ciphertext := tls_encrypt_message(*tls, cast([]u8) request, .APPLICATION_DATA);
 
         record: Tls_Record_Header;
         record.content_type = .APPLICATION_DATA;
         record.version = .TLS_1_2;
-        record.length = cast(u16)ciphertext.count;
+        record.length = cast(u16) ciphertext.count;
 
         send(record);
         send(ciphertext);
@@ -1285,7 +1284,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         success, plaintext := tls_decrypt_message(*tls, ciphertext, record.content_type);
         assert(success);
 
-        log("Received application data: %", cast(string)plaintext);
+        log("Received application data: %", cast(string) plaintext);
 
         tls.server_sequence_number += 1;
     }
@@ -1326,7 +1325,7 @@ tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
         aad[8] = cast(u8) content_type;
         aad[9] = 0x03; aad[10] = 0x03;
 
-        text_size := byte_swap(cast(u16)text.count);
+        text_size := byte_swap(cast(u16) text.count);
         memcpy(aad.data + 11, *text_size, 2);
     }
 
@@ -1358,7 +1357,7 @@ tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
         aad[8] = cast(u8) content_type;
         aad[9] = 0x03; aad[10] = 0x03;
 
-        text_size := byte_swap(cast(u16)text.count - 8 - size_of(i128));
+        text_size := byte_swap(cast(u16) text.count - 8 - size_of(i128));
         memcpy(aad.data + 11, *text_size, 2);
     }
 
@@ -1627,12 +1626,12 @@ add_option :: (options: *Dhcp_Options_Builder, code: Dhcp_Option_Code, data: Any
 
 get_size :: (options: Dhcp_Options_Builder) -> u16 {
     // +1 because we add the terminator when we commit.
-    return cast(u16)options.buffer.count + 1;
+    return cast(u16) options.buffer.count + 1;
 }
 
 commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Options_Builder) {
     array_add(*options.buffer, 0xff);
-    add_to_packet(packet, cast(string)options.buffer);
+    add_to_packet(packet, cast(string) options.buffer);
 }
 
 

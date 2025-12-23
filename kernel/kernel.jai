@@ -16,7 +16,7 @@ set_bit :: bitfield_set_bit;
 get_bit :: bitfield_get_bit;
 
 #import "Ring_Buffer";
-#import "ASN_1";
+#import "ASN1";
 #import "Aes";
 #import "Jai_Crypto";
 
@@ -30,6 +30,7 @@ Curve25519 :: #import "Curve25519";
 #load "pci_express.jai";
 #load "multitasking.jai";
 #load "time.jai";
+#load "file_system.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";
@@ -313,7 +314,7 @@ kernel_entry :: () #no_context {
         }
 
         // user_mode_stress_test();
-        semaphore_test();
+        // semaphore_test();
         network_test();
 
         while true {
@@ -406,9 +407,7 @@ network_test :: () {
     log("Waiting for DHCP handshake.");
     Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
-    log("Got IP.");
-
-    ip_address := bit_cast(u8.[192, 168, 1, 65], u32);
+    ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
 
     #if USE_DNS {
         log("Sending DNS Query");
