@@ -424,15 +424,36 @@ network_test :: () {
 
     connection := initiate_tcp_connection(net, ip_address, 4443);
 
-    Timeout(connection.handshake_state == .COMPLETED, 60_000);
+    Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
 
     tls := establish_tls_connection(connection);
 
-    if false {
-        request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-        transmit_tcp_packet(connection, .ACK | .PSH, request);
+    request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
+    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+    tls_transmit_application_data(*tls, request);
+
+    // Todo: TLS Close Notify.
+
+    for 1..2 {
+        response := tls_receive_application_data(*tls);
+        log("Got HTTPS response: %", response);
     }
+
+    tcp_close(connection);
 }
+
+HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
+
+HTTP_MESSAGE :: #string,cr END
+POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
+Host: discord.com
+Authorization: %3
+Accept: application/json
+Content-Type: application/json
+Content-Length: %1
+
+%2
+END;
 
 
 

@@ -6,11 +6,11 @@
 BLOCK_SIZE :: 0x1000;
 
 BTree_Node :: struct {
-    // Todo: Forward compatibility.
-
+    // For now all B+ Trees support variable sized keys and values. We can optimize later once we know what they're used for.
     entries: u32;
+
     toc_length: u16; // Includes unused TOC space.
-    padding: u16;
+    toc_offset: u16;
 
     free_space_length: u16;
     free_space_offset: u16; // Measured from the beginning of the key area.
@@ -28,7 +28,7 @@ BTree_Free_List :: struct {
 BTree_Value :: #type,distinct BTree_Key;
 BTree_Key :: struct {
     data: *void;
-    size: u16;
+    length: u16;
 }
 Key_Compare_Func :: #type (a: BTree_Key, b: BTree_Key) -> int;
 
@@ -54,7 +54,7 @@ BTree_Node_Expanded :: struct {
 expand_btree_node :: (node: *BTree_Node, compare: Key_Compare_Func) -> BTree_Node_Expanded {
     ex: BTree_Node_Expanded;
     ex.node = node;
-    ex.toc_base = (node+1);
+    ex.toc_base = cast(*void)(node+1) + node.toc_offset;
     ex.key_base = ex.toc_base + node.toc_length;
     ex.val_base = cast(*void) node + BLOCK_SIZE;
     ex.compare_keys = compare;
@@ -70,7 +70,7 @@ btree_lookup_entry :: (node: BTree_Node_Expanded, key: BTree_Key) -> BTree_Value
 
     val: BTree_Value;
     val.data = node.val_base - toc.val_offset;
-    val.size = toc.val_length;
+    val.length = toc.val_length;
 
     return val;
 }
@@ -85,9 +85,9 @@ btree_remove_entry :: no_inline (node: *BTree_Node_Expanded, key: BTree_Key) {
 
         key_stored: BTree_Key;
         key_stored.data = node.key_base + toc.key_offset;
-        key_stored.size = toc.key_length;
+        key_stored.length = toc.key_length;
 
-        assert(key_stored.size == key.size);
+        assert(key_stored.length == key.length);
         assert(node.compare_keys(key, key_stored) == 0);
 
         old_free_list := node.key_free_list;
@@ -127,6 +127,8 @@ btree_remove_entry :: no_inline (node: *BTree_Node_Expanded, key: BTree_Key) {
 }
 
 btree_add_entry :: (node: *BTree_Node_Expanded, key: BTree_Key, value: BTree_Value) {
+    assert(key.length   % 8 == 0);
+    assert(value.length % 8 == 0);
 
     toc: *TOC_Entry;
 
@@ -141,54 +143,52 @@ btree_add_entry :: (node: *BTree_Node_Expanded, key: BTree_Key, value: BTree_Val
 
         memcpy(toc + 1, toc, cast(s64) to_copy);
 
-        toc.key_length = key.size;
-        toc.val_length = value.size;
+        toc.key_length = key.length;
+        toc.val_length = value.length;
     }
 
     {
         // Find a space for the key.
-        found, offset := occupy_free_list_slot(*node.key_free_list, node.key_base, key.size, false);
+        found, offset := occupy_free_list_slot(*node.key_free_list, node.key_base, key.length, false);
 
         if found {
             target := node.key_base + offset;
-            memcpy(target, key.data, key.size);
+            memcpy(target, key.data, key.length);
 
             toc.key_offset = offset;
-
-            // Todo: Remove/adjust free list entry.
         } else {
-            assert(node.free_space_length >= key.size); // Todo: Split node.
+            assert(node.free_space_length >= key.length); // Todo: Split node.
 
             target := node.key_base + node.free_space_offset;
             toc.key_offset = node.free_space_offset;
 
-            memcpy(target, key.data, key.size);
+            memcpy(target, key.data, key.length);
 
-            node.free_space_length -= key.size;
-            node.free_space_offset += key.size;
+            node.free_space_length -= key.length;
+            node.free_space_offset += key.length;
         }
     }
 
     {
         // Find a space for the value.
-        found, offset := occupy_free_list_slot(*node.val_free_list, node.val_base, value.size, true);
+        found, offset := occupy_free_list_slot(*node.val_free_list, node.val_base, value.length, true);
 
         if found {
             target := node.val_base - offset;
-            memcpy(target, value.data, value.size);
+            memcpy(target, value.data, value.length);
 
             toc.val_offset = offset;
         } else {
-            assert(node.free_space_length >= value.size);
+            assert(node.free_space_length >= value.length);
 
-            target := node.toc_base + node.toc_length + node.free_space_offset + node.free_space_length - value.size;
-            offset := cast(u64) target - cast(u64) node.node;
+            target := node.key_base + node.free_space_offset + node.free_space_length - value.length;
+            offset := node.val_base - target;
 
-            toc.val_offset = cast(u16) (BLOCK_SIZE - offset);
+            toc.val_offset = cast(u16) offset;
 
-            memcpy(target, value.data, value.size);
+            memcpy(target, value.data, value.length);
 
-            node.free_space_length -= value.size;
+            node.free_space_length -= value.length;
         }
     }
 
@@ -207,7 +207,7 @@ btree_find_toc_entry :: (node: BTree_Node_Expanded, key: BTree_Key) -> *TOC_Entr
 
         other_key: BTree_Key;
         other_key.data = node.key_base + toc.key_offset;
-        other_key.size = toc.key_length;
+        other_key.length = toc.key_length;
 
         c := node.compare_keys(key, other_key);
 
@@ -224,13 +224,22 @@ btree_find_toc_entry :: (node: BTree_Node_Expanded, key: BTree_Key) -> *TOC_Entr
 
 occupy_free_list_slot :: (free_list: *BTree_Free_List, base: *void, size: int, negative: bool) -> bool, u16 {
 
+    if free_list.length < size {
+        return false, 0;
+    }
+
     curr := free_list;
+    last: *BTree_Free_List;
 
     while curr.offset != 0xffff {
 
-        // We do this at the beginning of the loop, to skip the special first entry in the node header.
-        last := curr;
-        curr = cast(*BTree_Free_List) ifx negative base - curr.offset else base + curr.offset;
+        {
+            // Go to next entry. We do this at the beginning of the loop, to skip the special first entry in the node header.
+            last = curr;
+
+            if negative  curr = base - curr.offset;
+            else         curr = base + curr.offset;
+        }
 
         if curr.length >= size {
             found_offset := last.offset;
@@ -241,6 +250,7 @@ occupy_free_list_slot :: (free_list: *BTree_Free_List, base: *void, size: int, n
             } else {
                 // Don't use up the whole space, leave a smaller freelist slot.
                 // Todo: Defragment this when running out of space in the node, but when there is enough total space in the freelist.
+
                 last.offset += cast(u16) size;
                 curr.length -= cast(u16) size;
             }
@@ -281,6 +291,7 @@ btree_test :: () {
     node := cast(*BTree_Node) alloc(BLOCK_SIZE);
     node.entries = 0;
     node.toc_length = size_of(TOC_Entry) * 24;
+    node.toc_offset = 0;
     node.free_space_length = BLOCK_SIZE - (size_of(BTree_Node) + node.toc_length);
     node.key_free_list.offset = 0xffff;
     node.val_free_list.offset = 0xffff;

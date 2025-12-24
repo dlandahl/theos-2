@@ -29,8 +29,7 @@ read_ring_buffer :: (using ring: *Ring_Buffer, output: *u8, bytes_wanted: int) -
     return to_read;
 }
 
-write_ring_buffer :: (using ring: *Ring_Buffer, _data: $T/.[[]u8, string]) -> bytes_written: int {
-    data := _data;
+write_ring_buffer :: (using ring: *Ring_Buffer, data: $T/.[[]u8, string]) -> bytes_written: int {
     rc := read_cursor;
 
     used := ifx write_cursor >= rc
@@ -52,6 +51,19 @@ write_ring_buffer :: (using ring: *Ring_Buffer, _data: $T/.[[]u8, string]) -> by
     write_cursor = (write_cursor + to_write) % buffer.count;
 
     return to_write;
+}
+
+ring_buffer_size :: (using ring: Ring_Buffer) -> int {
+    // Use a constant snapshot of both cursors when doing the calculation, to make this valid for both producer and consumer.
+
+    rc := read_cursor;
+    wc := write_cursor;
+
+    used := ifx wc >= rc
+        then wc - rc
+        else buffer.count - (rc - wc);
+
+    return used;
 }
 
 #scope_module

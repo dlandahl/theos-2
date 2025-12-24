@@ -8,3 +8,13 @@
 virtualbox_vm/new_os/Logs/
 
 logs/
+
+cert.pem
+
+client.py
+
+key.pem
+
+server.py
+
+*.vbox
