@@ -408,6 +408,7 @@ network_test :: () {
     Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
     ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
+    port: u16 = 4443;
 
     #if USE_DNS {
         log("Sending DNS Query");
@@ -418,11 +419,12 @@ network_test :: () {
         }
 
         ip_address = dns_query.answer;
+        port = 443;
     }
 
     transmit_ping(net, ip_address);
 
-    connection := initiate_tcp_connection(net, ip_address, 4443);
+    connection := initiate_tcp_connection(net, ip_address, port);
 
     Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
 
@@ -430,14 +432,15 @@ network_test :: () {
 
     request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
     request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-    tls_transmit_application_data(*tls, request);
 
-    // Todo: TLS Close Notify.
+    tls_transmit_application_data(*tls, request);
 
     for 1..2 {
         response := tls_receive_application_data(*tls);
         log("Got HTTPS response: %", response);
     }
+
+    // Todo: TLS Close Notify.
 
     tcp_close(connection);
 }
@@ -474,7 +477,7 @@ floating_point_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
 
 set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
- 
+
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         acquire(*global.text_output_spinlock);
 

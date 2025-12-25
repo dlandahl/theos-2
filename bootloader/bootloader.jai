@@ -61,8 +61,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             // Find root ACPI table
             table := system_table.ConfigurationTable[it];
 
-            low  := <<  cast(*u64) *table.VendorGuid;
-            high := << (cast(*u64) *table.VendorGuid + 1);
+            low  := (.*)  cast(*u64) *table.VendorGuid;
+            high := (.*) (cast(*u64) *table.VendorGuid + 1);
 
             acpi_table_guid_low  : u64 : 0x11d3e4f18868e871;
             acpi_table_guid_high : u64 : 0x81883cc7800022bc;
@@ -403,7 +403,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
 
             serial_out("Jumping to the kernel...\n");
-            entry_point := << cast(*() #no_context) *(elf_header.e_entry);
+            entry_point := (.*) cast(*() #no_context) *(elf_header.e_entry);
             entry_point();
         }
 
@@ -435,7 +435,7 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
 display :: (args: .. Any) {
     for args {
         if it.type.type == .STRING {
-            display_string(<< cast(*string) it.value_pointer);
+            display_string((.*) cast(*string) it.value_pointer);
         }
 
         if it.type.type == .INTEGER {

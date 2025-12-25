@@ -28,7 +28,7 @@ md5 :: (input: string) -> string {
 
     // write original size (in bits) into last 64 bits
     dst := cast(*u64) (data.data + size - 8);
-    <<dst = cast(u64) (input.count * 8);
+    dst.* = cast(u64) (input.count * 8);
 
     // set up digest parts
     a0 : u32 = 0x67452301;
@@ -59,7 +59,7 @@ md5 :: (input: string) -> string {
             }
 
             // grab the relevant 32 bits from the original input
-            word := << ((cast(*u32)data.data) + chunk*16 + g);
+            word := (.*) ((cast(*u32)data.data) + chunk*16 + g);
 
             // apply this section of data
             F += A + K[it] + word;

@@ -51,17 +51,21 @@ bitfield_set :: inline (bitfield: *$B, flag: $F, value: s64, $loc := #caller_loc
     bitfield.* = temp;
 }
 
-bitfield_get :: inline (bitfield: $B, flag: $F, $loc := #caller_location, $call := #caller_code) -> F.loose #modify {
-    return handle_as(*B, *F);
+bitfield_get :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #caller_location, $call := #caller_code) -> R #modify {
+    result := handle_as(*B, *F);
+
+    tie := cast(*Type_Info_Enum)F;
+    R = get_type(tie.internal_type);
+
+    return result;
 } {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     value := bitfield;
     value &=  cast,no_check(B) bit_mask;
     value >>= cast,no_check(B) bit_offset;
-    return cast(F.loose) value;
+    return cast(R) value;
 }
-
 
 bitfield_set_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
@@ -156,7 +160,7 @@ print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct
 #import "Compiler";
 #import "Basic";
 
-calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: Code) -> int, int {
+calculate_mask_and_offset :: ($bitfield: Type, loc: Source_Code_Location, call: Code) -> int, int {
     ti := cast(*Type_Info_Enum) bitfield;
     validate_bitfield(ti, loc);
 
@@ -167,7 +171,7 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
     expression := procedure_call.arguments_unsorted[1].expression;
 
     // This procedure should have been called with either an identifier, or an unary or binary enum dereference as the second argument.
-    operator_type: Operator_Type.loose;
+    operator_type: Operator_Type;
 
     if expression.kind == {
       case .UNARY_OPERATOR;
@@ -219,7 +223,7 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
 }
 
 #import "Bit_Operations";
-get_single_bit_mask :: (bitfield: Type, loc: Source_Code_Location, call: Code) -> int {
+get_single_bit_mask :: ($bitfield: Type, loc: Source_Code_Location, call: Code) -> int {
     bit := calculate_mask_and_offset(bitfield, loc, call);
 
     count := popcount(bit);

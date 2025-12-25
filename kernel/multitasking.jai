@@ -153,13 +153,20 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    new_task.kernel_stack = alloc(kernel_stack_size) + kernel_stack_size;
+    new_task.kernel_stack = alloc(kernel_stack_size);
+    new_task.kernel_stack += kernel_stack_size;
+    new_task.kernel_stack &= ~0xf;
 
     if user_stack_size != 0 {
-        new_task.user_stack = alloc(user_stack_size) + user_stack_size;
+        new_task.user_stack = alloc(user_stack_size);
+        new_task.user_stack += user_stack_size;
+        new_task.user_stack &= ~0xf;
     }
 
     Context_Switch_Stack :: struct {
+        // This makes it so the stack doesn't become misaligned by the pointer arithmetic below.
+        aligner: void #align 16;
+
         // Represents the stack layout used by the context_switch routine written in assembly.
         registers: General_Registers;
         flags: X64_Flags;
@@ -170,7 +177,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     stack.return_address = cast(*void) new_task_start;
     stack.flags = 0;
 
-    new_task.rsp = cast(*void) stack;
+    new_task.rsp = stack;
     new_task.xsave.mxcsr = mxcsr;
     new_task.entry_point = entry_point;
     new_task.name = name;

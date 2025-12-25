@@ -822,8 +822,6 @@ uacpi_kernel_free :: (mem: *void) #c_call {
 
 #program_export
 uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call {
-    // if log_level < .INFO return;
-
     push_context {
         log_category("uACPI");
 

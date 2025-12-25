@@ -222,7 +222,7 @@ btree_find_toc_entry :: (node: BTree_Node_Expanded, key: BTree_Key) -> *TOC_Entr
     return toc, false;
 }
 
-occupy_free_list_slot :: (free_list: *BTree_Free_List, base: *void, size: int, negative: bool) -> bool, u16 {
+occupy_free_list_slot :: (free_list: *BTree_Free_List, base: *void, size: int, $negative: bool) -> bool, u16 {
 
     if free_list.length < size {
         return false, 0;

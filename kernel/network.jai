@@ -34,12 +34,10 @@ byte_swap_protocol_header :: (header: *$T) #modify {
             }
 
             if it.type.type == {
+              case .ENUM; #through;
               case .INTEGER;
                 print(*builder, "    header.%1 = byte_swap(header.%1);\n", it.name);
-              case .ENUM;
-                // In case of enum, cast it to the underlying integer type and back.
-                print(*builder, "    header.%1 = cast(type_of(header.%1)) byte_swap(cast(type_of(header.%1).loose) header.%1);\n", it.name);
-
+                
               case .ARRAY;
                 tia := cast(*Type_Info_Array)it.type;
 
@@ -315,50 +313,6 @@ FIRST_EPHEMERAL_PORT :: 0xc000;
 
 
 
-tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 {
-    Pseudo_Header :: struct {
-        source_address: u32;
-        destination_address: u32;
-        zeroes: u8;
-        protocol: type_of(Ipv4_Header.protocol);
-        tcp_length: u16;
-
-        tcp: Tcp_Header;
-
-        payload: [0x300] u8;
-    }
-
-    pseudo: Pseudo_Header;
-    pseudo.tcp = tcp;
-    pseudo.source_address = source;
-    pseudo.destination_address = dest;
-    pseudo.protocol = .TCP;
-    pseudo.tcp_length = byte_swap(cast(u16, size_of(Tcp_Header) + payload.count));
-
-    memcpy(pseudo.payload.data, payload.data, payload.count);
-
-    count := payload.count;
-    if count % 2 count += 1;
-
-    return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x300);
-}
-
-init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
-    h: Tcp_Header;
-    h.source_port = tcp.port;
-    h.destination_port = tcp.remote_port;
-    h.sequence_number = tcp.sequence_number;
-    h.ack_number = tcp.ack_number+1;
-    h.data_offset = 5 << 4;
-    h.flags = flags;
-    h.window = 4096 * 4;
-
-    byte_swap_protocol_header(*h);
-    h.checksum = tcp_checksum(h, tcp.net.our_ip, tcp.remote_ip, payload);
-
-    return h;
-}
-
 Tcp_Header :: struct {
     source_port: u16;
     destination_port: u16;
@@ -386,6 +340,50 @@ Tcp_Header :: struct {
     urgent_pointer: u16;
 }
 
+init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
+    h: Tcp_Header;
+    h.source_port = tcp.port;
+    h.destination_port = tcp.remote_port;
+    h.sequence_number = tcp.sequence_number;
+    h.ack_number = tcp.ack_number;
+    h.data_offset = 5 << 4;
+    h.flags = flags;
+    h.window = 4096 * 4;
+
+    byte_swap_protocol_header(*h);
+    h.checksum = tcp_checksum(h, tcp.net.our_ip, tcp.remote_ip, payload);
+
+    return h;
+}
+
+tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 {
+    Pseudo_Header :: struct {
+        source_address: u32;
+        destination_address: u32;
+        zeroes: u8;
+        protocol: type_of(Ipv4_Header.protocol);
+        tcp_length: u16;
+
+        tcp: Tcp_Header;
+
+        payload: [0x300] u8;
+    }
+
+    pseudo: Pseudo_Header;
+    pseudo.tcp = tcp;
+    pseudo.source_address = source;
+    pseudo.destination_address = dest;
+    pseudo.protocol = .TCP;
+    pseudo.tcp_length = byte_swap(cast(u16) (size_of(Tcp_Header) + payload.count));
+
+    memcpy(pseudo.payload.data, payload.data, payload.count);
+
+    count := payload.count;
+    if count % 2 count += 1;
+
+    return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x300);
+}
+
 Tcp_Connection :: struct {
     net: *Network_Connection;
 
@@ -404,11 +402,7 @@ Tcp_Connection :: struct {
         CLOSED;
     }
 
-    // Accumulated each time we transmit new bytes that have not been transmitted before
     sequence_number: u32;
-
-    // The next sequence number we expect to see is always this + 1.
-    // Peer sequence numbers less than this have been acknowledged before.
     ack_number: u32;
 
     in_flight: [..] Tcp_Transmission_Info;
@@ -501,7 +495,8 @@ record_tcp_packet_for_potential_retransmission :: (tcp: *Tcp_Connection, packet:
     info.flags = flags;
 }
 
-transmit_tcp_segment :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "") {
+transmit_tcp_segment :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", loc := #caller_location) {
+
     if tcp.handshake_state == .CLOSED {
         log_error("Trying to transmit TCP packet over a connection that has already been closed.");
         return;
@@ -546,7 +541,7 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     tcp.remote_ip = remote_ip;
     tcp.handshake_state = .NOT_STARTED;
     tcp.sequence_number = sequence_number;
-    tcp.ack_number = 0xffff_ffff;
+    tcp.ack_number = 0;
 
     tcp.in\_stream.buffer = NewArray(0x1_0000, u8);
     tcp.out_stream.buffer = NewArray(0x1_0000, u8);
@@ -558,10 +553,11 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
 }
 
 update_tcp_connection :: (tcp: *Tcp_Connection) {
-    // Todo: FIN and SYN should also be retransmitted if necessary.
+    // Todo: FIN, SYN, ACK should also be retransmitted if necessary.
 
     if tcp.handshake_state == .NOT_STARTED {
         transmit_tcp_segment(tcp, .SYN);
+        tcp.sequence_number += 1;
         tcp.handshake_state = .SYN_SENT;
     }
 
@@ -615,6 +611,7 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
 }
 
 update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
+    // Maybe it would be easier to write this simply and robustly using a switch statement over the current handshake state, and handling the flags in each case statement.
 
     if segment.flags == .SYN | .ACK {
         // In theory SYN-ACK are allowed to be separate segments but it isn't done in practice.
@@ -628,8 +625,7 @@ update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
             return;
         }
 
-        tcp.ack_number = segment.sequence_number;
-        tcp.sequence_number += 1;
+        tcp.ack_number = segment.sequence_number + 1;
 
         transmit_tcp_segment(tcp, .ACK);
 
@@ -646,7 +642,7 @@ update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
           case .ESTABLISHED;
             // Remote-initiated FIN.
             transmit_tcp_segment(tcp, .FIN | .ACK);
-            tcp.handshake_state = .FIN_SENT;
+            tcp.handshake_state = .CLOSED;
 
           case .FIN_SENT;
             // Locally initiated FIN.
@@ -695,12 +691,12 @@ receive_tcp_segment :: (tcp: *Tcp_Connection, segment: *Tcp_Header, bytes: int) 
         return;
     }
 
-    if segment.sequence_number < tcp.ack_number + 1 {
-        // Retransmission that we don't need, ignore.
+    if segment.sequence_number < tcp.ack_number {
+        // Todo.
         return;
     }
 
-    if segment.sequence_number > tcp.ack_number + 1 {
+    if segment.sequence_number > tcp.ack_number {
         // We don't support receiving data out of order yet. ACK to ask the server to retransmit the data we missed.
         log("Received packets out of order.");
         transmit_tcp_segment(tcp, .ACK);
@@ -831,12 +827,12 @@ Tls_Version :: enum u16 {
 }
 
 Tls_Random :: struct {
-    random: [4] u64; @DontByteswap
+    qwords: [4] u64; @DontByteswap
 
-#overlay(random)
+#overlay(qwords)
     bytes:  [32] u8; @DontByteswap
 
-    // Some implementations/RFCs put a unix timestamp in the low bits of random, but apparently this is not being recommended anymore.
+    // Some implementations/RFCs put a unix timestamp in the low bits of random, but apparently this is not recommended anymore.
 }
 
 Tls_Alert :: struct {
@@ -889,9 +885,6 @@ Tls_Connection :: struct {
 }
 
 Tls_Client_Hello :: struct {
-    type: Tls_Handshake_Type;
-    length: tls_u24;
-
     client_version: Tls_Version;
     random: Tls_Random #align 1;  @DontByteswap
 
@@ -928,6 +921,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     all_handshake_payload: String_Builder;
     hashing_enabled := true;
 
+    // Todo: Doing many small writes to the ring buffer instead of fewer large writes.
     send :: (value: $T) #expand {
         #if type_info(T).type != .ARRAY {
             stack_value := value;
@@ -940,6 +934,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         blocking_write_tcp(tls.tcp, buffer);
 
+        // Todo: The way they probably expect you to structure the code is to have a function that adds the record header to an already constructed message, which would make hashing and length calculation easier.
         if hashing_enabled && T != Tls_Record_Header {
             append(*all_handshake_payload, cast(string)buffer);
         }
@@ -990,36 +985,43 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         record: Tls_Record_Header;
         record.content_type = .HANDSHAKE;
         record.version      = .TLS_1_0;
-        record.length       = size_of(Tls_Client_Hello);
+        record.length       = size_of(Tls_Client_Hello) + size_of(Tls_Handshake_Header);
         send(record);
 
-        using hello: Tls_Client_Hello;
+        handshake: Tls_Handshake_Header;
+        handshake.type = .CLIENT_HELLO;
+        set(*handshake.length, size_of(Tls_Client_Hello));
+        send(handshake);
 
-        type                      = .CLIENT_HELLO;
-        client_version            = .TLS_1_2;
-        num_cipher_suites         = size_of(Tls_Cipher_Suite);
-        cipher_suites[0]          = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
-        num_compression_methods   = 1;
-        extensions_length         = size_of(type_of(extensions));
+        {
+            using hello: Tls_Client_Hello;
 
-        extensions.signature_algorithms = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
-        extensions.sct                  = .[0x0,  0x12, 0x0,  0x0];
-        extensions.supported_groups     = .[0x0,  0xa,  0x0,  0x4, 0x0,  0x2, 0x0, 0x1d];
-        extensions.ec_points_format     = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
-        extensions.renegotiation_info   = .[0xff, 0x1,  0x0,  0x1, 0x0];
+            client_version           = .TLS_1_2;
+            num_cipher_suites        = size_of(Tls_Cipher_Suite);
+            cipher_suites[0]         = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
+            num_compression_methods  = 1;
+            extensions_length        = size_of(type_of(extensions));
 
-        set(*length, size_of(Tls_Client_Hello) - 4);
+            // Todo: Hardcoded.
+            extensions.signature_algorithms = .[0x0,  0xd,  0x0,  0x4, 0x0, 0x2, 0x4, 0x1];
+            extensions.sct                  = .[0x0,  0x12, 0x0,  0x0];
+            extensions.supported_groups     = .[0x0,  0xa,  0x0,  0x4, 0x0,  0x2, 0x0, 0x1d];
+            extensions.ec_points_format     = .[0x0,  0xb,  0x0,  0x2, 0x1, 0x0];
+            extensions.renegotiation_info   = .[0xff, 0x1,  0x0,  0x1, 0x0];
 
-        for* random.random it.* = random_get();
-        client_random = random;
+            for* client_random.qwords it.* = random_get();
+            random = client_random;
 
-        send(hello);
+            send(hello);
+        }
+
         tcp_flush(tcp);
     }
 
     {
         // Receive ServerHello.
 
+        // Todo: Should detect TLS alerts wherever record headers are received.
         record    := receive(Tls_Record_Header);
         handshake := receive(Tls_Handshake_Header);
 
@@ -1045,6 +1047,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         while extensions_length > 0 {
             extension_type := receive(Tls_Extension);
             extensions_length -= size_of(Tls_Extension);
+
             log("Server hello provided extension %", extension_type);
 
             extension_size := receive(u16);
@@ -1289,7 +1292,6 @@ tls_receive_application_data :: (tls: *Tls_Connection) -> string {
     record := cast(*Tls_Record_Header) buffer.data;
     byte_swap_in_place(record);
 
-    // Todo: Here we need to handle alerts from the server too.
     assert(record.content_type == .APPLICATION_DATA);
 
     ciphertext := blocking_read_tcp(tls.tcp, record.length);
@@ -1884,7 +1886,7 @@ Dns_Header :: struct {
 DNS_SERVER_PORT :: 53;
 
 transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
-    Scoped_Acquire(*net.spinlock);
+    // Todo: User thread version of this.
 
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
@@ -1924,7 +1926,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
 
     while true {
         found, left, right := split_from_left(remaining, #char ".");
-        add_to_packet(*packet, left.count.(u8));
+        add_to_packet(*packet, cast(u8) left.count);
         add_to_packet(*packet, left);
 
         if !found break;
@@ -1933,8 +1935,8 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     }
     add_to_packet(*packet, cast(u8) 0);
 
-    add_to_packet(*packet, byte_swap(Dns_Record_Type.A.(u16)));
-    add_to_packet(*packet, byte_swap(Dns_Class.IN.(u16)));
+    add_to_packet(*packet, byte_swap(Dns_Record_Type.A));
+    add_to_packet(*packet, byte_swap(Dns_Class.IN));
 
     i8254x_transmit_packet(*net.adapter, packet);
 
@@ -2021,6 +2023,11 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             cursor += 1;
         }
 
+        Read :: ($T: Type) -> T #expand {
+            defer cursor += size_of(T);
+            return byte_swap((.*) cast(*T) cursor);
+        }
+
         cursor := cast(*u8) (*dns + 1);
 
         // Must cast this or it may underflow and loop for very many iterations.
@@ -2029,30 +2036,26 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             // Skip all the questions.
             Skip_Name();
 
-            type := cursor.(*Dns_Record_Type).*;
-            cursor += 2; // TYPE
-
-            class := cursor.(*u16).*;
-            cursor += 2; // CLASS
+            Read(Dns_Record_Type);
+            Read(Dns_Class);
         }
 
         // Should now be at the answers. Find a host address.
 
         for 0..cast(s16)dns.answers-1 {
-            // Detect if it's a pointer
 
+            // Detect if it's a pointer.
             if (cursor[0] >> 6) == 0b11 {
                 cursor += 2;
             } else {
                 Skip_Name();
             }
 
-            type := cast(Dns_Record_Type) byte_swap(cursor.(*u16).*);
+            type := Read(Dns_Record_Type);
 
-            cursor += 8; // Class, type, TTL
-            data_length := byte_swap(cursor.(*u16).*);
+            cursor += 4; // Class, TTL
 
-            cursor += 2; // Data length
+            data_length := Read(u16);
 
             if type == .A {
                 if data_length != 4 {
@@ -2060,7 +2063,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                     return;
                 }
 
-                query.answer = cursor.(*u32).*;
+                query.answer = Read(u32);
 
                 log("Got DNS response regarding \"%\". IP is %", query.url, format_ip(query.answer));
 
@@ -2161,8 +2164,6 @@ Network_Connection :: struct {
 
     tcp_connections: [..] Tcp_Connection;
     next_port: u16;
-
-    spinlock: Spinlock;
 }
 
 allocate_port :: (net: *Network_Connection) -> u16 {
