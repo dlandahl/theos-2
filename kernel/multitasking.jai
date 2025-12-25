@@ -446,7 +446,7 @@ Semaphore :: struct {
 
 wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
-    acquire(*spinlock);
+    acquire(*spinlock, .IRQ);
 
     if counter > 0 {
         counter -= 1;
@@ -469,17 +469,17 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         // Prevent lost-wakeup by setting the task to sleep while still holding the lock.
         prepare_task_sleep(remaining_timeout);
 
-        release(*spinlock);
+        release(*spinlock, .IRQ);
 
         yield_execution();
 
-        acquire(*spinlock);
+        acquire(*spinlock, .IRQ);
 
         if waiter.signalled {
-            release(*spinlock);
+            release(*spinlock, .IRQ);
             return true;
         }
-
+        
         if timeout == INFINITE_TIMEOUT {
             continue;
         }
@@ -492,13 +492,13 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         }
 
         queue_remove(*queue, *waiter);
-        release(*spinlock);
+        release(*spinlock, .IRQ);
         return false; // Timeout hit.
     }
 }
 
 signal :: (using sema: *Semaphore) {
-    acquire(*spinlock);
+    acquire(*spinlock, .IRQ);
 
     if queue_is_empty(queue) {
         counter += 1;
@@ -507,7 +507,7 @@ signal :: (using sema: *Semaphore) {
             counter = counter_max;
         }
 
-        release(*spinlock);
+        release(*spinlock, .IRQ);
         return;
     }
 
@@ -515,11 +515,9 @@ signal :: (using sema: *Semaphore) {
     waiter.signalled = true;
     waiter.task.blocked = false;
 
-    to_wake := waiter.task; // 'waiter' may become stale once we release the spinlock.
+    wake_task(waiter.task);
 
-    release(*spinlock);
-
-    wake_task(to_wake);
+    release(*spinlock, .IRQ);
 }
 
 

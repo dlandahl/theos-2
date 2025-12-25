@@ -23,7 +23,7 @@
     QEMU_CMD);
 
 #if OS == .LINUX {
-    array_add(*command, "-accel", "kvm");
+    array_add(*command, "-accel", "kvm", "-display", "gtk,zoom-to-fit=on");
 } else {
     array_add(*command, "-netdev", "user,id=n0,hostfwd=tcp:127.0.0.1:6001-:80", "-device", "e1000,netdev=n0");
     // array_add(*command, "-netdev", "tap,id=mynet0,ifname=tapwin", "-device", "e1000,netdev=mynet0");

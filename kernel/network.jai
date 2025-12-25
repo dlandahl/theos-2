@@ -453,14 +453,14 @@ blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TI
     return true;
 }
 
-// Todo: These should wake the network thread somehow.
-
 tcp_flush :: (tcp: *Tcp_Connection) {
     tcp.do_flush = true;
+    signal(*tcp.net.work_to_do);
 }
 
 tcp_close :: (tcp: *Tcp_Connection) {
     tcp.do_close = true;
+    signal(*tcp.net.work_to_do);
 }
 
 
@@ -600,18 +600,21 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
     }
 
     if tcp.do_close {
-        ready_to_close := ring_buffer_size(tcp.out_stream) == 0;
-        ready_to_close &&= tcp.in_flight.count == 0;
+        // Make sure all queued data has been transmitted if the user requests to close the connection.
+        waiting_for_flush          := ring_buffer_size(tcp.out_stream) > 0;
+        waiting_for_retransmission := tcp.in_flight.count > 0;
 
-        if ready_to_close {
+        if !waiting_for_flush && !waiting_for_retransmission {
             transmit_tcp_segment(tcp, .FIN | .ACK);
             tcp.handshake_state = .FIN_SENT;
         }
+
+        // This code is racy depending on what the user thread does, but figure out the details later.
     }
 }
 
 update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
-    // Maybe it would be easier to write this simply and robustly using a switch statement over the current handshake state, and handling the flags in each case statement.
+    // Maybe it would be easier to write this simply, by doing a switch statement over the current handshake state, and responding to the flags in each case statement.
 
     if segment.flags == .SYN | .ACK {
         // In theory SYN-ACK are allowed to be separate segments but it isn't done in practice.
@@ -2164,6 +2167,8 @@ Network_Connection :: struct {
 
     tcp_connections: [..] Tcp_Connection;
     next_port: u16;
+
+    work_to_do: Semaphore;
 }
 
 allocate_port :: (net: *Network_Connection) -> u16 {
@@ -2185,14 +2190,23 @@ network_thread :: () {
 
     dns_client_port = allocate_port(net);
 
+    work_to_do.counter_max = 1;
+
     while true  {
+        timeout := seconds_to_apollo(1);
+
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);
+
+            // The network thread needs to keep updating while trying to establish a connection to a local network.
+            timeout = milliseconds_to_apollo(100);
         }
 
         for* net.tcp_connections {
             update_tcp_connection(it);
         }
+
+        wait_for(*net.work_to_do, timeout);
 
         packets := i8254x_get_newly_received_packets(*adapter);
 
@@ -2269,7 +2283,5 @@ network_thread :: () {
                 log("Received IP packet with unsupported protocol %.", ip.protocol);
             }
         }
-
-        sleep(5, .microseconds);
     }
 }

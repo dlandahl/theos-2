@@ -21,6 +21,11 @@ find_all_pci_devices :: () {
                 header := read_configuration_space(it.base_address, bus, device, 0);
                 if !header continue;
 
+                if bus != 0 {
+                     // Todo.
+                    log_error("We assume there's only one bus when registering legacy PCI interrupts, but a device was found on a non-0 index PCI bus.");
+                }
+
                 new_device := array_add(*pci_devices);
                 new_device.configuration_space = header;
                 new_device.bus_address = .{bus, device.(u8), 0};
@@ -182,7 +187,7 @@ Pci_Capability_Msi64 :: struct {
 
 Msi_X_Control :: enum u16 {
     table_size    :: 11;
-    reserved      :: 3;
+    _             :: 3;
     function_mask :: 1;
     enable        :: 1;
 } @Bitfield
@@ -358,30 +363,28 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 }
 
 register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
+        
     for entry: global.pci_routing_table {
-        bus    := (entry.address >> 24) & 0xff;
-        device := (entry.address >> 16) & 0xff;
+        device := (entry.address >> 16) & 0xFFFF;
 
-        if bus != pci.bus_address.bus || device != pci.bus_address.device {
+        if device != pci.bus_address.device {
             continue;
         }
 
-        if pci.interrupt_pin != entry.pin {
+        if pci.interrupt_pin-1 != entry.pin {
             continue;
         }
 
         gate := allocate_interrupt_gate();
         register_interrupt_gate(interrupt_handler, gate);
-        ioapic_add_interrupt_redirection_table_entry(entry.index, gate | (1 << 15) | (1 << 13));
 
+        ioapic_add_interrupt_redirection_table_entry(entry.index, cast(u64)gate | (1 << 13) | (1 << 15));
         return true;
     }
 
-    log_error("Failed to register legacy PCI interrupt.");
+    log_error("Failed to find routing entry for Device %d, Pin %d", pci.bus_address.device, pci.interrupt_pin);
     return false;
 }
-
-
 
 // Links for modern Realtek ethernet cards (todo):
 // https://forum.osdev.org/viewtopic.php?t=57618
@@ -420,7 +423,7 @@ I8254x_Registers :: struct {
     #overlay(start) using _: struct {
         _: [0xc0] u8;
 
-        ICR__interrupt_cause_read: u32;
+        ICR__interrupt_cause_read: I8254x_ICR__Interrupt_Cause_Read;
         ITR: u32;
         ICS: u32;
         IMS__interrupt_mask_set: u32 #align 8;
@@ -441,7 +444,7 @@ I8254x_Registers :: struct {
             IPGT__ipg_transmit_time   :: 10;
             IPGR1__ipg_receive_time_1 :: 10;
             IPGR2__ipg_receive_time_2 :: 10;
-            __reserved                :: 2;
+            _                         :: 2;
         } #align 16;
     }
 
@@ -454,7 +457,7 @@ I8254x_Registers :: struct {
         RDH__receive_descriptor_head: u32 #align 8;
         RDT__receive_descriptor_tail: u32 #align 8;
 
-        RDTR__receive_delay_timer_register: enum_flags {
+        RDTR__receive_delay_timer_register: enum_flags u32 {
             FPD__flush_partial_descriptor_block :: 0x8000_0000;
         } #align 8;
     }
@@ -487,10 +490,6 @@ I8254x_Registers :: struct {
         TOTL__total_octets_transmitted_low: u32;
         TOTH__total_octets_transmitted_high: u32;
         TPR__total_packets_received: u32;
-    }
-
-    #overlay(start) using _: struct {
-        _: [0x40d4] u8;
         TPT__total_packets_transmitted: u32;
         PTC64__packets_transmitted_64_count: u32;
     }
@@ -619,17 +618,46 @@ I8254x_Transmit_Descriptor :: struct {
     special: u16;
 }
 
+I8254x_ICR__Interrupt_Cause_Read :: enum_flags u32 {
+    TXDW__Transmit_Descriptor_Written_Back   :: 0x1;
+    TXQE__Transmit_Queue_Empty               :: 0x2;
+    LSC__Link_Status_Change                  :: 0x4;
+    RXSEQ__Receive_Sequence_Error            :: 0x8;
+    RXDMT0__Receive_Desc_Min_Threshold_Hit   :: 0x10;
+    _                                        :: 0x20;
+    RXO__Receiver_Overrun                    :: 0x40;
+    RXT0__Receiver_Timer_Interrupt           :: 0x80;
+    _                                        :: 0x100;
+    MDAC__MDI_Interface_Access_Complete      :: 0x200;
+    RXCFG__Receive_Configuration_Change      :: 0x400;
+    _                                        :: 0x800;
+    PHYINT__PHY_Interrupt                    :: 0x1000;
+    GPI_SDP6__General_Purpose_Interrupt_SDP6 :: 0x2000;
+    GPI_SDP7__General_Purpose_Interrupt_SDP7 :: 0x4000;
+    GPI__General_Purpose_Interrupt           :: 0x8000;
+    TXD_LOW__Transmit_Low_Threshold_Hit      :: 0x10000;
+    SRPD__Small_Receive_Packet_Detected      :: 0x20000;
+}
+
 I8254x_MAC :: union {
-    // An easy way to convert a MAC address to and from the internal format within the hardware registers.
     struct { ral, rah: u32; }
     array: [6] u8;
 }
 
 #program_export
 i8254x_interrupt :: (stack: *void) #c_call {
-    write_string("======== 8254x Interrupt. =========\n");
-    bluescreen();
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+
+    // Todo: Should have a special interrupt Context, that ensures interrupts don't accidentally use temporary storage etc.
+    push_context {
+        net := *global.network_connection;
+        cause := net.adapter.ICR__interrupt_cause_read;
+
+        if cause & .RXT0__Receiver_Timer_Interrupt {
+            signal(*net.work_to_do);
+        }
+
+        write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+    }
 } @InterruptRoutine
 
 I8254x_Network_Interface_Card :: struct {
@@ -653,18 +681,19 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     device.command |= .BUS_MASTER | .MEMORY_SPACE;
     device.command &= ~.INTERRUPT_DISABLE;
 
-    parse_pci_capability_list(device);
-    enabled := enable_msi_or_msi_x(device, isr__i8254x_interrupt);
+    success := register_legacy_pci_interrupt(device, isr__i8254x_interrupt);
 
-    if enabled == .NONE {
-        success := register_legacy_pci_interrupt(device, isr__i8254x_interrupt);
-        if !success {
-            log_error("Failed to set up interrupt.");
-            bluescreen();
-        } else {
-            log("Enabled legacy interrupts.");
-        }
-    }
+//    parse_pci_capability_list(device);
+//    enabled := enable_msi_or_msi_x(device, isr__i8254x_interrupt);
+//
+//    if enabled == .NONE {
+//        if !success {
+//            log_error("Failed to set up interrupt.");
+//            bluescreen();
+//        } else {
+//            log("Enabled legacy interrupts.");
+//        }
+//    }
 
     nic: I8254x_Network_Interface_Card;
 
@@ -889,7 +918,7 @@ Nvme_Property_Memory_Map :: struct {
     INTMS:                        u32;
     INTMC:                        u32;
     CC__controller_config:        Nvme_Controller_Configuration;
-    __reserved__:                 u32;
+    _:                            u32;
     CSTS__controller_status:      Nvme_Controller_Status;
     NSSR:                         u32;
     AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
@@ -912,12 +941,12 @@ Nvme_Controller_Capabilities :: enum u64 {
     MQES__maximum_queue_entries          :: 16;
     CQR__contiguous_queue_entries        :: 1;
     AMS__arbitration_mechanism_supported :: 2;
-    __reserved__                         :: 5;
+    _                                    :: 5;
     TO__timeout                          :: 8;
     DSTRD__doorbell_stride               :: 4;
     NSSRS__nvm_subsystem_reset           :: 1;
     NCSS__nvm_command_set_support        :: 1;
-    __reserved__2                        :: 5;
+    _                                    :: 5;
     IOCSS__io_command_set_support        :: 1;
     NOIOCSS__no_io_command_set_support   :: 1;
 
@@ -930,7 +959,7 @@ Nvme_Controller_Capabilities :: enum u64 {
     NSSS   :: 1;
     CRMS   :: 2;
     NSSES  :: 1;
-    __reserved__3 :: 2;
+    _      :: 2;
 } @Bitfield
 
 Nvme_Specification_Version_Descriptor :: struct {
@@ -941,7 +970,7 @@ Nvme_Specification_Version_Descriptor :: struct {
 
 Nvme_Controller_Configuration :: enum u32 {
     EN__enable                   :: 1;
-    __reserved__                 :: 3;
+    _                            :: 3;
     CSS__io_command_set          :: 3;
     MPS__memory_page_size        :: 4;
     AMS__arbitration_mechanism   :: 3;
@@ -1630,7 +1659,7 @@ Ahci_Command_Table :: struct {
 
 Ahci_Physical_Region_Descriptor :: struct {
     DBA__data_base_address: u64;
-    reserved: u32;
+    _: u32;
     DBC__data_byte_count: u16;
 
 // #place DBC__data_byte_count;
@@ -1836,9 +1865,9 @@ HDA_RB_Size :: enum u8 {
 HDA_GCTL__Global_Control :: enum u32 {
     CRST__controller_reset :: 1;
     FCNTRL__flush_control  :: 1;
-    reserved_0             :: 6;
+    _                      :: 6;
     UNSOL                  :: 8;
-    reserved_1             :: 16;
+    _                      :: 16;
 }
 
 HDA_Codec_Verb :: enum u32 {

@@ -401,7 +401,7 @@ network_test :: () {
     network_adapter_initialized := net.adapter.mmio != null;
     assert(network_adapter_initialized);
 
-    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x4_0000);
+    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
     put_task_on_core(task, *global.processor_cores[1]);
 
     log("Waiting for DHCP handshake.");
@@ -1812,6 +1812,8 @@ draw_text :: (text: string) #no_context {
             cursor_x = 0;
             continue;
         }
+
+        if it == #char "\r" continue;
 
         if it < first_code || it > last_code {
             it = #char "?";

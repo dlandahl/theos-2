@@ -117,7 +117,6 @@ memcpy :: (dst: *void, src: *void, count: s64) -> *void #c_call {
 }
 
 // For some reason the function interposition trick doesn't work with memcmp, even though it works with memset and memcpy.
-// Running code that generates calls to memcmp, such as string ==, will crash.
 _memcmp :: (a: *void, b: *void, count: u64) -> s16 #c_call {
     for 0..count-1 {
         if a.(*u8)[it] != b.(*u8)[it] return -1;

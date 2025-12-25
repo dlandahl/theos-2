@@ -299,14 +299,14 @@ gs_relative_dec   :: (offset: int) -> u64 #foreign Assembly;
 
 
 
-ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {
+ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, entry: u64) {
     REDIRECTION_TABLE_BASE       : u32 : 0x10;
     REDIRECTION_TABLE_ENTRY_SIZE : u32 : 0x2;
 
     register_index := REDIRECTION_TABLE_BASE + redirection_index * REDIRECTION_TABLE_ENTRY_SIZE;
 
     global.io_apic[0] = register_index;
-    global.io_apic[4] = cast(u32) gate_number;
+    global.io_apic[4] = cast(u32) entry;
 
     global.io_apic[0] = register_index+1;
     global.io_apic[4] = 0;
@@ -829,6 +829,16 @@ uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call 
         message.data = c_string;
         message.count = c_style_strlen(c_string);
 
+        if message[0] >= #char "a" && message[0] <= #char "z" {
+            message[0] -= #char "a" - #char "A";
+        }
+
+        if message[message.count-1] == #char "\n"
+            && message[message.count-1] != #char "."
+            && message[message.count-2] != #char "." {
+                message[message.count-1] = #char ".";
+        }
+
         log(message);
     }
 }
@@ -957,7 +967,7 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
         new_irq.ctx     = ctx;
 
         gate := first_irq_handler_gate_index + irq_contexts_used;
-        ioapic_add_interrupt_redirection_table_entry(irq, gate);
+        ioapic_add_interrupt_redirection_table_entry(irq, cast(u64)gate);
 
         irq_contexts_used += 1;
 
