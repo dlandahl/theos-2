@@ -3,8 +3,11 @@
 #include <uacpi/internal/utilities.h>
 #include <uacpi/internal/helpers.h>
 #include <uacpi/internal/log.h>
+#include <uacpi/internal/io.h>
 #include <uacpi/kernel_api.h>
 #include <uacpi/uacpi.h>
+
+#ifndef UACPI_BAREBONES_MODE
 
 #define PCI_ROOT_PNP_ID "PNP0A03"
 #define PCI_EXPRESS_ROOT_PNP_ID "PNP0A08"
@@ -37,23 +40,14 @@ static uacpi_namespace_node *find_pci_root(uacpi_namespace_node *node)
     return node;
 }
 
-struct pci_region_ctx {
-    uacpi_pci_address address;
-};
-
 static uacpi_status pci_region_attach(uacpi_region_attach_data *data)
 {
-    struct pci_region_ctx *ctx;
     uacpi_namespace_node *node, *pci_root, *device;
-    uacpi_object *obj;
+    uacpi_pci_address address = { 0 };
+    uacpi_u64 value;
     uacpi_status ret;
 
-    ctx = uacpi_kernel_calloc(1, sizeof(*ctx));
-    if (ctx == UACPI_NULL)
-        return UACPI_STATUS_OUT_OF_MEMORY;
-
     node = data->region_node;
-
     pci_root = find_pci_root(node);
 
     /*
@@ -79,53 +73,35 @@ static uacpi_status pci_region_attach(uacpi_region_attach_data *data)
         uacpi_trace_region_error(
             node, "unable to find device responsible for", ret
         );
-        uacpi_free(ctx, sizeof(*ctx));
         return ret;
     }
 
-    ret = uacpi_eval_typed(
-        device, "_ADR", UACPI_NULL,
-        UACPI_OBJECT_INTEGER_BIT, &obj
-    );
+    ret = uacpi_eval_simple_integer(device, "_ADR", &value);
     if (ret == UACPI_STATUS_OK) {
-        ctx->address.function = (obj->integer >> 0)  & 0xFF;
-        ctx->address.device   = (obj->integer >> 16) & 0xFF;
-        uacpi_object_unref(obj);
+        address.function = (value >> 0)  & 0xFF;
+        address.device   = (value >> 16) & 0xFF;
     }
 
-    ret = uacpi_eval_typed(
-        pci_root, "_SEG", UACPI_NULL,
-        UACPI_OBJECT_INTEGER_BIT, &obj
-    );
-    if (ret == UACPI_STATUS_OK) {
-        ctx->address.segment = obj->integer;
-        uacpi_object_unref(obj);
-    }
+    ret = uacpi_eval_simple_integer(pci_root, "_SEG", &value);
+    if (ret == UACPI_STATUS_OK)
+        address.segment = value;
 
-    ret = uacpi_eval_typed(
-        pci_root, "_BBN", UACPI_NULL,
-        UACPI_OBJECT_INTEGER_BIT, &obj
-    );
-    if (ret == UACPI_STATUS_OK) {
-        ctx->address.bus = obj->integer;
-        uacpi_object_unref(obj);
-    }
+    ret = uacpi_eval_simple_integer(pci_root, "_BBN", &value);
+    if (ret == UACPI_STATUS_OK)
+        address.bus = value;
 
     uacpi_trace(
         "detected PCI device %.4s@%04X:%02X:%02X:%01X\n",
-        device->name.text, ctx->address.segment, ctx->address.bus,
-        ctx->address.device, ctx->address.function
+        device->name.text, address.segment, address.bus,
+        address.device, address.function
     );
 
-    data->out_region_context = ctx;
-    return UACPI_STATUS_OK;
+    return uacpi_kernel_pci_device_open(address, &data->out_region_context);
 }
 
 static uacpi_status pci_region_detach(uacpi_region_detach_data *data)
 {
-    struct pci_region_ctx *ctx = data->region_context;
-
-    uacpi_free(ctx, sizeof(*ctx));
+    uacpi_kernel_pci_device_close(data->region_context);
     return UACPI_STATUS_OK;
 }
 
@@ -133,7 +109,7 @@ static uacpi_status pci_region_do_rw(
     uacpi_region_op op, uacpi_region_rw_data *data
 )
 {
-    struct pci_region_ctx *ctx = data->region_context;
+    uacpi_handle dev = data->region_context;
     uacpi_u8 width;
     uacpi_size offset;
 
@@ -141,8 +117,8 @@ static uacpi_status pci_region_do_rw(
     width = data->byte_width;
 
     return op == UACPI_REGION_OP_READ ?
-           uacpi_kernel_pci_read(&ctx->address, offset, width, &data->value) :
-           uacpi_kernel_pci_write(&ctx->address, offset, width, data->value);
+        uacpi_pci_read(dev, offset, width, &data->value) :
+        uacpi_pci_write(dev, offset, width, data->value);
 }
 
 static uacpi_status handle_pci_region(uacpi_region_op op, uacpi_handle op_data)
@@ -169,25 +145,16 @@ struct memory_region_ctx {
 static uacpi_status memory_region_attach(uacpi_region_attach_data *data)
 {
     struct memory_region_ctx *ctx;
-    uacpi_object *region_obj;
-    uacpi_operation_region *op_region;
-    uacpi_status ret;
+    uacpi_status ret = UACPI_STATUS_OK;
 
     ctx = uacpi_kernel_alloc(sizeof(*ctx));
     if (ctx == UACPI_NULL)
         return UACPI_STATUS_OUT_OF_MEMORY;
 
-    ret = uacpi_namespace_node_acquire_object_typed(
-        data->region_node, UACPI_OBJECT_OPERATION_REGION_BIT, &region_obj
-    );
-    if (uacpi_unlikely_error(ret))
-        return ret;
-
-    op_region = region_obj->op_region;
-    ctx->size = op_region->length;
+    ctx->size = data->generic_info.length;
 
     // FIXME: this really shouldn't try to map everything at once
-    ctx->phys = op_region->offset;
+    ctx->phys = data->generic_info.base;
     ctx->virt = uacpi_kernel_map(ctx->phys, ctx->size);
 
     if (uacpi_unlikely(ctx->virt == UACPI_NULL)) {
@@ -199,7 +166,6 @@ static uacpi_status memory_region_attach(uacpi_region_attach_data *data)
 
     data->out_region_context = ctx;
 out:
-    uacpi_namespace_node_release_object(region_obj);
     return ret;
 }
 
@@ -220,36 +186,25 @@ struct io_region_ctx {
 static uacpi_status io_region_attach(uacpi_region_attach_data *data)
 {
     struct io_region_ctx *ctx;
-    uacpi_object *region_obj;
-    uacpi_operation_region *op_region;
+    uacpi_generic_region_info *info = &data->generic_info;
     uacpi_status ret;
 
     ctx = uacpi_kernel_alloc(sizeof(*ctx));
     if (ctx == UACPI_NULL)
         return UACPI_STATUS_OUT_OF_MEMORY;
 
-    ret = uacpi_namespace_node_acquire_object_typed(
-        data->region_node, UACPI_OBJECT_OPERATION_REGION_BIT, &region_obj
-    );
-    if (uacpi_unlikely_error(ret))
-        return ret;
+    ctx->base = info->base;
 
-    op_region = region_obj->op_region;
-    ctx->base = op_region->offset;
-
-    ret = uacpi_kernel_io_map(ctx->base, op_region->length, &ctx->handle);
+    ret = uacpi_kernel_io_map(ctx->base, info->length, &ctx->handle);
     if (uacpi_unlikely_error(ret)) {
         uacpi_trace_region_error(
             data->region_node, "unable to map an IO", ret
         );
         uacpi_free(ctx, sizeof(*ctx));
-        goto out;
+        return ret;
     }
 
     data->out_region_context = ctx;
-
-out:
-    uacpi_object_unref(region_obj);
     return ret;
 }
 
@@ -262,62 +217,18 @@ static uacpi_status io_region_detach(uacpi_region_detach_data *data)
     return UACPI_STATUS_OK;
 }
 
-static uacpi_status memory_read(void *ptr, uacpi_u8 width, uacpi_u64 *out)
-{
-    switch (width) {
-    case 1:
-        *out = *(volatile uacpi_u8*)ptr;
-        break;
-    case 2:
-        *out = *(volatile uacpi_u16*)ptr;
-        break;
-    case 4:
-        *out = *(volatile uacpi_u32*)ptr;
-        break;
-    case 8:
-        *out = *(volatile uacpi_u64*)ptr;
-        break;
-    default:
-        return UACPI_STATUS_INVALID_ARGUMENT;
-    }
-
-    return UACPI_STATUS_OK;
-}
-
-static uacpi_status memory_write(void *ptr, uacpi_u8 width, uacpi_u64 in)
-{
-    switch (width) {
-    case 1:
-        *(volatile uacpi_u8*)ptr = in;
-        break;
-    case 2:
-        *(volatile uacpi_u16*)ptr = in;
-        break;
-    case 4:
-        *(volatile uacpi_u32*)ptr = in;
-        break;
-    case 8:
-        *(volatile uacpi_u64*)ptr = in;
-        break;
-    default:
-        return UACPI_STATUS_INVALID_ARGUMENT;
-    }
-
-    return UACPI_STATUS_OK;
-}
-
 static uacpi_status memory_region_do_rw(
     uacpi_region_op op, uacpi_region_rw_data *data
 )
 {
     struct memory_region_ctx *ctx = data->region_context;
-    uacpi_u8 *ptr;
+    uacpi_size offset;
 
-    ptr = ctx->virt + (data->address - ctx->phys);
+    offset = data->address - ctx->phys;
 
     return op == UACPI_REGION_OP_READ ?
-        memory_read(ptr, data->byte_width, &data->value) :
-        memory_write(ptr, data->byte_width, data->value);
+        uacpi_system_memory_read(ctx->virt, offset, data->byte_width, &data->value) :
+        uacpi_system_memory_write(ctx->virt, offset, data->byte_width, data->value);
 }
 
 static uacpi_status handle_memory_region(uacpi_region_op op, uacpi_handle op_data)
@@ -342,8 +253,8 @@ static uacpi_status table_data_region_do_rw(
     void *addr = UACPI_VIRT_ADDR_TO_PTR((uacpi_virt_addr)data->offset);
 
     return op == UACPI_REGION_OP_READ ?
-       memory_read(addr, data->byte_width, &data->value) :
-       memory_write(addr, data->byte_width, data->value);
+       uacpi_system_memory_read(addr, 0, data->byte_width, &data->value) :
+       uacpi_system_memory_write(addr, 0, data->byte_width, data->value);
 }
 
 static uacpi_status handle_table_data_region(uacpi_region_op op, uacpi_handle op_data)
@@ -372,8 +283,8 @@ static uacpi_status io_region_do_rw(
     width = data->byte_width;
 
     return op == UACPI_REGION_OP_READ ?
-        uacpi_kernel_io_read(ctx->handle, offset, width, &data->value) :
-        uacpi_kernel_io_write(ctx->handle, offset, width, data->value);
+        uacpi_system_io_read(ctx->handle, offset, width, &data->value) :
+        uacpi_system_io_write(ctx->handle, offset, width, data->value);
 }
 
 static uacpi_status handle_io_region(uacpi_region_op op, uacpi_handle op_data)
@@ -397,23 +308,29 @@ void uacpi_install_default_address_space_handlers(void)
 
     root = uacpi_namespace_root();
 
-    uacpi_install_address_space_handler(
+    uacpi_install_address_space_handler_with_flags(
         root, UACPI_ADDRESS_SPACE_SYSTEM_MEMORY,
-        handle_memory_region, UACPI_NULL
+        handle_memory_region, UACPI_NULL,
+        UACPI_ADDRESS_SPACE_HANDLER_DEFAULT
     );
 
-    uacpi_install_address_space_handler(
+    uacpi_install_address_space_handler_with_flags(
         root, UACPI_ADDRESS_SPACE_SYSTEM_IO,
-        handle_io_region, UACPI_NULL
+        handle_io_region, UACPI_NULL,
+        UACPI_ADDRESS_SPACE_HANDLER_DEFAULT
     );
 
-    uacpi_install_address_space_handler(
+    uacpi_install_address_space_handler_with_flags(
         root, UACPI_ADDRESS_SPACE_PCI_CONFIG,
-        handle_pci_region, UACPI_NULL
+        handle_pci_region, UACPI_NULL,
+        UACPI_ADDRESS_SPACE_HANDLER_DEFAULT
     );
 
-    uacpi_install_address_space_handler(
+    uacpi_install_address_space_handler_with_flags(
         root, UACPI_ADDRESS_SPACE_TABLE_DATA,
-        handle_table_data_region, UACPI_NULL
+        handle_table_data_region, UACPI_NULL,
+        UACPI_ADDRESS_SPACE_HANDLER_DEFAULT
     );
 }
+
+#endif // !UACPI_BAREBONES_MODE

@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+#ifndef UACPI_BAREBONES_MODE
+
 typedef struct uacpi_namespace_node uacpi_namespace_node;
 
 uacpi_namespace_node *uacpi_namespace_root(void);
@@ -126,10 +128,58 @@ uacpi_status uacpi_namespace_for_each_child(
     uacpi_object_type_bits type_mask, uacpi_u32 max_depth, void *user
 );
 
+/*
+ * Retrieve the next peer namespace node of '*iter', or, if '*iter' is
+ * UACPI_NULL, retrieve the first child of 'parent' instead. The resulting
+ * namespace node is stored at '*iter'.
+ *
+ * This API can be used to implement an "iterator" version of the
+ * for_each_child helpers.
+ *
+ * Example usage:
+ *     void recurse(uacpi_namespace_node *parent) {
+ *        uacpi_namespace_node *iter = UACPI_NULL;
+ *
+ *        while (uacpi_namespace_node_next(parent, &iter) == UACPI_STATUS_OK) {
+ *             // Do something with iter...
+ *             descending_callback(iter);
+ *
+ *             // Recurse down to walk over the children of iter
+ *             recurse(iter);
+ *        }
+ *     }
+ *
+ * Prefer the for_each_child family of helpers if possible instead of this API
+ * as they avoid recursion and/or the need to use dynamic data structures
+ * entirely.
+ */
+uacpi_status uacpi_namespace_node_next(
+    uacpi_namespace_node *parent, uacpi_namespace_node **iter
+);
+
+/*
+ * Retrieve the next peer namespace node of '*iter', or, if '*iter' is
+ * UACPI_NULL, retrieve the first child of 'parent' instead. The resulting
+ * namespace node is stored at '*iter'. Only nodes which type matches one
+ * of the types set in 'type_mask' are returned.
+ *
+ * See comment above 'uacpi_namespace_node_next' for usage examples.
+ *
+ * Prefer the for_each_child family of helpers if possible instead of this API
+ * as they avoid recursion and/or the need to use dynamic data structures
+ * entirely.
+ */
+uacpi_status uacpi_namespace_node_next_typed(
+    uacpi_namespace_node *parent, uacpi_namespace_node **iter,
+    uacpi_object_type_bits type_mask
+);
+
 const uacpi_char *uacpi_namespace_node_generate_absolute_path(
     const uacpi_namespace_node *node
 );
 void uacpi_free_absolute_path(const uacpi_char *path);
+
+#endif // !UACPI_BAREBONES_MODE
 
 #ifdef __cplusplus
 }

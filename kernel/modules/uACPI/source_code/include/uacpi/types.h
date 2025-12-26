@@ -1,12 +1,65 @@
 #pragma once
+
+#include <uacpi/status.h>
 #include <uacpi/platform/types.h>
 #include <uacpi/platform/compiler.h>
 #include <uacpi/platform/arch_helpers.h>
-#include <uacpi/status.h>
+#include <uacpi/platform/config.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#if UACPI_POINTER_SIZE == 4 && defined(UACPI_PHYS_ADDR_IS_32BITS)
+typedef uacpi_u32 uacpi_phys_addr;
+typedef uacpi_u32 uacpi_io_addr;
+#else
+typedef uacpi_u64 uacpi_phys_addr;
+typedef uacpi_u64 uacpi_io_addr;
+#endif
+
+typedef void *uacpi_handle;
+
+typedef union uacpi_object_name {
+    uacpi_char text[4];
+    uacpi_u32 id;
+} uacpi_object_name;
+
+typedef enum uacpi_iteration_decision {
+    UACPI_ITERATION_DECISION_CONTINUE = 0,
+    UACPI_ITERATION_DECISION_BREAK,
+
+    /*
+     * Ignore all of the children of the current node and proceed directly to
+     * its peer nodes.
+     *
+     * Only applicable for API that interacts with the AML namespace such as
+     * uacpi_namespace_for_each_child, uacpi_find_deivces, etc.
+     */
+    UACPI_ITERATION_DECISION_NEXT_PEER,
+} uacpi_iteration_decision;
+
+typedef enum uacpi_address_space {
+    UACPI_ADDRESS_SPACE_SYSTEM_MEMORY = 0,
+    UACPI_ADDRESS_SPACE_SYSTEM_IO = 1,
+    UACPI_ADDRESS_SPACE_PCI_CONFIG = 2,
+    UACPI_ADDRESS_SPACE_EMBEDDED_CONTROLLER = 3,
+    UACPI_ADDRESS_SPACE_SMBUS = 4,
+    UACPI_ADDRESS_SPACE_SYSTEM_CMOS = 5,
+    UACPI_ADDRESS_SPACE_PCI_BAR_TARGET = 6,
+    UACPI_ADDRESS_SPACE_IPMI = 7,
+    UACPI_ADDRESS_SPACE_GENERAL_PURPOSE_IO = 8,
+    UACPI_ADDRESS_SPACE_GENERIC_SERIAL_BUS = 9,
+    UACPI_ADDRESS_SPACE_PCC = 0x0A,
+    UACPI_ADDRESS_SPACE_PRM = 0x0B,
+    UACPI_ADDRESS_SPACE_FFIXEDHW = 0x7F,
+
+    // Internal type
+    UACPI_ADDRESS_SPACE_TABLE_DATA = 0xDA1A,
+} uacpi_address_space;
+const uacpi_char *uacpi_address_space_to_string(uacpi_address_space space);
+
+#ifndef UACPI_BAREBONES_MODE
 
 typedef enum uacpi_init_level {
     // Reboot state, nothing is available
@@ -31,45 +84,6 @@ typedef enum uacpi_init_level {
     UACPI_INIT_LEVEL_NAMESPACE_INITIALIZED = 3,
 } uacpi_init_level;
 
-typedef enum uacpi_log_level {
-    /*
-     * Super verbose logging, every op & uop being processed is logged.
-     * Mostly useful for tracking down hangs/lockups.
-     */
-    UACPI_LOG_DEBUG = 5,
-
-    /*
-     * A little verbose, every operation region access is traced with a bit of
-     * extra information on top.
-     */
-    UACPI_LOG_TRACE = 4,
-
-    /*
-     * Only logs the bare minimum information about state changes and/or
-     * initialization progress.
-     */
-    UACPI_LOG_INFO  = 3,
-
-    /*
-     * Logs recoverable errors and/or non-important aborts.
-     */
-    UACPI_LOG_WARN  = 2,
-
-    /*
-     * Logs only critical errors that might affect the ability to initialize or
-     * prevent stable runtime.
-     */
-    UACPI_LOG_ERROR = 1,
-} uacpi_log_level;
-
-#if UACPI_POINTER_SIZE == 4 && defined(UACPI_PHYS_ADDR_IS_32BITS)
-typedef uacpi_u32 uacpi_phys_addr;
-typedef uacpi_u32 uacpi_io_addr;
-#else
-typedef uacpi_u64 uacpi_phys_addr;
-typedef uacpi_u64 uacpi_io_addr;
-#endif
-
 typedef struct uacpi_pci_address {
     uacpi_u16 segment;
     uacpi_u8 bus;
@@ -84,11 +98,13 @@ typedef struct uacpi_data_view {
 
         uacpi_char *text;
         const uacpi_char *const_text;
+
+        void *data;
+        const void *const_data;
     };
     uacpi_size length;
 } uacpi_data_view;
 
-typedef void *uacpi_handle;
 typedef struct uacpi_namespace_node uacpi_namespace_node;
 
 typedef enum uacpi_object_type {
@@ -355,15 +371,59 @@ uacpi_status uacpi_object_get_power_resource_info(
 );
 
 typedef enum uacpi_region_op {
-    UACPI_REGION_OP_ATTACH = 1,
-    UACPI_REGION_OP_READ = 2,
-    UACPI_REGION_OP_WRITE = 3,
-    UACPI_REGION_OP_DETACH = 4,
+    // data => uacpi_region_attach_data
+    UACPI_REGION_OP_ATTACH = 0,
+    // data => uacpi_region_detach_data
+    UACPI_REGION_OP_DETACH,
+
+    // data => uacpi_region_rw_data
+    UACPI_REGION_OP_READ,
+    UACPI_REGION_OP_WRITE,
+
+    // data => uacpi_region_pcc_send_data
+    UACPI_REGION_OP_PCC_SEND,
+
+    // data => uacpi_region_gpio_rw_data
+    UACPI_REGION_OP_GPIO_READ,
+    UACPI_REGION_OP_GPIO_WRITE,
+
+    // data => uacpi_region_ipmi_rw_data
+    UACPI_REGION_OP_IPMI_COMMAND,
+
+    // data => uacpi_region_ffixedhw_rw_data
+    UACPI_REGION_OP_FFIXEDHW_COMMAND,
+
+    // data => uacpi_region_prm_rw_data
+    UACPI_REGION_OP_PRM_COMMAND,
+
+    // data => uacpi_region_serial_rw_data
+    UACPI_REGION_OP_SERIAL_READ,
+    UACPI_REGION_OP_SERIAL_WRITE,
 } uacpi_region_op;
+
+typedef struct uacpi_generic_region_info {
+    uacpi_u64 base;
+    uacpi_u64 length;
+} uacpi_generic_region_info;
+
+typedef struct uacpi_pcc_region_info {
+    uacpi_data_view buffer;
+    uacpi_u8 subspace_id;
+} uacpi_pcc_region_info;
+
+typedef struct uacpi_gpio_region_info
+{
+    uacpi_u64 num_pins;
+} uacpi_gpio_region_info;
 
 typedef struct uacpi_region_attach_data {
     void *handler_context;
     uacpi_namespace_node *region_node;
+    union {
+        uacpi_generic_region_info generic_info;
+        uacpi_pcc_region_info pcc_info;
+        uacpi_gpio_region_info gpio_info;
+    };
     void *out_region_context;
 } uacpi_region_attach_data;
 
@@ -378,6 +438,69 @@ typedef struct uacpi_region_rw_data {
     uacpi_u8 byte_width;
 } uacpi_region_rw_data;
 
+typedef struct uacpi_region_pcc_send_data {
+    void *handler_context;
+    void *region_context;
+    uacpi_data_view buffer;
+} uacpi_region_pcc_send_data;
+
+typedef struct uacpi_region_gpio_rw_data
+{
+    void *handler_context;
+    void *region_context;
+    uacpi_data_view connection;
+    uacpi_u32 pin_offset;
+    uacpi_u32 num_pins;
+    uacpi_u64 value;
+} uacpi_region_gpio_rw_data;
+
+typedef struct uacpi_region_ipmi_rw_data
+{
+    void *handler_context;
+    void *region_context;
+    uacpi_data_view in_out_message;
+    uacpi_u64 command;
+} uacpi_region_ipmi_rw_data;
+
+typedef uacpi_region_ipmi_rw_data uacpi_region_ffixedhw_rw_data;
+
+typedef struct uacpi_region_prm_rw_data
+{
+    void *handler_context;
+    void *region_context;
+    uacpi_data_view in_out_message;
+} uacpi_region_prm_rw_data;
+
+typedef enum uacpi_access_attribute {
+    UACPI_ACCESS_ATTRIBUTE_QUICK = 0x02,
+    UACPI_ACCESS_ATTRIBUTE_SEND_RECEIVE = 0x04,
+    UACPI_ACCESS_ATTRIBUTE_BYTE = 0x06,
+    UACPI_ACCESS_ATTRIBUTE_WORD = 0x08,
+    UACPI_ACCESS_ATTRIBUTE_BLOCK = 0x0A,
+    UACPI_ACCESS_ATTRIBUTE_BYTES = 0x0B,
+    UACPI_ACCESS_ATTRIBUTE_PROCESS_CALL = 0x0C,
+    UACPI_ACCESS_ATTRIBUTE_BLOCK_PROCESS_CALL = 0x0D,
+    UACPI_ACCESS_ATTRIBUTE_RAW_BYTES = 0x0E,
+    UACPI_ACCESS_ATTRIBUTE_RAW_PROCESS_BYTES = 0x0F,
+} uacpi_access_attribute;
+
+typedef struct uacpi_region_serial_rw_data {
+    void *handler_context;
+    void *region_context;
+    uacpi_u64 command;
+    uacpi_data_view connection;
+    uacpi_data_view in_out_buffer;
+    uacpi_access_attribute access_attribute;
+
+    /*
+     * Applicable if access_attribute is one of:
+     * - UACPI_ACCESS_ATTRIBUTE_BYTES
+     * - UACPI_ACCESS_ATTRIBUTE_RAW_BYTES
+     * - UACPI_ACCESS_ATTRIBUTE_RAW_PROCESS_BYTES
+     */
+    uacpi_u8 access_length;
+} uacpi_region_serial_rw_data;
+
 typedef struct uacpi_region_detach_data {
     void *handler_context;
     void *region_context;
@@ -389,31 +512,6 @@ typedef uacpi_status (*uacpi_region_handler)
 
 typedef uacpi_status (*uacpi_notify_handler)
     (uacpi_handle context, uacpi_namespace_node *node, uacpi_u64 value);
-
-typedef enum uacpi_address_space {
-    UACPI_ADDRESS_SPACE_SYSTEM_MEMORY = 0,
-    UACPI_ADDRESS_SPACE_SYSTEM_IO = 1,
-    UACPI_ADDRESS_SPACE_PCI_CONFIG = 2,
-    UACPI_ADDRESS_SPACE_EMBEDDED_CONTROLLER = 3,
-    UACPI_ADDRESS_SPACE_SMBUS = 4,
-    UACPI_ADDRESS_SPACE_SYSTEM_CMOS = 5,
-    UACPI_ADDRESS_SPACE_PCI_BAR_TARGET = 6,
-    UACPI_ADDRESS_SPACE_IPMI = 7,
-    UACPI_ADDRESS_SPACE_GENERAL_PURPOSE_IO = 8,
-    UACPI_ADDRESS_SPACE_GENERIC_SERIAL_BUS = 9,
-    UACPI_ADDRESS_SPACE_PCC = 0x0A,
-    UACPI_ADDRESS_SPACE_PRM = 0x0B,
-    UACPI_ADDRESS_SPACE_FFIXEDHW = 0x7F,
-
-    // Internal type
-    UACPI_ADDRESS_SPACE_TABLE_DATA = 0xDA1A,
-} uacpi_address_space;
-const uacpi_char *uacpi_address_space_to_string(uacpi_address_space space);
-
-typedef union uacpi_object_name {
-    uacpi_char text[4];
-    uacpi_u32 id;
-} uacpi_object_name;
 
 typedef enum uacpi_firmware_request_type {
     UACPI_FIRMWARE_REQUEST_TYPE_BREAKPOINT,
@@ -445,13 +543,7 @@ typedef uacpi_u32 uacpi_interrupt_ret;
 
 typedef uacpi_interrupt_ret (*uacpi_interrupt_handler)(uacpi_handle);
 
-typedef enum uacpi_iteration_decision {
-    UACPI_ITERATION_DECISION_CONTINUE = 0,
-    UACPI_ITERATION_DECISION_BREAK,
-
-    // Only applicable for uacpi_namespace_for_each_child
-    UACPI_ITERATION_DECISION_NEXT_PEER,
-} uacpi_iteration_decision;
+#endif // !UACPI_BAREBONES_MODE
 
 #ifdef __cplusplus
 }

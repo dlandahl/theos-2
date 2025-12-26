@@ -1,6 +1,5 @@
 #include <uacpi/uacpi.h>
 #include <uacpi/acpi.h>
-#include <uacpi/platform/config.h>
 
 #include <uacpi/internal/log.h>
 #include <uacpi/internal/context.h>
@@ -13,31 +12,9 @@
 #include <uacpi/internal/event.h>
 #include <uacpi/internal/notify.h>
 #include <uacpi/internal/osi.h>
+#include <uacpi/internal/registers.h>
 
 struct uacpi_runtime_context g_uacpi_rt_ctx = { 0 };
-
-void uacpi_state_reset(void)
-{
-    uacpi_deinitialize_namespace();
-    uacpi_deinitialize_interfaces();
-    uacpi_deinitialize_events();
-    uacpi_deinitialize_notify();
-    uacpi_deinitialize_opregion();
-    uacpi_deinitialize_tables();
-
-#ifndef UACPI_REDUCED_HARDWARE
-    if (g_uacpi_rt_ctx.global_lock_event)
-        uacpi_kernel_free_event(g_uacpi_rt_ctx.global_lock_event);
-    if (g_uacpi_rt_ctx.global_lock_spinlock)
-        uacpi_kernel_free_spinlock(g_uacpi_rt_ctx.global_lock_spinlock);
-#endif
-
-    uacpi_memzero(&g_uacpi_rt_ctx, sizeof(g_uacpi_rt_ctx));
-
-#ifdef UACPI_KERNEL_INITIALIZATION
-    uacpi_kernel_deinitialize();
-#endif
-}
 
 void uacpi_context_set_log_level(uacpi_log_level lvl)
 {
@@ -49,31 +26,18 @@ void uacpi_context_set_log_level(uacpi_log_level lvl)
 
 void uacpi_logger_initialize(void)
 {
-    if (g_uacpi_rt_ctx.log_level != 0)
-        return;
+    static uacpi_bool version_printed = UACPI_FALSE;
 
-    uacpi_context_set_log_level(UACPI_DEFAULT_LOG_LEVEL);
-}
+    if (g_uacpi_rt_ctx.log_level == 0)
+        uacpi_context_set_log_level(UACPI_DEFAULT_LOG_LEVEL);
 
-void uacpi_context_set_loop_timeout(uacpi_u32 seconds)
-{
-    if (seconds == 0)
-        seconds = UACPI_DEFAULT_LOOP_TIMEOUT_SECONDS;
-
-    g_uacpi_rt_ctx.loop_timeout_seconds = seconds;
-}
-
-void uacpi_context_set_max_call_stack_depth(uacpi_u32 depth)
-{
-    if (depth == 0)
-        depth = UACPI_DEFAULT_MAX_CALL_STACK_DEPTH;
-
-    g_uacpi_rt_ctx.max_call_stack_depth = depth;
-}
-
-uacpi_u32 uacpi_context_get_loop_timeout(void)
-{
-    return g_uacpi_rt_ctx.loop_timeout_seconds;
+    if (!version_printed) {
+        version_printed = UACPI_TRUE;
+        uacpi_info(
+            "starting uACPI, version %d.%d.%d\n",
+            UACPI_MAJOR, UACPI_MINOR, UACPI_PATCH
+        );
+    }
 }
 
 void uacpi_context_set_proactive_table_checksum(uacpi_bool setting)
@@ -97,6 +61,8 @@ const uacpi_char *uacpi_status_to_string(uacpi_status st)
         return "bad table checksum";
     case UACPI_STATUS_INVALID_SIGNATURE:
         return "invalid table signature";
+    case UACPI_STATUS_INVALID_TABLE_LENGTH:
+        return "invalid table length";
     case UACPI_STATUS_NOT_FOUND:
         return "not found";
     case UACPI_STATUS_INVALID_ARGUMENT:
@@ -153,6 +119,66 @@ const uacpi_char *uacpi_status_to_string(uacpi_status st)
     default:
         return "<invalid status>";
     }
+}
+
+void uacpi_state_reset(void)
+{
+#ifndef UACPI_BAREBONES_MODE
+    uacpi_deinitialize_namespace();
+    uacpi_deinitialize_interfaces();
+    uacpi_deinitialize_events();
+    uacpi_deinitialize_notify();
+    uacpi_deinitialize_opregion();
+#endif
+
+    uacpi_deinitialize_tables();
+
+#ifndef UACPI_BAREBONES_MODE
+
+#ifndef UACPI_REDUCED_HARDWARE
+    if (g_uacpi_rt_ctx.was_in_legacy_mode)
+        uacpi_leave_acpi_mode();
+#endif
+
+    uacpi_deinitialize_registers();
+
+#ifndef UACPI_REDUCED_HARDWARE
+    if (g_uacpi_rt_ctx.global_lock_event)
+        uacpi_kernel_free_event(g_uacpi_rt_ctx.global_lock_event);
+    if (g_uacpi_rt_ctx.global_lock_spinlock)
+        uacpi_kernel_free_spinlock(g_uacpi_rt_ctx.global_lock_spinlock);
+#endif
+
+#endif // !UACPI_BAREBONES_MODE
+
+    uacpi_memzero(&g_uacpi_rt_ctx, sizeof(g_uacpi_rt_ctx));
+
+#if defined(UACPI_KERNEL_INITIALIZATION) && !defined(UACPI_BAREBONES_MODE)
+    uacpi_kernel_deinitialize();
+#endif
+}
+
+#ifndef UACPI_BAREBONES_MODE
+
+void uacpi_context_set_loop_timeout(uacpi_u32 seconds)
+{
+    if (seconds == 0)
+        seconds = UACPI_DEFAULT_LOOP_TIMEOUT_SECONDS;
+
+    g_uacpi_rt_ctx.loop_timeout_seconds = seconds;
+}
+
+void uacpi_context_set_max_call_stack_depth(uacpi_u32 depth)
+{
+    if (depth == 0)
+        depth = UACPI_DEFAULT_MAX_CALL_STACK_DEPTH;
+
+    g_uacpi_rt_ctx.max_call_stack_depth = depth;
+}
+
+uacpi_u32 uacpi_context_get_loop_timeout(void)
+{
+    return g_uacpi_rt_ctx.loop_timeout_seconds;
 }
 
 #ifndef UACPI_REDUCED_HARDWARE
@@ -221,7 +247,7 @@ static uacpi_status set_mode(enum hw_mode mode)
     return UACPI_STATUS_HARDWARE_TIMEOUT;
 }
 
-static uacpi_status enter_mode(enum hw_mode mode)
+static uacpi_status enter_mode(enum hw_mode mode, uacpi_bool *did_change)
 {
     uacpi_status ret;
     const uacpi_char *mode_str;
@@ -248,18 +274,28 @@ static uacpi_status enter_mode(enum hw_mode mode)
     }
 
     uacpi_trace("entered %s mode\n", mode_str);
+    if (did_change != UACPI_NULL)
+        *did_change = UACPI_TRUE;
+
     return ret;
 }
 
 uacpi_status uacpi_enter_acpi_mode(void)
 {
-    return enter_mode(HW_MODE_ACPI);
+    return enter_mode(HW_MODE_ACPI, UACPI_NULL);
 }
 
 uacpi_status uacpi_leave_acpi_mode(void)
 {
-    return enter_mode(HW_MODE_LEGACY);
+    return enter_mode(HW_MODE_LEGACY, UACPI_NULL);
 }
+
+static void enter_acpi_mode_initial(void)
+{
+    enter_mode(HW_MODE_ACPI, &g_uacpi_rt_ctx.was_in_legacy_mode);
+}
+#else
+static void enter_acpi_mode_initial(void) { }
 #endif
 
 uacpi_init_level uacpi_get_current_init_level(void)
@@ -297,6 +333,14 @@ uacpi_status uacpi_initialize(uacpi_u64 flags)
     if (uacpi_unlikely_error(ret))
         goto out_fatal_error;
 
+    ret = uacpi_initialize_registers();
+    if (uacpi_unlikely_error(ret))
+        goto out_fatal_error;
+
+    ret = uacpi_initialize_events_early();
+    if (uacpi_unlikely_error(ret))
+        goto out_fatal_error;
+
     ret = uacpi_initialize_opregion();
     if (uacpi_unlikely_error(ret))
         goto out_fatal_error;
@@ -315,10 +359,9 @@ uacpi_status uacpi_initialize(uacpi_u64 flags)
 
     uacpi_install_default_address_space_handlers();
 
-    if (!uacpi_check_flag(UACPI_FLAG_NO_ACPI_MODE)) {
-        // This is not critical, so just ignore the return status
-        uacpi_enter_acpi_mode();
-    }
+    if (!uacpi_check_flag(UACPI_FLAG_NO_ACPI_MODE))
+        enter_acpi_mode_initial();
+
     return UACPI_STATUS_OK;
 
 out_fatal_error:
@@ -354,6 +397,32 @@ static uacpi_bool match_ssdt_or_psdt(struct uacpi_installed_table *tbl)
 static uacpi_u64 elapsed_ms(uacpi_u64 begin_ns, uacpi_u64 end_ns)
 {
     return (end_ns - begin_ns) / (1000ull * 1000ull);
+}
+
+static uacpi_bool warn_on_bad_timesource(uacpi_u64 begin_ts, uacpi_u64 end_ts)
+{
+    const uacpi_char *reason;
+
+    if (uacpi_unlikely(begin_ts == 0 && end_ts == 0)) {
+        reason = "uacpi_kernel_get_nanoseconds_since_boot() appears to be a stub";
+        goto out_bad_timesource;
+    }
+
+    if (uacpi_unlikely(begin_ts == end_ts)) {
+        reason = "poor time source precision detected";
+        goto out_bad_timesource;
+    }
+
+    if (uacpi_unlikely(end_ts < begin_ts)) {
+        reason = "time source backwards drift detected";
+        goto out_bad_timesource;
+    }
+
+    return UACPI_FALSE;
+
+out_bad_timesource:
+    uacpi_warn("%s, this may cause problems\n", reason);
+    return UACPI_TRUE;
 }
 
 uacpi_status uacpi_namespace_load(void)
@@ -407,20 +476,19 @@ uacpi_status uacpi_namespace_load(void)
     }
 
     end_ts = uacpi_kernel_get_nanoseconds_since_boot();
+    g_uacpi_rt_ctx.bad_timesource = warn_on_bad_timesource(begin_ts, end_ts);
 
-    if (uacpi_unlikely(st.failure_counter != 0)) {
+    if (uacpi_unlikely(st.failure_counter != 0 || g_uacpi_rt_ctx.bad_timesource)) {
         uacpi_info(
-            "loaded %u AML blob%s in %"UACPI_PRIu64"ms (%u error%s)\n",
-            st.load_counter, st.load_counter > 1 ? "s" : "",
-            UACPI_FMT64(elapsed_ms(begin_ts, end_ts)), st.failure_counter,
-            st.failure_counter > 1 ? "s" : ""
+            "loaded %u AML blob%s (%u error%s)\n",
+            st.load_counter, st.load_counter > 1 ? "s" : "", st.failure_counter,
+            st.failure_counter == 1 ? "" : "s"
         );
     } else {
         uacpi_u64 ops = g_uacpi_rt_ctx.opcodes_executed;
         uacpi_u64 ops_per_sec = ops * UACPI_NANOSECONDS_PER_SEC;
 
-        if (uacpi_likely(end_ts > begin_ts))
-            ops_per_sec /= end_ts - begin_ts;
+        ops_per_sec /= end_ts - begin_ts;
 
         uacpi_info(
             "successfully loaded %u AML blob%s, %"UACPI_PRIu64" ops in "
@@ -584,7 +652,9 @@ uacpi_status uacpi_namespace_initialize(void)
         handler = handlers->head;
 
         while (handler) {
-            uacpi_reg_all_opregions(root, handler->space);
+            if (uacpi_address_space_handler_is_default(handler))
+                uacpi_reg_all_opregions(root, handler->space);
+
             handler = handler->next;
         }
     }
@@ -597,12 +667,19 @@ uacpi_status uacpi_namespace_initialize(void)
 
     end_ts = uacpi_kernel_get_nanoseconds_since_boot();
 
-    uacpi_info(
-        "namespace initialization done in %"UACPI_PRIu64"ms: "
-        "%zu devices, %zu thermal zones\n",
-        UACPI_FMT64(elapsed_ms(begin_ts, end_ts)),
-        ctx.devices, ctx.thermal_zones
-    );
+    if (uacpi_likely(!g_uacpi_rt_ctx.bad_timesource)) {
+        uacpi_info(
+            "namespace initialization done in %"UACPI_PRIu64"ms: "
+            "%zu devices, %zu thermal zones\n",
+            UACPI_FMT64(elapsed_ms(begin_ts, end_ts)),
+            ctx.devices, ctx.thermal_zones
+        );
+    } else {
+        uacpi_info(
+            "namespace initialization done: %zu devices, %zu thermal zones\n",
+            ctx.devices, ctx.thermal_zones
+        );
+    }
 
     uacpi_trace(
         "_STA calls: %zu (%zu errors), _INI calls: %zu (%zu errors)\n",
@@ -917,3 +994,5 @@ uacpi_status uacpi_get_aml_bitness(uacpi_u8 *out_bitness)
     *out_bitness = g_uacpi_rt_ctx.is_rev1 ? 32 : 64;
     return UACPI_STATUS_OK;
 }
+
+#endif // !UACPI_BAREBONES_MODE

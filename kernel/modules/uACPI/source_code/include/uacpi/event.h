@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+#ifndef UACPI_BAREBONES_MODE
+
 typedef enum uacpi_fixed_event {
     UACPI_FIXED_EVENT_TIMER_STATUS = 1,
     UACPI_FIXED_EVENT_POWER_BUTTON,
@@ -111,7 +113,7 @@ uacpi_status uacpi_install_gpe_handler(
  * NOTE: 'gpe_device' may be null for GPEs managed by \_GPE
  */
 UACPI_ALWAYS_ERROR_FOR_REDUCED_HARDWARE(
-    uacpi_status uacpi_install_gpe_handler_raw(
+uacpi_status uacpi_install_gpe_handler_raw(
     uacpi_namespace_node *gpe_device, uacpi_u16 idx,
     uacpi_gpe_triggering triggering, uacpi_gpe_handler handler, uacpi_handle ctx
 ))
@@ -150,7 +152,6 @@ UACPI_ALWAYS_ERROR_FOR_REDUCED_HARDWARE(
 uacpi_status uacpi_disable_gpe_for_wake(
     uacpi_namespace_node *gpe_device, uacpi_u16 idx
 ))
-
 
 /*
  * Finalize GPE initialization by enabling all GPEs not configured for wake and
@@ -277,6 +278,8 @@ UACPI_ALWAYS_ERROR_FOR_REDUCED_HARDWARE(
 uacpi_status uacpi_uninstall_gpe_block(
     uacpi_namespace_node *gpe_device
 ))
+
+#endif // !UACPI_BAREBONES_MODE
 
 #ifdef __cplusplus
 }

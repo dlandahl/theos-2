@@ -18,3 +18,5 @@ key.pem
 server.py
 
 *.vbox
+
+kernel/modules/new_uACPI/

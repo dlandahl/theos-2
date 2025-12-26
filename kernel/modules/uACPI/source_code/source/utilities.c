@@ -7,52 +7,6 @@
 #include <uacpi/internal/log.h>
 #include <uacpi/internal/namespace.h>
 
-void uacpi_eisa_id_to_string(uacpi_u32 id, uacpi_char *out_string)
-{
-    static uacpi_char hex_to_ascii[16] = {
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-        'A', 'B', 'C', 'D', 'E', 'F'
-    };
-
-    /*
-     * For whatever reason bits are encoded upper to lower here, swap
-     * them around so that we don't have to do ridiculous bit shifts
-     * everywhere.
-     */
-    union {
-        uacpi_u8 bytes[4];
-        uacpi_u32 dword;
-    } orig, swapped;
-
-    orig.dword = id;
-    swapped.bytes[0] = orig.bytes[3];
-    swapped.bytes[1] = orig.bytes[2];
-    swapped.bytes[2] = orig.bytes[1];
-    swapped.bytes[3] = orig.bytes[0];
-
-    /*
-     * Bit 16 - 20: 3rd character (- 0x40) of mfg code
-     * Bit 21 - 25: 2nd character (- 0x40) of mfg code
-     * Bit 26 - 30: 1st character (- 0x40) of mfg code
-     */
-    out_string[0] = (uacpi_char)(0x40 + ((swapped.dword >> 26) & 0x1F));
-    out_string[1] = (uacpi_char)(0x40 + ((swapped.dword >> 21) & 0x1F));
-    out_string[2] = (uacpi_char)(0x40 + ((swapped.dword >> 16) & 0x1F));
-
-    /*
-     * Bit 0  - 3 : 4th hex digit of product number
-     * Bit 4  - 7 : 3rd hex digit of product number
-     * Bit 8  - 11: 2nd hex digit of product number
-     * Bit 12 - 15: 1st hex digit of product number
-     */
-    out_string[3] = hex_to_ascii[(swapped.dword >> 12) & 0x0F];
-    out_string[4] = hex_to_ascii[(swapped.dword >> 8 ) & 0x0F];
-    out_string[5] = hex_to_ascii[(swapped.dword >> 4 ) & 0x0F];
-    out_string[6] = hex_to_ascii[(swapped.dword >> 0 ) & 0x0F];
-
-    out_string[7] = '\0';
-}
-
 enum char_type {
     CHAR_TYPE_CONTROL = 1 << 0,
     CHAR_TYPE_SPACE = 1 << 1,
@@ -212,30 +166,6 @@ static const uacpi_u8 ascii_map[256] = {
     CHAR_TYPE_CONTROL // 127 backspace
 };
 
-static inline uacpi_bool is_valid_name_byte(uacpi_u8 c)
-{
-    // ‘_’ := 0x5F
-    if (c == 0x5F)
-        return UACPI_TRUE;
-
-    /*
-     * LeadNameChar := ‘A’-‘Z’ | ‘_’
-     * DigitChar := ‘0’ - ‘9’
-     * NameChar := DigitChar | LeadNameChar
-     * ‘A’-‘Z’ := 0x41 - 0x5A
-     * ‘0’-‘9’ := 0x30 - 0x39
-     */
-    return (ascii_map[c] & (CHAR_TYPE_DIGIT | CHAR_TYPE_UPPER)) != 0;
-}
-
-uacpi_bool uacpi_is_valid_nameseg(uacpi_u8 *nameseg)
-{
-    return is_valid_name_byte(nameseg[0]) &&
-           is_valid_name_byte(nameseg[1]) &&
-           is_valid_name_byte(nameseg[2]) &&
-           is_valid_name_byte(nameseg[3]);
-}
-
 static uacpi_bool is_char(uacpi_char c, enum char_type type)
 {
     return (ascii_map[(uacpi_u8)c] & type) == type;
@@ -364,6 +294,78 @@ out:
     return ret;
 }
 
+#ifndef UACPI_BAREBONES_MODE
+
+static inline uacpi_bool is_valid_name_byte(uacpi_u8 c)
+{
+    // ‘_’ := 0x5F
+    if (c == 0x5F)
+        return UACPI_TRUE;
+
+    /*
+     * LeadNameChar := ‘A’-‘Z’ | ‘_’
+     * DigitChar := ‘0’ - ‘9’
+     * NameChar := DigitChar | LeadNameChar
+     * ‘A’-‘Z’ := 0x41 - 0x5A
+     * ‘0’-‘9’ := 0x30 - 0x39
+     */
+    return (ascii_map[c] & (CHAR_TYPE_DIGIT | CHAR_TYPE_UPPER)) != 0;
+}
+
+uacpi_bool uacpi_is_valid_nameseg(uacpi_u8 *nameseg)
+{
+    return is_valid_name_byte(nameseg[0]) &&
+           is_valid_name_byte(nameseg[1]) &&
+           is_valid_name_byte(nameseg[2]) &&
+           is_valid_name_byte(nameseg[3]);
+}
+
+void uacpi_eisa_id_to_string(uacpi_u32 id, uacpi_char *out_string)
+{
+    static uacpi_char hex_to_ascii[16] = {
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+        'A', 'B', 'C', 'D', 'E', 'F'
+    };
+
+    /*
+     * For whatever reason bits are encoded upper to lower here, swap
+     * them around so that we don't have to do ridiculous bit shifts
+     * everywhere.
+     */
+    union {
+        uacpi_u8 bytes[4];
+        uacpi_u32 dword;
+    } orig, swapped;
+
+    orig.dword = id;
+    swapped.bytes[0] = orig.bytes[3];
+    swapped.bytes[1] = orig.bytes[2];
+    swapped.bytes[2] = orig.bytes[1];
+    swapped.bytes[3] = orig.bytes[0];
+
+    /*
+     * Bit 16 - 20: 3rd character (- 0x40) of mfg code
+     * Bit 21 - 25: 2nd character (- 0x40) of mfg code
+     * Bit 26 - 30: 1st character (- 0x40) of mfg code
+     */
+    out_string[0] = (uacpi_char)(0x40 + ((swapped.dword >> 26) & 0x1F));
+    out_string[1] = (uacpi_char)(0x40 + ((swapped.dword >> 21) & 0x1F));
+    out_string[2] = (uacpi_char)(0x40 + ((swapped.dword >> 16) & 0x1F));
+
+    /*
+     * Bit 0  - 3 : 4th hex digit of product number
+     * Bit 4  - 7 : 3rd hex digit of product number
+     * Bit 8  - 11: 2nd hex digit of product number
+     * Bit 12 - 15: 1st hex digit of product number
+     */
+    out_string[3] = hex_to_ascii[(swapped.dword >> 12) & 0x0F];
+    out_string[4] = hex_to_ascii[(swapped.dword >> 8 ) & 0x0F];
+    out_string[5] = hex_to_ascii[(swapped.dword >> 4 ) & 0x0F];
+    out_string[6] = hex_to_ascii[(swapped.dword >> 0 ) & 0x0F];
+
+    out_string[7] = '\0';
+}
+
 #define PNP_ID_LENGTH 8
 
 uacpi_status uacpi_eval_hid(uacpi_namespace_node *node, uacpi_id_string **out_id)
@@ -389,9 +391,11 @@ uacpi_status uacpi_eval_hid(uacpi_namespace_node *node, uacpi_id_string **out_id
 
         size += buf->size;
         if (uacpi_unlikely(buf->size == 0 || size < buf->size)) {
+            uacpi_object_name name = uacpi_namespace_node_name(node);
+
             uacpi_error(
                 "%.4s._HID: empty/invalid EISA ID string (%zu bytes)\n",
-                uacpi_namespace_node_name(node).text, buf->size
+                name.text, buf->size
             );
             ret = UACPI_STATUS_AML_BAD_ENCODING;
             break;
@@ -483,18 +487,22 @@ uacpi_status uacpi_eval_cid(
             uacpi_size buf_size = object->buffer->size;
 
             if (uacpi_unlikely(buf_size == 0)) {
+                uacpi_object_name name = uacpi_namespace_node_name(node);
+
                 uacpi_error(
                     "%.4s._CID: empty EISA ID string (sub-object %zu)\n",
-                    uacpi_namespace_node_name(node).text, i
+                    name.text, i
                 );
                 return UACPI_STATUS_AML_INCOMPATIBLE_OBJECT_TYPE;
             }
 
             size += buf_size;
             if (uacpi_unlikely(size < buf_size)) {
+                uacpi_object_name name = uacpi_namespace_node_name(node);
+
                 uacpi_error(
                     "%.4s._CID: buffer size overflow (+ %zu)\n",
-                    uacpi_namespace_node_name(node).text, buf_size
+                    name.text, buf_size
                 );
                 return UACPI_STATUS_AML_BAD_ENCODING;
             }
@@ -505,13 +513,16 @@ uacpi_status uacpi_eval_cid(
         case UACPI_OBJECT_INTEGER:
             size += PNP_ID_LENGTH;
             break;
-        default:
+        default: {
+            uacpi_object_name name = uacpi_namespace_node_name(node);
+
             uacpi_error(
                 "%.4s._CID: invalid package sub-object %zu type: %s\n",
-                uacpi_namespace_node_name(node).text, i,
+                name.text, i,
                 uacpi_object_type_to_string(object->type)
             );
             return UACPI_STATUS_AML_INCOMPATIBLE_OBJECT_TYPE;
+        }
         }
     }
 
@@ -670,9 +681,11 @@ uacpi_status uacpi_eval_uid(
     if (obj->type == UACPI_OBJECT_STRING) {
         size = obj->buffer->size;
         if (uacpi_unlikely(size == 0 || size > 0xE0000000)) {
+            uacpi_object_name name = uacpi_namespace_node_name(node);
+
             uacpi_error(
                 "invalid %.4s._UID string size: %u\n",
-                uacpi_namespace_node_name(node).text, size
+                name.text, size
             );
             ret = UACPI_STATUS_AML_BAD_ENCODING;
             goto out;
@@ -928,7 +941,7 @@ struct device_find_ctx {
     uacpi_iteration_callback cb;
 };
 
-uacpi_iteration_decision find_one_device(
+static uacpi_iteration_decision find_one_device(
     void *opaque, uacpi_namespace_node *node, uacpi_u32 depth
 )
 {
@@ -956,13 +969,13 @@ uacpi_status uacpi_find_devices_at(
     uacpi_iteration_callback cb, void *user
 )
 {
+    struct device_find_ctx ctx = { 0 };
+
     UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
 
-    struct device_find_ctx ctx = {
-        .target_hids = hids,
-        .user = user,
-        .cb = cb,
-    };
+    ctx.target_hids = hids;
+    ctx.user = user;
+    ctx.cb = cb;
 
     return uacpi_namespace_for_each_child(
         parent, find_one_device, UACPI_NULL, UACPI_OBJECT_DEVICE_BIT,
@@ -974,9 +987,11 @@ uacpi_status uacpi_find_devices(
     const uacpi_char *hid, uacpi_iteration_callback cb, void *user
 )
 {
-    const uacpi_char *hids[] = {
-        hid, UACPI_NULL
+    const uacpi_char *hids[2] = {
+        UACPI_NULL, UACPI_NULL
     };
+
+    hids[0] = hid;
 
     return uacpi_find_devices_at(uacpi_namespace_root(), hids, cb, user);
 }
@@ -1137,3 +1152,5 @@ void uacpi_free_dynamic_string(const uacpi_char *str)
 
     uacpi_free((void*)str, uacpi_strlen(str) + 1);
 }
+
+#endif // !UACPI_BAREBONES_MODE

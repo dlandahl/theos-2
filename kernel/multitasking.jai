@@ -752,22 +752,21 @@ task_do_work :: () {
 
 ring_3_work_mutex: Mutex;
 
+ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    if mode != .ALLOCATE && mode != .RESIZE return null;
+
+    buffer := allocate_from_user_mode(size);
+    if mode == .RESIZE && old_memory != null {
+        memcpy(buffer, old_memory, old_size);
+    }
+
+    return buffer;
+}
+
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {
-        context.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-            // Cannot call into the normal allocator as it will use a spinlock, which will disable interrupts, which user mode is not allowed to do.
-
-            if mode != .ALLOCATE && mode != .RESIZE return null;
-
-            buffer := allocate_from_user_mode(size);
-
-            if mode == .RESIZE && old_memory != null {
-                memcpy(buffer, old_memory, old_size);
-            }
-
-            return buffer;
-        }
+        context.allocator.proc = ring_3_allocator;
 
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;

@@ -3,6 +3,8 @@
 #include <uacpi/internal/types.h>
 #include <uacpi/resources.h>
 
+#ifndef UACPI_BAREBONES_MODE
+
 enum uacpi_aml_resource {
     UACPI_AML_RESOURCE_TYPE_INVALID = 0,
 
@@ -247,18 +249,18 @@ struct uacpi_resource_convert_instruction {
     union {
         uacpi_u8 aml_offset;
         uacpi_u8 arg0;
-    };
+    } f1;
 
     union {
         uacpi_u8 native_offset;
         uacpi_u8 arg1;
-    };
+    } f2;
 
     union {
         uacpi_u8 imm;
         uacpi_u8 bit_index;
         uacpi_u8 arg2;
-    };
+    } f3;
 };
 
 struct uacpi_resource_spec {
@@ -307,17 +309,19 @@ typedef uacpi_iteration_decision (*uacpi_aml_resource_iteration_callback)(
 );
 
 uacpi_status uacpi_for_each_aml_resource(
-    uacpi_buffer *buffer, uacpi_aml_resource_iteration_callback cb, void *user
+    uacpi_data_view, uacpi_aml_resource_iteration_callback cb, void *user
 );
 
 uacpi_status uacpi_find_aml_resource_end_tag(
-    uacpi_buffer *buffer, uacpi_size *out_offset
+    uacpi_data_view, uacpi_size *out_offset
 );
 
 uacpi_status uacpi_native_resources_from_aml(
-    uacpi_buffer *aml_buffer, uacpi_resources **out_resources
+    uacpi_data_view, uacpi_resources **out_resources
 );
 
 uacpi_status uacpi_native_resources_to_aml(
     uacpi_resources *resources, uacpi_object **out_template
 );
+
+#endif // !UACPI_BAREBONES_MODE

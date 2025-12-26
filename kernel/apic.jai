@@ -653,57 +653,6 @@ Uacpi_State :: struct {
 }
 
 #program_export
-uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, byte_width: u8, value: *u64) -> uacpi_status #c_call {
-    using bus_address;
-
-    for global.pci_ecam {
-        if it.segment_group != segment continue;
-
-        device_offset := cast(u64, bus * 256 + device * 8 + function);
-        address := it.base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
-
-        // Todo: we need to handle unaligned accesses here.
-        if address & 0b11 bluescreen();
-
-        // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
-        address += DIRECT_MAPPING_BASE;
-
-        value.* = address.(*u32).*.(u64);
-        value.* &= cast(u64, 1 << (byte_width*8)) - 1;
-
-        return .OK;
-    }
-
-    bluescreen();
-    return .INVALID_ARGUMENT;
-}
-
-#program_export
-uacpi_kernel_pci_write :: (bus_address: *uacpi_pci_address, offset: uacpi_size, byte_width: u8, value: u64) -> uacpi_status #c_call {
-    using bus_address;
-
-    for global.pci_ecam {
-        if it.segment_group != segment continue;
-
-        device_offset := cast(u64, bus * 256 + device * 8 + function);
-        address := it.base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
-
-        // Todo: we need to handle unaligned accesses here.
-        if address & 0b11 bluescreen();
-
-        // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
-        address += DIRECT_MAPPING_BASE;
-
-        address.(*u32).* = value.(u32);
-
-        return .OK;
-    }
-
-    bluescreen();
-    return .INVALID_ARGUMENT;
-}
-
-#program_export
 uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi_handle) -> uacpi_status #c_call {
     using global.uacpi_state;
 
@@ -715,53 +664,6 @@ uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi
 #program_export uacpi_kernel_io_unmap :: () #c_call {
     write_string("uACPI kernel call: \"uacpi_kernel_io_unmap\"\n");
     bluescreen();
-}
-
-#program_export
-uacpi_kernel_io_read :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: *u64) -> uacpi_status #c_call {
-    using global.uacpi_state;
-
-    io_base := cast(u16) handle;
-    address := io_base + xx offset;
-
-    result: u64;
-    #asm {
-        address === d;
-        result  === a;
-    }
-
-    if byte_width == {
-        case 1; #asm { in.8  result, address; }
-        case 2; #asm { in.16 result, address; }
-        case 4; #asm { in.32 result, address; }
-        case; bluescreen();
-    }
-
-    value.* = result;
-
-    return .OK;
-}
-
-#program_export
-uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: u64) -> uacpi_status #c_call {
-    using global.uacpi_state;
-
-    io_base := cast(u16) handle;
-    address := io_base + xx offset;
-
-    #asm {
-        address === d;
-        value   === a;
-    }
-
-    if byte_width == {
-        case 1; #asm { out.8  address, value; }
-        case 2; #asm { out.16 address, value; }
-        case 4; #asm { out.32 address, value; }
-        case; bluescreen();
-    }
-
-    return .OK;
 }
 
 #program_export
@@ -1081,46 +983,149 @@ __popcountdi2 :: (a: s32) -> s32 #c_call {
     return popcount(a);
 }
 
-// From a newer version of uACPI, todo:
+
+do_uacpi_kernel_io_read :: (device: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #expand {
+    #asm {
+        mov address: gpr === d, device;
+        add address, offset;
+
+        in?T result: gpr === a, address;
+        mov [value], result;
+    }
+    return .OK;
+}
 
 #program_export
-uacpi_kernel_io_read8 :: () #c_call { bluescreen(); }
+uacpi_kernel_io_read8 :: (device: uacpi_handle, offset: uacpi_size, value: *u8) -> uacpi_status #c_call {
+    return do_uacpi_kernel_io_read(device, offset, value);
+}
 
 #program_export
-uacpi_kernel_io_read16 :: () #c_call { bluescreen(); }
+uacpi_kernel_io_read16 :: (device: uacpi_handle, offset: uacpi_size, value: *u16) -> uacpi_status #c_call {
+    return do_uacpi_kernel_io_read(device, offset, value);
+}
 
 #program_export
-uacpi_kernel_io_read32 :: () #c_call { bluescreen(); }
+uacpi_kernel_io_read32 :: (device: uacpi_handle, offset: uacpi_size, value: *u32) -> uacpi_status #c_call {
+    return do_uacpi_kernel_io_read(device, offset, value);
+}
+
+
+
+do_uacpi_kernel_io_write :: (device: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #expand {
+    #asm {
+        mov address: gpr === d, device;
+        add address, offset;
+
+        value === a;
+        out?T address, value;
+    }
+    return .OK;
+}
 
 #program_export
-uacpi_kernel_io_write8 :: () #c_call { bluescreen(); }
+uacpi_kernel_io_write8 :: (device: uacpi_handle, offset: uacpi_size, value: u8) -> uacpi_status #c_call {
+    return do_uacpi_kernel_io_write(device, offset, value);
+}
 
 #program_export
-uacpi_kernel_io_write16 :: () #c_call { bluescreen(); }
+uacpi_kernel_io_write16 :: (device: uacpi_handle, offset: uacpi_size, value: u16) -> uacpi_status #c_call {
+    return do_uacpi_kernel_io_write(device, offset, value);
+}
 
 #program_export
-uacpi_kernel_io_write32 :: () #c_call { bluescreen(); }
+uacpi_kernel_io_write32 :: (device: uacpi_handle, offset: uacpi_size, value: u32) -> uacpi_status #c_call {
+    return do_uacpi_kernel_io_write(device, offset, value);
+}
+
+
+
+do_uacpi_kernel_pci_read :: (handle: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #expand {
+    using cast(*uacpi_pci_address) *handle;
+
+    for global.pci_ecam {
+        if it.segment_group != segment continue;
+
+        device_offset := cast(u64) (bus * 256 + device * 8 + function);
+        address := it.base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
+
+        // Todo: We need to handle unaligned accesses here.
+        if address & 0b11 bluescreen();
+
+        // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
+        address += DIRECT_MAPPING_BASE + offset;
+
+        value.* = (.*) cast(*T) address;
+        return .OK;
+    }
+
+    bluescreen();
+    return .INVALID_ARGUMENT;
+}
 
 #program_export
-uacpi_kernel_pci_read8 :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_read8 :: (handle: uacpi_handle, offset: uacpi_size, value: *u8) -> uacpi_status #c_call {
+    return do_uacpi_kernel_pci_read(handle, offset, value);
+}
 
 #program_export
-uacpi_kernel_pci_read16 :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_read16 :: (handle: uacpi_handle, offset: uacpi_size, value: *u16) -> uacpi_status #c_call {
+    return do_uacpi_kernel_pci_read(handle, offset, value);
+}
 
 #program_export
-uacpi_kernel_pci_read32 :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_read32 :: (handle: uacpi_handle, offset: uacpi_size, value: *u32) -> uacpi_status #c_call {
+    return do_uacpi_kernel_pci_read(handle, offset, value);
+}
+
+
+
+do_uacpi_kernel_pci_write :: (handle: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #expand {
+    using cast(*uacpi_pci_address) *handle;
+
+    for global.pci_ecam {
+        if it.segment_group != segment continue;
+
+        device_offset := cast(u64) (bus * 256 + device * 8 + function);
+        address := it.base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
+
+        // Todo: We need to handle unaligned accesses here.
+        if address & 0b11 bluescreen();
+
+        // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
+        address += DIRECT_MAPPING_BASE + offset;
+
+        (.*) cast(*T) address = value;
+        return .OK;
+    }
+
+    bluescreen();
+    return .INVALID_ARGUMENT;
+}
 
 #program_export
-uacpi_kernel_pci_write8 :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_write8 :: (handle: uacpi_handle, offset: uacpi_size, value: u8) -> uacpi_status #c_call {
+    return do_uacpi_kernel_pci_write(handle, offset, value);
+}
 
 #program_export
-uacpi_kernel_pci_write16 :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_write16 :: (handle: uacpi_handle, offset: uacpi_size, value: u16) -> uacpi_status #c_call {
+    return do_uacpi_kernel_pci_write(handle, offset, value);
+}
 
 #program_export
-uacpi_kernel_pci_write32 :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_write32 :: (handle: uacpi_handle, offset: uacpi_size, value: u32) -> uacpi_status #c_call {
+    return do_uacpi_kernel_pci_write(handle, offset, value);
+}
 
 #program_export
-uacpi_kernel_pci_device_close :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_device_open :: (address: uacpi_pci_address, out_handle: *uacpi_handle) -> uacpi_status #c_call {
+    #assert size_of(uacpi_pci_address) <= size_of(uacpi_handle);
+    (.*) cast(*uacpi_pci_address) out_handle = address;
+    return .OK;
+}
 
 #program_export
-uacpi_kernel_pci_device_open :: () #c_call { bluescreen(); }
+uacpi_kernel_pci_device_close :: (handle: uacpi_handle) #c_call {
+    // Nothing to do.
+}

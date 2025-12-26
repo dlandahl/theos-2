@@ -282,7 +282,6 @@ kernel_entry :: () #no_context {
         time := get_monotonic_system_time();
         random_seed(cast(S128)time);
 
-        log("Initializing uACPI.");
         initialize_uacpi();
         find_all_pci_devices();
 

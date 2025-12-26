@@ -14,8 +14,8 @@
     array_add(*options.source_files, ..source_files);
     array_add(*options.include_paths, "source_code/include");
 
-    array_add(*options.libnames, "uacpi.a");
-    array_add(*options.libpaths, ".");
+    array_add(*options.libraries, .{filename="uacpi"});
+    array_add(*options.library_search_paths, ".");
 
     options.strip_enum_prefixes = true;
     options.auto_detect_enum_prefixes = true;

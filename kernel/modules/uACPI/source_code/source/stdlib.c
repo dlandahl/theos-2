@@ -1,9 +1,10 @@
 #include <uacpi/internal/stdlib.h>
 #include <uacpi/internal/utilities.h>
-#include <uacpi/platform/config.h>
+
+#ifdef UACPI_USE_BUILTIN_STRING
 
 #ifndef uacpi_memcpy
-void *uacpi_memcpy(void *dest, const void *src, size_t count)
+void *uacpi_memcpy(void *dest, const void *src, uacpi_size count)
 {
     uacpi_char *cd = dest;
     const uacpi_char *cs = src;
@@ -65,6 +66,8 @@ uacpi_i32 uacpi_memcmp(const void *lhs, const void *rhs, uacpi_size count)
 }
 #endif
 
+#endif // UACPI_USE_BUILTIN_STRING
+
 #ifndef uacpi_strlen
 uacpi_size uacpi_strlen(const uacpi_char *str)
 {
@@ -75,6 +78,8 @@ uacpi_size uacpi_strlen(const uacpi_char *str)
     return str1 - str;
 }
 #endif
+
+#ifndef UACPI_BAREBONES_MODE
 
 #ifndef uacpi_strnlen
 uacpi_size uacpi_strnlen(const uacpi_char *str, uacpi_size max)
@@ -103,6 +108,121 @@ uacpi_i32 uacpi_strcmp(const uacpi_char *lhs, const uacpi_char *rhs)
     return *(cucp)&lhs[i] - *(cucp)&rhs[i];
 }
 #endif
+
+void uacpi_memcpy_zerout(void *dst, const void *src,
+    uacpi_size dst_size, uacpi_size src_size)
+{
+    uacpi_size bytes_to_copy = UACPI_MIN(src_size, dst_size);
+
+    if (bytes_to_copy)
+        uacpi_memcpy(dst, src, bytes_to_copy);
+
+    if (dst_size > bytes_to_copy)
+        uacpi_memzero((uacpi_u8 *)dst + bytes_to_copy, dst_size - bytes_to_copy);
+}
+
+uacpi_u8 uacpi_bit_scan_forward(uacpi_u64 value)
+{
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned char ret;
+    unsigned long index;
+
+#ifdef _WIN64
+    ret = _BitScanForward64(&index, value);
+    if (ret == 0)
+        return 0;
+
+    return (uacpi_u8)index + 1;
+#else
+    ret = _BitScanForward(&index, value);
+    if (ret == 0) {
+        ret = _BitScanForward(&index, value >> 32);
+        if (ret == 0)
+            return 0;
+
+        return (uacpi_u8)index + 33;
+    }
+
+    return (uacpi_u8)index + 1;
+#endif
+
+#elif defined(__WATCOMC__)
+    // TODO: Use compiler intrinsics or inline ASM here
+    uacpi_u8 index;
+    uacpi_u64 mask = 1;
+
+    for (index = 1; index <= 64; index++, mask <<= 1) {
+        if (value & mask) {
+            return index;
+        }
+    }
+
+    return 0;
+#else
+    return __builtin_ffsll(value);
+#endif
+}
+
+uacpi_u8 uacpi_bit_scan_backward(uacpi_u64 value)
+{
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned char ret;
+    unsigned long index;
+
+#ifdef _WIN64
+    ret = _BitScanReverse64(&index, value);
+    if (ret == 0)
+        return 0;
+
+    return (uacpi_u8)index + 1;
+#else
+    ret = _BitScanReverse(&index, value >> 32);
+    if (ret == 0) {
+        ret = _BitScanReverse(&index, value);
+        if (ret == 0)
+            return 0;
+
+        return (uacpi_u8)index + 1;
+    }
+
+    return (uacpi_u8)index + 33;
+#endif
+
+#elif defined(__WATCOMC__)
+    // TODO: Use compiler intrinsics or inline ASM here
+    uacpi_u8 index;
+    uacpi_u64 mask = (1ull << 63);
+
+    for (index = 64; index > 0; index--, mask >>= 1) {
+        if (value & mask) {
+            return index;
+        }
+    }
+
+    return 0;
+#else
+    if (value == 0)
+        return 0;
+
+    return 64 - __builtin_clzll(value);
+#endif
+}
+
+#ifndef UACPI_NATIVE_ALLOC_ZEROED
+void *uacpi_builtin_alloc_zeroed(uacpi_size size)
+{
+    void *ptr;
+
+    ptr = uacpi_kernel_alloc(size);
+    if (uacpi_unlikely(ptr == UACPI_NULL))
+        return ptr;
+
+    uacpi_memzero(ptr, size);
+    return ptr;
+}
+#endif
+
+#endif // !UACPI_BAREBONES_MODE
 
 #ifndef uacpi_vsnprintf
 struct fmt_buf_state {
@@ -381,16 +501,15 @@ uacpi_i32 uacpi_vsnprintf(
     uacpi_va_list vlist
 )
 {
-    struct fmt_buf_state fb_state = {
-        .buffer = buffer,
-        .capacity = capacity,
-        .bytes_written = 0
-    };
-
+    struct fmt_buf_state fb_state = { 0 };
     uacpi_u64 value;
     const uacpi_char *next_conversion;
     uacpi_size next_offset;
     uacpi_char flag;
+
+    fb_state.buffer = buffer;
+    fb_state.capacity = capacity;
+    fb_state.bytes_written = 0;
 
     while (*fmt) {
         struct fmt_spec fm = {
@@ -464,10 +583,13 @@ uacpi_i32 uacpi_vsnprintf(
             const uacpi_char *string = uacpi_va_arg(vlist, uacpi_char*);
             uacpi_size i;
 
+            if (uacpi_unlikely(string == UACPI_NULL))
+                string = "<null>";
+
             for (i = 0; (!fm.has_precision || i < fm.precision) && string[i]; ++i)
                 write_one(&fb_state, string[i]);
-            while (fm.has_precision && (i++ < fm.precision))
-                write_one(&fb_state, fm.pad_char);
+            while (i++ < fm.min_width)
+                write_one(&fb_state, ' ');
             continue;
         }
 
@@ -574,98 +696,7 @@ uacpi_i32 uacpi_snprintf(
 }
 #endif
 
-void uacpi_memcpy_zerout(void *dst, const void *src,
-                         uacpi_size dst_size, uacpi_size src_size)
-{
-    uacpi_size bytes_to_copy = UACPI_MIN(src_size, dst_size);
-
-    if (bytes_to_copy)
-        uacpi_memcpy(dst, src, bytes_to_copy);
-
-    if (dst_size > bytes_to_copy)
-        uacpi_memzero((uacpi_u8*)dst + bytes_to_copy, dst_size - bytes_to_copy);
-}
-
-uacpi_u8 uacpi_bit_scan_forward(uacpi_u64 value)
-{
-#ifdef _MSC_VER
-    unsigned char ret;
-    unsigned long index;
-
-#ifdef _WIN64
-    ret = _BitScanForward64(&index, value);
-    if (ret == 0)
-        return 0;
-
-    return (uacpi_u8)index + 1;
-#else
-    ret = _BitScanForward(&index, value);
-    if (ret == 0) {
-        ret = _BitScanForward(&index, value >> 32);
-        if (ret == 0)
-            return 0;
-
-        return (uacpi_u8)index + 33;
-    }
-
-    return (uacpi_u8)index + 1;
-#endif
-
-#else
-    return __builtin_ffsll(value);
-#endif
-}
-
-uacpi_u8 uacpi_bit_scan_backward(uacpi_u64 value)
-{
-#ifdef _MSC_VER
-    unsigned char ret;
-    unsigned long index;
-
-#ifdef _WIN64
-    ret = _BitScanReverse64(&index, value);
-    if (ret == 0)
-        return 0;
-
-    return (uacpi_u8)index + 1;
-#else
-    ret = _BitScanReverse(&index, value >> 32);
-    if (ret == 0) {
-        ret = _BitScanReverse(&index, value);
-        if (ret == 0)
-            return 0;
-
-        return (uacpi_u8)index + 1;
-    }
-
-    return (uacpi_u8)index + 33;
-#endif
-
-#else
-    if (value == 0)
-        return 0;
-
-    return 64 - __builtin_clzll(value);
-#endif
-}
-
-uacpi_u8 uacpi_popcount(uacpi_u64 value)
-{
-#ifdef _MSC_VER
-
-#ifdef _WIN64
-    return __popcnt64(value);
-#else
-    return __popcnt(value) + __popcnt(value >> 32);
-#endif
-
-#else
-    return __builtin_popcountll(value);
-#endif
-}
-
 #ifndef UACPI_FORMATTED_LOGGING
-
 void uacpi_log(uacpi_log_level lvl, const uacpi_char *str, ...)
 {
     uacpi_char buf[UACPI_PLAIN_LOG_BUFFER_SIZE];

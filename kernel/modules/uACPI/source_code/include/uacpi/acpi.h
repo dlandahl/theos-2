@@ -904,7 +904,7 @@ UACPI_EXPECT_SIZEOF(struct acpi_hpet, 56);
 #define ACPI_PM1_CNT_RSVD6_IDX 14
 #define ACPI_PM1_CNT_RSVD7_IDX 15
 
-#define ACPI_SLP_TYP_MAX 0b111
+#define ACPI_SLP_TYP_MAX 0x7
 
 #define ACPI_PM1_CNT_SCI_EN_MASK (1 << ACPI_PM1_CNT_SCI_EN_IDX)
 #define ACPI_PM1_CNT_BM_RLD_MASK (1 << ACPI_PM1_CNT_BM_RLD_IDX)
@@ -1003,6 +1003,150 @@ UACPI_PACKED(struct acpi_ecdt {
 })
 UACPI_EXPECT_SIZEOF(struct acpi_ecdt, 65);
 
+// acpi_dbg2_device_info->port_type
+enum acpi_dbg2_type {
+    ACPI_DBG2_TYPE_SERIAL = 0x8000,
+    ACPI_DBG2_TYPE_1394 = 0x8001,
+    ACPI_DBG2_TYPE_USB = 0x8002,
+    ACPI_DBG2_TYPE_NET = 0x8003,
+};
+
+/*
+ * Constants for:
+ * - acpi_dbg2_device_info->port_subtype
+ *   if acpi_dbg2_device_info->port_type == ACPI_DBG2_TYPE_SERIAL.
+ * - acpi_spcr->interface_type (there is no type/subtype distinction in SPCR).
+ */
+enum acpi_dbg2_serial_subtype {
+    ACPI_DBG2_SUBTYPE_SERIAL_NS16550 = 0x0,
+    ACPI_DBG2_SUBTYPE_SERIAL_NS16550_DBGP1 = 0x1,
+    ACPI_DBG2_SUBTYPE_SERIAL_MAX311XE_SPI = 0x2,
+    ACPI_DBG2_SUBTYPE_SERIAL_PL011 = 0x3,
+    ACPI_DBG2_SUBTYPE_SERIAL_MSM8X60 = 0x4,
+    ACPI_DBG2_SUBTYPE_SERIAL_NS16550_NVIDIA = 0x5,
+    ACPI_DBG2_SUBTYPE_SERIAL_TI_OMAP = 0x6,
+    ACPI_DBG2_SUBTYPE_SERIAL_APM88XXXX = 0x8,
+    ACPI_DBG2_SUBTYPE_SERIAL_MSM8974 = 0x9,
+    ACPI_DBG2_SUBTYPE_SERIAL_SAM5250 = 0xA,
+    ACPI_DBG2_SUBTYPE_SERIAL_INTEL_USIF = 0xB,
+    ACPI_DBG2_SUBTYPE_SERIAL_IMX6 = 0xC,
+    ACPI_DBG2_SUBTYPE_SERIAL_ARM_SBSA_32BIT = 0xD,
+    ACPI_DBG2_SUBTYPE_SERIAL_ARM_SBSA_GENERIC = 0xE,
+    ACPI_DBG2_SUBTYPE_SERIAL_ARM_DCC = 0xF,
+    ACPI_DBG2_SUBTYPE_SERIAL_BCM2835 = 0x10,
+    ACPI_DBG2_SUBTYPE_SERIAL_SDM845_1_8432MHZ = 0x11,
+    ACPI_DBG2_SUBTYPE_SERIAL_NS16550_GAS = 0x12,
+    ACPI_DBG2_SUBTYPE_SERIAL_SDM845_7_372MHZ = 0x13,
+    ACPI_DBG2_SUBTYPE_SERIAL_INTEL_LPSS = 0x14,
+    ACPI_DBG2_SUBTYPE_SERIAL_RISCV_SBI = 0x15,
+};
+
+/*
+ * Constants for acpi_dbg2_device_info->port_subtype
+ * if acpi_dbg2_device_info->port_type == ACPI_DBG2_TYPE_1394.
+ */
+enum acpi_dbg2_1394_subtype {
+    ACPI_DBG2_SUBTYPE_1394_STANDARD = 0x0,
+};
+
+/*
+ * Constants for acpi_dbg2_device_info->port_subtype
+ * if acpi_dbg2_device_info->port_type == ACPI_DBG2_TYPE_USB.
+ */
+enum acpi_dbg2_usb_subtype {
+    ACPI_DBG2_SUBTYPE_USB_XHCI_DEBUG = 0x0,
+    ACPI_DBG2_SUBTYPE_USB_EHCI_DEBUG = 0x1,
+};
+
+UACPI_PACKED(struct acpi_dbg2 {
+    struct acpi_sdt_hdr hdr;
+    uacpi_u32 offset_dbg_device_info;
+    uacpi_u32 number_dbg_device_info;
+    /*
+     *  Variable length fields below:
+     *  At ->offset_dbg_device_info:
+     *    struct acpi_dbg2_dbg_device_info dbg_devices[number_dbg_device_info];
+     */
+})
+UACPI_EXPECT_SIZEOF(struct acpi_dbg2, 44);
+
+UACPI_PACKED(struct acpi_dbg2_dbg_device_info {
+    uacpi_u8 revision;
+    uacpi_u16 length;
+    uacpi_u8 number_generic_address_registers;
+    uacpi_u16 namespace_string_length;
+    uacpi_u16 namespace_string_offset;
+    uacpi_u16 oem_data_length;
+    uacpi_u16 oem_data_offset;
+    uacpi_u16 port_type;
+    uacpi_u16 port_subtype;
+    uacpi_u16 rsvd;
+    uacpi_u16 base_address_register_offset;
+    uacpi_u16 address_size_offset;
+    /*
+     * Variable length fields below:
+     * At ->base_address_register_offset:
+     *     struct acpi_gas base_address_register[number_generic_address_registers];
+     * At ->address_size_offset
+     *     u32 address_size[number_generic_address_registers];
+     * At ->namespace_string_offset:
+     *     char namespace_string[namespace_string_length];
+     * At ->oem_data_offset:
+     *     char oem_data[oem_data_length];
+     */
+})
+UACPI_EXPECT_SIZEOF(struct acpi_dbg2_dbg_device_info, 22);
+
+// acpi_scpr->interrupt_type
+#define ACPI_SPCR_INTERRUPT_TYPE_8259 0x1
+#define ACPI_SPCR_INTERRUPT_TYPE_IOAPIC 0x2
+#define ACPI_SPCR_INTERRUPT_TYPE_IOSAPIC 0x4
+#define ACPI_SPCR_INTERRUPT_TYPE_GIC 0x8
+#define ACPI_SPCR_INTERRUPT_TYPE_PLIC_APLIC 0x10
+
+// acpi_spcr->pci_flags
+#define ACPI_SPCR_PCI_FLAGS_DO_NOT_DISABLE 0x1
+
+// acpi_spcr->terminal_type
+enum acpi_spcr_terminal_type {
+    ACPI_SPCR_TERMINAL_TYPE_VT100 = 0,
+    ACPI_SPCR_TERMINAL_TYPE_EXTENDED_VT100 = 1,
+    ACPI_SPCR_TERMINAL_TYPE_VT_UTF8 = 2,
+    ACPI_SPCR_TERMINAL_TYPE_ANSI = 3,
+};
+
+UACPI_PACKED(struct acpi_spcr {
+    struct acpi_sdt_hdr hdr;
+    uacpi_u8 interface_type;
+    uacpi_u8 rsvd[3];
+    struct acpi_gas base_address;
+    uacpi_u8 interrupt_type;
+    uacpi_u8 irq;
+    uacpi_u32 gsi;
+    uacpi_u8 configured_baud_rate;
+    uacpi_u8 parity;
+    uacpi_u8 stop_bits;
+    uacpi_u8 flow_control;
+    uacpi_u8 terminal_type;
+    uacpi_u8 language;
+    uacpi_u16 pci_device_id;
+    uacpi_u16 pci_vendor_id;
+    uacpi_u8 pci_bus_number;
+    uacpi_u8 pci_device_number;
+    uacpi_u8 pci_function_number;
+    uacpi_u32 pci_flags;
+    uacpi_u8 pci_segment;
+    uacpi_u32 uart_clock_frequency;
+    uacpi_u32 precise_baud_rate;
+    uacpi_u16 namespace_string_length;
+    uacpi_u16 namespace_string_offset;
+    /*
+     * At ->namespace_string_offset:
+     *    char namespace_string[namespace_string_length];
+     */
+})
+UACPI_EXPECT_SIZEOF(struct acpi_spcr, 88);
+
 UACPI_PACKED(struct acpi_rhct_hdr {
     uacpi_u16 type;
     uacpi_u16 length;
@@ -1070,10 +1214,10 @@ UACPI_EXPECT_SIZEOF(struct acpi_rhct_hart_info, 12);
 #define ACPI_LARGE_ITEM (1 << 7)
 
 #define ACPI_SMALL_ITEM_NAME_IDX 3
-#define ACPI_SMALL_ITEM_NAME_MASK 0b1111
-#define ACPI_SMALL_ITEM_LENGTH_MASK 0b111
+#define ACPI_SMALL_ITEM_NAME_MASK 0xF
+#define ACPI_SMALL_ITEM_LENGTH_MASK 0x7
 
-#define ACPI_LARGE_ITEM_NAME_MASK 0b1111111
+#define ACPI_LARGE_ITEM_NAME_MASK 0x7F
 
 // Small items
 #define ACPI_RESOURCE_IRQ 0x04

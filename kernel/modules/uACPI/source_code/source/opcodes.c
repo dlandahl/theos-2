@@ -1,12 +1,14 @@
 #include <uacpi/internal/opcodes.h>
 
-#define UACPI_OP(opname, opcode, ...) \
-    { #opname, .decode_ops = __VA_ARGS__, .code = opcode },
+#ifndef UACPI_BAREBONES_MODE
+
+#define UACPI_OP(opname, opcode, props, ...) \
+    { #opname, { .decode_ops = __VA_ARGS__ }, .properties = props, .code = opcode },
 
 #define UACPI_OUT_OF_LINE_OP(opname, opcode, out_of_line_buf, props) \
     {                                                                \
       .name = #opname,                                               \
-      .indirect_decode_ops = out_of_line_buf,                        \
+      { .indirect_decode_ops = out_of_line_buf },                    \
       .properties = props,                                           \
       .code = opcode,                                                \
     },
@@ -29,13 +31,14 @@ static const uacpi_u8 ext_op_to_idx[0x100] = {
     [_(UACPI_AML_OP_AcquireOp)]     = 9,  [_(UACPI_AML_OP_SignalOp)]      = 10,
     [_(UACPI_AML_OP_WaitOp)]        = 11, [_(UACPI_AML_OP_ResetOp)]       = 12,
     [_(UACPI_AML_OP_ReleaseOp)]     = 13, [_(UACPI_AML_OP_FromBCDOp)]     = 14,
-    [_(UACPI_AML_OP_ToBCDOp)]       = 15, [_(UACPI_AML_OP_RevisionOp)]    = 16,
-    [_(UACPI_AML_OP_DebugOp)]       = 17, [_(UACPI_AML_OP_FatalOp)]       = 18,
-    [_(UACPI_AML_OP_TimerOp)]       = 19, [_(UACPI_AML_OP_OpRegionOp)]    = 20,
-    [_(UACPI_AML_OP_FieldOp)]       = 21, [_(UACPI_AML_OP_DeviceOp)]      = 22,
-    [_(UACPI_AML_OP_ProcessorOp)]   = 23, [_(UACPI_AML_OP_PowerResOp)]    = 24,
-    [_(UACPI_AML_OP_ThermalZoneOp)] = 25, [_(UACPI_AML_OP_IndexFieldOp)]  = 26,
-    [_(UACPI_AML_OP_BankFieldOp)]   = 27, [_(UACPI_AML_OP_DataRegionOp)]  = 28,
+    [_(UACPI_AML_OP_ToBCDOp)]       = 15, [_(UACPI_AML_OP_UnloadOp)]      = 16,
+    [_(UACPI_AML_OP_RevisionOp)]    = 17, [_(UACPI_AML_OP_DebugOp)]       = 18,
+    [_(UACPI_AML_OP_FatalOp)]       = 19, [_(UACPI_AML_OP_TimerOp)]       = 20,
+    [_(UACPI_AML_OP_OpRegionOp)]    = 21, [_(UACPI_AML_OP_FieldOp)]       = 22,
+    [_(UACPI_AML_OP_DeviceOp)]      = 23, [_(UACPI_AML_OP_ProcessorOp)]   = 24,
+    [_(UACPI_AML_OP_PowerResOp)]    = 25, [_(UACPI_AML_OP_ThermalZoneOp)] = 26,
+    [_(UACPI_AML_OP_IndexFieldOp)]  = 27, [_(UACPI_AML_OP_BankFieldOp)]   = 28,
+    [_(UACPI_AML_OP_DataRegionOp)]  = 29,
 };
 
 const struct uacpi_op_spec *uacpi_get_op_spec(uacpi_aml_op op)
@@ -53,25 +56,25 @@ const struct uacpi_op_spec *uacpi_get_op_spec(uacpi_aml_op op)
         UACPI_PARSE_OP_LOAD_IMM, 1,                                    \
                                                                        \
         /* ReservedField := 0x00 PkgLength */                          \
-        UACPI_PARSE_OP_IF_EQUALS, 0x00, 3,                             \
+        UACPI_PARSE_OP_IF_LAST_EQUALS, 0x00, 3,                        \
             UACPI_PARSE_OP_PKGLEN,                                     \
             UACPI_PARSE_OP_JMP, parse_loop_pc,                         \
                                                                        \
         /* AccessField := 0x01 AccessType AccessAttrib */              \
-        UACPI_PARSE_OP_IF_EQUALS, 0x01, 6,                             \
+        UACPI_PARSE_OP_IF_LAST_EQUALS, 0x01, 6,                        \
             UACPI_PARSE_OP_LOAD_IMM, 1,                                \
             UACPI_PARSE_OP_LOAD_IMM, 1,                                \
             UACPI_PARSE_OP_JMP, parse_loop_pc,                         \
                                                                        \
         /* ConnectField := <0x02 NameString> | <0x02 BufferData> */    \
-        UACPI_PARSE_OP_IF_EQUALS, 0x02, 5,                             \
+        UACPI_PARSE_OP_IF_LAST_EQUALS, 0x02, 5,                        \
             UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                   \
             UACPI_PARSE_OP_TYPECHECK, UACPI_OBJECT_BUFFER,             \
             UACPI_PARSE_OP_JMP, parse_loop_pc,                         \
                                                                        \
         /* ExtendedAccessField := 0x03 AccessType ExtendedAccessAttrib \
          *                                        AccessLength */      \
-        UACPI_PARSE_OP_IF_EQUALS, 0x03, 8,                             \
+        UACPI_PARSE_OP_IF_LAST_EQUALS, 0x03, 8,                        \
             UACPI_PARSE_OP_LOAD_IMM, 1,                                \
             UACPI_PARSE_OP_LOAD_IMM, 1,                                \
             UACPI_PARSE_OP_LOAD_IMM, 1,                                \
@@ -121,6 +124,9 @@ uacpi_u8 uacpi_load_op_decode_ops[] = {
     // Storage for the scope pointer, this is left as 0 in case of errors
     UACPI_PARSE_OP_LOAD_ZERO_IMM,
     UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_METHOD,
+    // Index of the table we are going to be loading to unref it later
+    UACPI_PARSE_OP_LOAD_ZERO_IMM,
+
     UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,
     UACPI_PARSE_OP_TARGET,
 
@@ -132,7 +138,7 @@ uacpi_u8 uacpi_load_op_decode_ops[] = {
     UACPI_PARSE_OP_INVOKE_HANDLER,
     UACPI_PARSE_OP_IF_NULL, 0, 3,
         UACPI_PARSE_OP_LOAD_FALSE_OBJECT,
-        UACPI_PARSE_OP_JMP, 15,
+        UACPI_PARSE_OP_JMP, 16,
 
     UACPI_PARSE_OP_LOAD_TRUE_OBJECT,
     UACPI_PARSE_OP_DISPATCH_TABLE_LOAD,
@@ -142,7 +148,7 @@ uacpi_u8 uacpi_load_op_decode_ops[] = {
      * might've been loaded from this table.
      */
     UACPI_PARSE_OP_INVOKE_HANDLER,
-    UACPI_PARSE_OP_STORE_TO_TARGET, 3,
+    UACPI_PARSE_OP_STORE_TO_TARGET, 4,
     UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,
     UACPI_PARSE_OP_END,
 };
@@ -151,7 +157,7 @@ uacpi_u8 uacpi_load_table_op_decode_ops[] = {
     // Storage for the scope pointer, this is left as 0 in case of errors
     UACPI_PARSE_OP_LOAD_ZERO_IMM,
     UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_METHOD,
-    // Index of the table we are going to be loaded to unref it later
+    // Index of the table we are going to be loading to unref it later
     UACPI_PARSE_OP_LOAD_ZERO_IMM,
     // Storage for the target pointer, this is left as 0 if none was requested
     UACPI_PARSE_OP_LOAD_ZERO_IMM,
@@ -163,17 +169,7 @@ uacpi_u8 uacpi_load_table_op_decode_ops[] = {
         UACPI_PARSE_OP_JMP, 8,
     UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,
 
-    /*
-     * Invoke the handler here to initialize the table. If this fails, it's
-     * expected to keep the item 0 as NULL, which is checked below to return
-     * false to the caller of Load.
-     */
     UACPI_PARSE_OP_INVOKE_HANDLER,
-    UACPI_PARSE_OP_IF_NULL, 0, 3,
-        UACPI_PARSE_OP_LOAD_FALSE_OBJECT,
-        UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,
-        UACPI_PARSE_OP_END,
-
     UACPI_PARSE_OP_LOAD_TRUE_OBJECT,
     UACPI_PARSE_OP_DISPATCH_TABLE_LOAD,
 
@@ -197,6 +193,7 @@ static
 const uacpi_char *const pop_names[UACPI_PARSE_OP_MAX + 1] = {
     [POP(END)] = "<END-OF-OP>",
     [POP(SKIP_WITH_WARN_IF_NULL)] = "SKIP_WITH_WARN_IF_NULL",
+    [POP(EMIT_SKIP_WARN)] = "EMIT_SKIP_WARN",
     [POP(SIMPLE_NAME)] = "SIMPLE_NAME",
     [POP(SUPERNAME)] = "SUPERNAME",
     [POP(SUPERNAME_OR_UNRESOLVED)] = "SUPERNAME_OR_UNRESOLVED",
@@ -231,6 +228,7 @@ const uacpi_char *const pop_names[UACPI_PARSE_OP_MAX + 1] = {
     [POP(LOAD_TRUE_OBJECT)] = "LOAD_TRUE_OBJECT",
     [POP(TRUNCATE_NUMBER)] = "TRUNCATE_NUMBER",
     [POP(TYPECHECK)] = "TYPECHECK",
+    [POP(TYPECHECK_ONE_OF)] = "TYPECHECK_ONE_OF",
     [POP(INSTALL_NAMESPACE_NODE)] = "INSTALL_NAMESPACE_NODE",
     [POP(OBJECT_TRANSFER_TO_PREV)] = "OBJECT_TRANSFER_TO_PREV",
     [POP(OBJECT_COPY_TO_PREV)] = "OBJECT_COPY_TO_PREV",
@@ -246,8 +244,14 @@ const uacpi_char *const pop_names[UACPI_PARSE_OP_MAX + 1] = {
     [POP(CONVERT_NAMESTRING)] = "CONVERT_NAMESTRING",
     [POP(IF_HAS_DATA)] = "IF_HAS_DATA",
     [POP(IF_NULL)] = "IF_NULL",
+    [POP(IF_LAST_NULL)] = "IF_LAST_NULL",
     [POP(IF_NOT_NULL)] = "IF_NOT_NULL",
-    [POP(IF_EQUALS)] = "IF_EQUALS",
+    [POP(IF_LAST_NOT_NULL)] = "IF_NOT_NULL",
+    [POP(IF_LAST_EQUALS)] = "IF_LAST_EQUALS",
+    [POP(IF_LAST_FALSE)] = "IF_LAST_FALSE",
+    [POP(IF_LAST_TRUE)] = "IF_LAST_TRUE",
+    [POP(SWITCH_TO_NEXT_IF_EQUALS)] = "SWITCH_TO_NEXT_IF_EQUALS",
+    [POP(IF_SWITCHED_FROM)] = "IF_SWITCHED_FROM",
     [POP(JMP)] = "JMP",
 };
 
@@ -258,3 +262,5 @@ const uacpi_char *uacpi_parse_op_to_string(enum uacpi_parse_op op)
 
     return pop_names[op];
 }
+
+#endif // !UACPI_BAREBONES_MODE

@@ -8,6 +8,46 @@
 #include <uacpi/internal/tables.h>
 #include <uacpi/kernel_api.h>
 
+const uacpi_char *uacpi_address_space_to_string(
+    enum uacpi_address_space space
+)
+{
+    switch (space) {
+    case UACPI_ADDRESS_SPACE_SYSTEM_MEMORY:
+        return "SystemMemory";
+    case UACPI_ADDRESS_SPACE_SYSTEM_IO:
+        return "SystemIO";
+    case UACPI_ADDRESS_SPACE_PCI_CONFIG:
+        return "PCI_Config";
+    case UACPI_ADDRESS_SPACE_EMBEDDED_CONTROLLER:
+        return "EmbeddedControl";
+    case UACPI_ADDRESS_SPACE_SMBUS:
+        return "SMBus";
+    case UACPI_ADDRESS_SPACE_SYSTEM_CMOS:
+        return "SystemCMOS";
+    case UACPI_ADDRESS_SPACE_PCI_BAR_TARGET:
+        return "PciBarTarget";
+    case UACPI_ADDRESS_SPACE_IPMI:
+        return "IPMI";
+    case UACPI_ADDRESS_SPACE_GENERAL_PURPOSE_IO:
+        return "GeneralPurposeIO";
+    case UACPI_ADDRESS_SPACE_GENERIC_SERIAL_BUS:
+        return "GenericSerialBus";
+    case UACPI_ADDRESS_SPACE_PCC:
+        return "PCC";
+    case UACPI_ADDRESS_SPACE_PRM:
+        return "PlatformRtMechanism";
+    case UACPI_ADDRESS_SPACE_FFIXEDHW:
+        return "FFixedHW";
+    case UACPI_ADDRESS_SPACE_TABLE_DATA:
+        return "TableData";
+    default:
+        return "<vendor specific>";
+    }
+}
+
+#ifndef UACPI_BAREBONES_MODE
+
 const uacpi_char *uacpi_object_type_to_string(uacpi_object_type type)
 {
     switch (type) {
@@ -52,49 +92,11 @@ const uacpi_char *uacpi_object_type_to_string(uacpi_object_type type)
     }
 }
 
-const uacpi_char *uacpi_address_space_to_string(
-    enum uacpi_address_space space
-)
-{
-    switch (space) {
-    case UACPI_ADDRESS_SPACE_SYSTEM_MEMORY:
-        return "SystemMemory";
-    case UACPI_ADDRESS_SPACE_SYSTEM_IO:
-        return "SystemIO";
-    case UACPI_ADDRESS_SPACE_PCI_CONFIG:
-        return "PCI_Config";
-    case UACPI_ADDRESS_SPACE_EMBEDDED_CONTROLLER:
-        return "EmbeddedControl";
-    case UACPI_ADDRESS_SPACE_SMBUS:
-        return "SMBus";
-    case UACPI_ADDRESS_SPACE_SYSTEM_CMOS:
-        return "SystemCMOS";
-    case UACPI_ADDRESS_SPACE_PCI_BAR_TARGET:
-        return "PciBarTarget";
-    case UACPI_ADDRESS_SPACE_IPMI:
-        return "IPMI";
-    case UACPI_ADDRESS_SPACE_GENERAL_PURPOSE_IO:
-        return "GeneralPurposeIO";
-    case UACPI_ADDRESS_SPACE_GENERIC_SERIAL_BUS:
-        return "GenericSerialBus";
-    case UACPI_ADDRESS_SPACE_PCC:
-        return "PCC";
-    case UACPI_ADDRESS_SPACE_PRM:
-        return "PRM";
-    case UACPI_ADDRESS_SPACE_FFIXEDHW:
-        return "FFixedHW";
-    case UACPI_ADDRESS_SPACE_TABLE_DATA:
-        return "TableData";
-    default:
-        return "<vendor specific>";
-    }
-}
-
 static uacpi_bool buffer_alloc(uacpi_object *obj, uacpi_size initial_size)
 {
     uacpi_buffer *buf;
 
-    buf = uacpi_kernel_calloc(1, sizeof(uacpi_buffer));
+    buf = uacpi_kernel_alloc_zeroed(sizeof(uacpi_buffer));
     if (uacpi_unlikely(buf == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -129,7 +131,9 @@ uacpi_bool uacpi_package_fill(
     if (uacpi_unlikely(num_elements == 0))
         return UACPI_TRUE;
 
-    pkg->objects = uacpi_kernel_calloc(num_elements, sizeof(uacpi_handle));
+    pkg->objects = uacpi_kernel_alloc_zeroed(
+        num_elements * sizeof(uacpi_handle)
+    );
     if (uacpi_unlikely(pkg->objects == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -154,7 +158,7 @@ static uacpi_bool package_alloc(
 {
     uacpi_package *pkg;
 
-    pkg = uacpi_kernel_calloc(1, sizeof(uacpi_package));
+    pkg = uacpi_kernel_alloc_zeroed(sizeof(uacpi_package));
     if (uacpi_unlikely(pkg == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -178,7 +182,7 @@ uacpi_mutex *uacpi_create_mutex(void)
 {
     uacpi_mutex *mutex;
 
-    mutex = uacpi_kernel_calloc(1, sizeof(uacpi_mutex));
+    mutex = uacpi_kernel_alloc_zeroed(sizeof(uacpi_mutex));
     if (uacpi_unlikely(mutex == UACPI_NULL))
         return UACPI_NULL;
 
@@ -204,7 +208,7 @@ static uacpi_bool event_alloc(uacpi_object *obj)
 {
     uacpi_event *event;
 
-    event = uacpi_kernel_calloc(1, sizeof(uacpi_event));
+    event = uacpi_kernel_alloc_zeroed(sizeof(uacpi_event));
     if (uacpi_unlikely(event == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -224,7 +228,7 @@ static uacpi_bool method_alloc(uacpi_object *obj)
 {
     uacpi_control_method *method;
 
-    method = uacpi_kernel_calloc(1, sizeof(*method));
+    method = uacpi_kernel_alloc_zeroed(sizeof(*method));
     if (uacpi_unlikely(method == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -238,7 +242,7 @@ static uacpi_bool op_region_alloc(uacpi_object *obj)
 {
     uacpi_operation_region *op_region;
 
-    op_region = uacpi_kernel_calloc(1, sizeof(*op_region));
+    op_region = uacpi_kernel_alloc_zeroed(sizeof(*op_region));
     if (uacpi_unlikely(op_region == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -252,7 +256,7 @@ static uacpi_bool field_unit_alloc(uacpi_object *obj)
 {
     uacpi_field_unit *field_unit;
 
-    field_unit = uacpi_kernel_calloc(1, sizeof(*field_unit));
+    field_unit = uacpi_kernel_alloc_zeroed(sizeof(*field_unit));
     if (uacpi_unlikely(field_unit == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -266,7 +270,7 @@ static uacpi_bool processor_alloc(uacpi_object *obj)
 {
     uacpi_processor *processor;
 
-    processor = uacpi_kernel_calloc(1, sizeof(*processor));
+    processor = uacpi_kernel_alloc_zeroed(sizeof(*processor));
     if (uacpi_unlikely(processor == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -280,7 +284,7 @@ static uacpi_bool device_alloc(uacpi_object *obj)
 {
     uacpi_device *device;
 
-    device = uacpi_kernel_calloc(1, sizeof(*device));
+    device = uacpi_kernel_alloc_zeroed(sizeof(*device));
     if (uacpi_unlikely(device == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -294,7 +298,7 @@ static uacpi_bool thermal_zone_alloc(uacpi_object *obj)
 {
     uacpi_thermal_zone *thermal_zone;
 
-    thermal_zone = uacpi_kernel_calloc(1, sizeof(*thermal_zone));
+    thermal_zone = uacpi_kernel_alloc_zeroed(sizeof(*thermal_zone));
     if (uacpi_unlikely(thermal_zone == UACPI_NULL))
         return UACPI_FALSE;
 
@@ -325,7 +329,7 @@ uacpi_object *uacpi_create_object(uacpi_object_type type)
     uacpi_object *ret;
     object_ctor ctor;
 
-    ret = uacpi_kernel_calloc(1, sizeof(*ret));
+    ret = uacpi_kernel_alloc_zeroed(sizeof(*ret));
     if (uacpi_unlikely(ret == UACPI_NULL))
         return ret;
 
@@ -559,8 +563,23 @@ static void free_op_region(uacpi_handle handle)
         );
     }
 
-    if (op_region->space == UACPI_ADDRESS_SPACE_TABLE_DATA)
-        uacpi_table_unref(&(struct uacpi_table) { .index = op_region->table_idx });
+    switch (op_region->space) {
+    case UACPI_ADDRESS_SPACE_PCC:
+        uacpi_free(op_region->internal_buffer, op_region->length);
+        break;
+    case UACPI_ADDRESS_SPACE_TABLE_DATA: {
+        struct uacpi_table table = { 0 };
+
+        table.index = op_region->table_idx;
+        uacpi_table_unref(
+            &table
+        );
+        break;
+    }
+    default:
+        break;
+    }
+
     uacpi_free(op_region, sizeof(*op_region));
 }
 
@@ -1008,22 +1027,29 @@ uacpi_status uacpi_object_get_integer(uacpi_object *obj, uacpi_u64 *out)
 
 uacpi_status uacpi_object_assign_integer(uacpi_object *obj, uacpi_u64 value)
 {
+    uacpi_object object = { 0 };
+
     ENSURE_VALID_USER_OBJ(obj);
 
-    return uacpi_object_assign(obj, &(uacpi_object) {
-        .type = UACPI_OBJECT_INTEGER,
-        .integer = value,
-    }, UACPI_ASSIGN_BEHAVIOR_DEEP_COPY);
+    object.type = UACPI_OBJECT_INTEGER;
+    object.integer = value;
+
+    return uacpi_object_assign(obj, &object, UACPI_ASSIGN_BEHAVIOR_DEEP_COPY);
 }
 
-uacpi_status uacpi_object_do_get_string_or_buffer(
+void uacpi_buffer_to_view(uacpi_buffer *buf, uacpi_data_view *out_view)
+{
+    out_view->bytes = buf->byte_data;
+    out_view->length = buf->size;
+}
+
+static uacpi_status uacpi_object_do_get_string_or_buffer(
     uacpi_object *obj, uacpi_data_view *out, uacpi_u32 mask
 )
 {
     TYPE_CHECK_USER_OBJ(obj, mask);
 
-    out->bytes = obj->buffer->data;
-    out->length = obj->buffer->size;
+    uacpi_buffer_to_view(obj->buffer, out);
     return UACPI_STATUS_OK;
 }
 
@@ -1080,10 +1106,10 @@ static uacpi_status uacpi_object_do_assign_buffer(
 )
 {
     uacpi_status ret;
-    uacpi_object tmp_obj = {
-        .type = type,
-    };
+    uacpi_object tmp_obj = { 0 };
     uacpi_size dst_buf_size = in.length;
+
+    tmp_obj.type = type;
 
     ENSURE_VALID_USER_OBJ(obj);
 
@@ -1166,7 +1192,7 @@ uacpi_object *uacpi_object_create_integer(uacpi_u64 value)
     return obj;
 }
 
-uacpi_object *uacpi_object_do_create_string_or_buffer(
+static uacpi_object *uacpi_object_do_create_string_or_buffer(
     uacpi_data_view view, uacpi_object_type type
 )
 {
@@ -1198,10 +1224,11 @@ uacpi_object *uacpi_object_create_buffer(uacpi_data_view view)
 
 uacpi_object *uacpi_object_create_cstring(const uacpi_char *str)
 {
-    return uacpi_object_create_string((uacpi_data_view) {
-        .const_text = str,
-        .length = uacpi_strlen(str) + 1,
-    });
+    uacpi_data_view data_view = { 0 };
+
+    data_view.const_text = str;
+    data_view.length = uacpi_strlen(str) + 1;
+    return uacpi_object_create_string(data_view);
 }
 
 uacpi_status uacpi_object_get_package(
@@ -1236,13 +1263,15 @@ uacpi_status uacpi_object_assign_reference(
 )
 {
     uacpi_status ret;
+    uacpi_object object = { 0 };
 
     ENSURE_VALID_USER_OBJ(obj);
     ENSURE_VALID_USER_OBJ(child);
 
     // First clear out the object
+    object.type = UACPI_OBJECT_UNINITIALIZED;
     ret = uacpi_object_assign(
-        obj, &(uacpi_object) { .type = UACPI_OBJECT_UNINITIALIZED },
+        obj, &object,
         UACPI_ASSIGN_BEHAVIOR_DEEP_COPY
     );
     if (uacpi_unlikely_error(ret))
@@ -1456,3 +1485,5 @@ uacpi_object *uacpi_unwrap_internal_reference(uacpi_object *object)
         object = object->inner_object;
     }
 }
+
+#endif // !UACPI_BAREBONES_MODE

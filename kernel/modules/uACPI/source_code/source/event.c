@@ -7,12 +7,18 @@
 #include <uacpi/internal/interpreter.h>
 #include <uacpi/internal/notify.h>
 #include <uacpi/internal/utilities.h>
+#include <uacpi/internal/mutex.h>
+#include <uacpi/internal/stdlib.h>
 #include <uacpi/acpi.h>
 
 #define UACPI_EVENT_DISABLED 0
 #define UACPI_EVENT_ENABLED 1
 
-#ifndef UACPI_REDUCED_HARDWARE
+#if !defined(UACPI_REDUCED_HARDWARE) && !defined(UACPI_BAREBONES_MODE)
+
+static uacpi_handle g_gpe_state_slock;
+static struct uacpi_recursive_lock g_event_lock;
+static uacpi_bool g_gpes_finalized;
 
 struct fixed_event {
     uacpi_u8 enable_field;
@@ -102,34 +108,61 @@ static uacpi_status set_event(uacpi_u8 event, uacpi_u8 value)
 
 uacpi_status uacpi_enable_fixed_event(uacpi_fixed_event event)
 {
-    if (uacpi_unlikely(event > UACPI_FIXED_EVENT_MAX))
+    uacpi_status ret;
+
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+
+    if (uacpi_unlikely(event < 0 || event > UACPI_FIXED_EVENT_MAX))
         return UACPI_STATUS_INVALID_ARGUMENT;
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_OK;
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
 
     /*
      * Attempting to enable an event that doesn't have a handler is most likely
      * an error, don't allow it.
      */
-    if (uacpi_unlikely(fixed_event_handlers[event].handler == UACPI_NULL))
-        return UACPI_STATUS_NO_HANDLER;
+    if (uacpi_unlikely(fixed_event_handlers[event].handler == UACPI_NULL)) {
+        ret = UACPI_STATUS_NO_HANDLER;
+        goto out;
+    }
 
-    return set_event(event, UACPI_EVENT_ENABLED);
+    ret = set_event(event, UACPI_EVENT_ENABLED);
+
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_disable_fixed_event(uacpi_fixed_event event)
 {
-    if (uacpi_unlikely(event > UACPI_FIXED_EVENT_MAX))
+    uacpi_status ret;
+
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+
+    if (uacpi_unlikely(event < 0 || event > UACPI_FIXED_EVENT_MAX))
         return UACPI_STATUS_INVALID_ARGUMENT;
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_OK;
 
-    return set_event(event, UACPI_EVENT_DISABLED);
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    ret = set_event(event, UACPI_EVENT_DISABLED);
+
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_clear_fixed_event(uacpi_fixed_event event)
 {
-    if (uacpi_unlikely(event > UACPI_FIXED_EVENT_MAX))
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+
+    if (uacpi_unlikely(event < 0 || event > UACPI_FIXED_EVENT_MAX))
         return UACPI_STATUS_INVALID_ARGUMENT;
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_OK;
@@ -150,7 +183,7 @@ static uacpi_interrupt_ret dispatch_fixed_event(
     if (uacpi_unlikely_error(ret))
         return UACPI_INTERRUPT_NOT_HANDLED;
 
-    if (uacpi_unlikely_error(evh->handler == UACPI_NULL)) {
+    if (uacpi_unlikely(evh->handler == UACPI_NULL)) {
         uacpi_warn(
             "fixed event %d fired but no handler installed, disabling...\n",
             event
@@ -248,8 +281,8 @@ struct gp_event {
 };
 
 struct gpe_register {
-    struct acpi_gas status;
-    struct acpi_gas enable;
+    uacpi_mapped_gas status;
+    uacpi_mapped_gas enable;
 
     uacpi_u8 runtime_mask;
     uacpi_u8 wake_mask;
@@ -286,9 +319,9 @@ struct gpe_interrupt_ctx {
     uacpi_handle irq_handle;
     uacpi_u32 irq;
 };
-static struct gpe_interrupt_ctx *gpe_interrupt_head;
+static struct gpe_interrupt_ctx *g_gpe_interrupt_head;
 
-uacpi_u8 gpe_get_mask(struct gp_event *event)
+static uacpi_u8 gpe_get_mask(struct gp_event *event)
 {
     return 1 << (event->idx - event->reg->base_idx);
 }
@@ -305,9 +338,10 @@ static uacpi_status set_gpe_state(struct gp_event *event, enum gpe_state state)
     struct gpe_register *reg = event->reg;
     uacpi_u64 enable_mask;
     uacpi_u8 event_bit;
+    uacpi_cpu_flags flags;
 
     event_bit = gpe_get_mask(event);
-    if (reg->masked_mask & event_bit)
+    if (state != GPE_STATE_DISABLED && (reg->masked_mask & event_bit))
         return UACPI_STATUS_OK;
 
     if (state == GPE_STATE_ENABLED_CONDITIONALLY) {
@@ -317,9 +351,11 @@ static uacpi_status set_gpe_state(struct gp_event *event, enum gpe_state state)
         state = GPE_STATE_ENABLED;
     }
 
-    ret = uacpi_gas_read(&reg->enable, &enable_mask);
+    flags = uacpi_kernel_lock_spinlock(g_gpe_state_slock);
+
+    ret = uacpi_gas_read_mapped(&reg->enable, &enable_mask);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
 
     switch (state) {
     case GPE_STATE_ENABLED:
@@ -329,17 +365,21 @@ static uacpi_status set_gpe_state(struct gp_event *event, enum gpe_state state)
         enable_mask &= ~event_bit;
         break;
     default:
-        return UACPI_STATUS_INVALID_ARGUMENT;
+        ret = UACPI_STATUS_INVALID_ARGUMENT;
+        goto out;
     }
 
-    return uacpi_gas_write(&reg->enable, enable_mask);
+    ret = uacpi_gas_write_mapped(&reg->enable, enable_mask);
+out:
+    uacpi_kernel_unlock_spinlock(g_gpe_state_slock, flags);
+    return ret;
 }
 
 static uacpi_status clear_gpe(struct gp_event *event)
 {
     struct gpe_register *reg = event->reg;
 
-    return uacpi_gas_write(&reg->status, gpe_get_mask(event));
+    return uacpi_gas_write_mapped(&reg->status, gpe_get_mask(event));
 }
 
 static uacpi_status restore_gpe(struct gp_event *event)
@@ -377,11 +417,12 @@ static void async_run_gpe_handler(uacpi_handle opaque)
 
     ret = uacpi_namespace_write_lock();
     if (uacpi_unlikely_error(ret))
-        goto out;
+        goto out_no_unlock;
 
     switch (event->handler_type) {
     case GPE_HANDLER_TYPE_AML_HANDLER: {
         uacpi_object *method_obj;
+        uacpi_object_name name;
 
         method_obj = uacpi_namespace_node_get_object_typed(
             event->aml_handler, UACPI_OBJECT_METHOD_BIT
@@ -391,9 +432,10 @@ static void async_run_gpe_handler(uacpi_handle opaque)
             break;
         }
 
+        name = uacpi_namespace_node_name(event->aml_handler);
         uacpi_trace(
             "executing GPE(%02X) handler %.4s\n",
-            event->idx, uacpi_namespace_node_name(event->aml_handler).text
+            event->idx, name.text
         );
 
         ret = uacpi_execute_control_method(
@@ -406,7 +448,6 @@ static void async_run_gpe_handler(uacpi_handle opaque)
                 uacpi_status_to_string(ret)
             );
         }
-        uacpi_object_unref(method_obj);
         break;
     }
 
@@ -430,10 +471,9 @@ static void async_run_gpe_handler(uacpi_handle opaque)
         break;
     }
 
-out:
-    if (uacpi_likely_success(ret))
-        uacpi_namespace_write_unlock();
+    uacpi_namespace_write_unlock();
 
+out_no_unlock:
     /*
      * We schedule the work as NOTIFICATION to make sure all other notifications
      * finish before this GPE is re-enabled.
@@ -538,11 +578,11 @@ static uacpi_interrupt_ret detect_gpes(struct gpe_block *block)
             if (!reg->runtime_mask && !reg->wake_mask)
                 continue;
 
-            ret = uacpi_gas_read(&reg->status, &status);
+            ret = uacpi_gas_read_mapped(&reg->status, &status);
             if (uacpi_unlikely_error(ret))
                 return int_ret;
 
-            ret = uacpi_gas_read(&reg->enable, &enable);
+            ret = uacpi_gas_read_mapped(&reg->enable, &enable);
             if (uacpi_unlikely_error(ret))
                 return int_ret;
 
@@ -572,7 +612,7 @@ static uacpi_status maybe_dispatch_gpe(
     struct gpe_register *reg = event->reg;
     uacpi_u64 status;
 
-    ret = uacpi_gas_read(&reg->status, &status);
+    ret = uacpi_gas_read_mapped(&reg->status, &status);
     if (uacpi_unlikely_error(ret))
         return ret;
 
@@ -598,7 +638,7 @@ static uacpi_status find_or_create_gpe_interrupt_ctx(
 )
 {
     uacpi_status ret;
-    struct gpe_interrupt_ctx *entry = gpe_interrupt_head;
+    struct gpe_interrupt_ctx *entry = g_gpe_interrupt_head;
 
     while (entry) {
         if (entry->irq == irq) {
@@ -609,7 +649,7 @@ static uacpi_status find_or_create_gpe_interrupt_ctx(
         entry = entry->next;
     }
 
-    entry = uacpi_kernel_calloc(1, sizeof(*entry));
+    entry = uacpi_kernel_alloc_zeroed(sizeof(*entry));
     if (uacpi_unlikely(entry == UACPI_NULL))
         return UACPI_STATUS_OUT_OF_MEMORY;
 
@@ -628,8 +668,8 @@ static uacpi_status find_or_create_gpe_interrupt_ctx(
     }
 
     entry->irq = irq;
-    entry->next = gpe_interrupt_head;
-    gpe_interrupt_head = entry;
+    entry->next = g_gpe_interrupt_head;
+    g_gpe_interrupt_head = entry;
 
     *out_ctx = entry;
     return UACPI_STATUS_OK;
@@ -649,8 +689,110 @@ static void gpe_release_implicit_notify_handlers(struct gp_event *event)
     event->implicit_handler = UACPI_NULL;
 }
 
+enum gpe_block_action
+{
+    GPE_BLOCK_ACTION_DISABLE_ALL,
+    GPE_BLOCK_ACTION_ENABLE_ALL_FOR_RUNTIME,
+    GPE_BLOCK_ACTION_ENABLE_ALL_FOR_WAKE,
+    GPE_BLOCK_ACTION_CLEAR_ALL,
+};
+
+static uacpi_status gpe_block_apply_action(
+    struct gpe_block *block, enum gpe_block_action action
+)
+{
+    uacpi_status ret;
+    uacpi_size i;
+    uacpi_u8 value;
+    struct gpe_register *reg;
+
+    for (i = 0; i < block->num_registers; ++i) {
+        reg = &block->registers[i];
+
+        switch (action) {
+        case GPE_BLOCK_ACTION_DISABLE_ALL:
+            value = 0;
+            break;
+        case GPE_BLOCK_ACTION_ENABLE_ALL_FOR_RUNTIME:
+            value = reg->runtime_mask & ~reg->masked_mask;
+            break;
+        case GPE_BLOCK_ACTION_ENABLE_ALL_FOR_WAKE:
+            value = reg->wake_mask;
+            break;
+        case GPE_BLOCK_ACTION_CLEAR_ALL:
+            ret = uacpi_gas_write_mapped(&reg->status, 0xFF);
+            if (uacpi_unlikely_error(ret))
+                return ret;
+            continue;
+        default:
+            return UACPI_STATUS_INVALID_ARGUMENT;
+        }
+
+        reg->current_mask = value;
+        ret = uacpi_gas_write_mapped(&reg->enable, value);
+        if (uacpi_unlikely_error(ret))
+            return ret;
+    }
+
+    return UACPI_STATUS_OK;
+}
+
+static void gpe_block_mask_safe(struct gpe_block *block)
+{
+    uacpi_size i;
+    struct gpe_register *reg;
+
+    for (i = 0; i < block->num_registers; ++i) {
+        reg = &block->registers[i];
+
+        // No need to flush or do anything if it's not currently enabled
+        if (!reg->current_mask)
+            continue;
+
+        // 1. Mask the GPEs, this makes sure their state is no longer modifyable
+        reg->masked_mask = 0xFF;
+
+        /*
+         * 2. Wait for in-flight work & IRQs to finish, these might already
+         *    be past the respective "if (masked)" check and therefore may
+         *    try to re-enable a masked GPE.
+         */
+        uacpi_kernel_wait_for_work_completion();
+
+        /*
+         * 3. Now that this GPE's state is unmodifyable and we know that
+         *    currently in-flight IRQs will see the masked state, we can
+         *    safely disable all events knowing they won't be re-enabled by
+         *    a racing IRQ.
+         */
+        uacpi_gas_write_mapped(&reg->enable, 0x00);
+
+        /*
+         * 4. Wait for the last possible IRQ to finish, now that this event is
+         *    disabled.
+         */
+        uacpi_kernel_wait_for_work_completion();
+    }
+}
+
 static void uninstall_gpe_block(struct gpe_block *block)
 {
+    if (block->registers != UACPI_NULL) {
+        struct gpe_register *reg;
+        uacpi_size i;
+
+        gpe_block_mask_safe(block);
+
+        for (i = 0; i < block->num_registers; ++i) {
+            reg = &block->registers[i];
+
+            if (reg->enable.total_bit_width)
+                uacpi_unmap_gas_nofree(&reg->enable);
+            if (reg->status.total_bit_width)
+                uacpi_unmap_gas_nofree(&reg->status);
+        }
+    }
+
     if (block->prev)
         block->prev->next = block->next;
 
@@ -686,18 +828,6 @@ static void uninstall_gpe_block(struct gpe_block *block)
             }
 
             uacpi_free(block->irq_ctx, sizeof(*block->irq_ctx));
-        }
-    }
-
-    if (block->registers != UACPI_NULL) {
-        uacpi_size i;
-        struct gpe_register *reg;
-
-        for (i = 0; i < block->num_registers; ++i) {
-            reg = &block->registers[i];
-
-            if (reg->current_mask)
-                uacpi_gas_write(&reg->enable, 0x00);
         }
     }
 
@@ -837,13 +967,19 @@ static uacpi_iteration_decision do_match_gpe_methods(
     return UACPI_ITERATION_DECISION_CONTINUE;
 }
 
-uacpi_status uacpi_events_match_post_dynamic_table_load(void)
+void uacpi_events_match_post_dynamic_table_load(void)
 {
     struct gpe_match_ctx match_ctx = {
         .post_dynamic_table_load = UACPI_TRUE,
     };
+    struct gpe_interrupt_ctx *irq_ctx;
 
-    struct gpe_interrupt_ctx *irq_ctx = gpe_interrupt_head;
+    uacpi_namespace_write_unlock();
+
+    if (uacpi_unlikely_error(uacpi_recursive_lock_acquire(&g_event_lock)))
+        goto out;
+
+    irq_ctx = g_gpe_interrupt_head;
 
     while (irq_ctx) {
         match_ctx.block = irq_ctx->gpe_head;
@@ -852,7 +988,7 @@ uacpi_status uacpi_events_match_post_dynamic_table_load(void)
             uacpi_namespace_do_for_each_child(
                 match_ctx.block->device_node, do_match_gpe_methods, UACPI_NULL,
                 UACPI_OBJECT_METHOD_BIT, UACPI_MAX_DEPTH_ANY,
-                UACPI_SHOULD_LOCK_NO, UACPI_PERMANENT_ONLY_YES, &match_ctx
+                UACPI_SHOULD_LOCK_YES, UACPI_PERMANENT_ONLY_YES, &match_ctx
             );
             match_ctx.block = match_ctx.block->next;
         }
@@ -865,7 +1001,9 @@ uacpi_status uacpi_events_match_post_dynamic_table_load(void)
                    match_ctx.matched_count);
     }
 
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    uacpi_namespace_write_lock();
 }
 
 static uacpi_status create_gpe_block(
@@ -878,9 +1016,13 @@ static uacpi_status create_gpe_block(
     struct gpe_block *block;
     struct gpe_register *reg;
     struct gp_event *event;
+    struct acpi_gas tmp_gas = { 0 };
     uacpi_size i, j;
 
-    block = uacpi_kernel_calloc(1, sizeof(*block));
+    tmp_gas.address_space_id = address_space_id;
+    tmp_gas.register_bit_width = 8;
+
+    block = uacpi_kernel_alloc_zeroed(sizeof(*block));
     if (uacpi_unlikely(block == UACPI_NULL))
         return ret;
 
@@ -888,15 +1030,15 @@ static uacpi_status create_gpe_block(
     block->base_idx = base_idx;
 
     block->num_registers = num_registers;
-    block->registers = uacpi_kernel_calloc(
-        num_registers, sizeof(*block->registers)
+    block->registers = uacpi_kernel_alloc_zeroed(
+        num_registers * sizeof(*block->registers)
     );
     if (uacpi_unlikely(block->registers == UACPI_NULL))
         goto error_out;
 
     block->num_events = num_registers * EVENTS_PER_GPE_REGISTER;
-    block->events = uacpi_kernel_calloc(
-        block->num_events, sizeof(*block->events)
+    block->events = uacpi_kernel_alloc_zeroed(
+        block->num_events * sizeof(*block->events)
     );
     if (uacpi_unlikely(block->events == UACPI_NULL))
         goto error_out;
@@ -912,13 +1054,16 @@ static uacpi_status create_gpe_block(
          */
         reg->base_idx = base_idx + (i * EVENTS_PER_GPE_REGISTER);
 
-        reg->status.address = address + i;
-        reg->status.address_space_id = address_space_id;
-        reg->status.register_bit_width = 8;
 
-        reg->enable.address = address + num_registers + i;
-        reg->enable.address_space_id = address_space_id;
-        reg->enable.register_bit_width = 8;
+        tmp_gas.address = address + i;
+        ret = uacpi_map_gas_noalloc(&tmp_gas, &reg->status);
+        if (uacpi_unlikely_error(ret))
+            goto error_out;
+
+        tmp_gas.address += num_registers;
+        ret = uacpi_map_gas_noalloc(&tmp_gas, &reg->enable);
+        if (uacpi_unlikely_error(ret))
+            goto error_out;
 
         for (j = 0; j < EVENTS_PER_GPE_REGISTER; ++j, ++event) {
             event->idx = reg->base_idx + j;
@@ -929,11 +1074,11 @@ static uacpi_status create_gpe_block(
          * Disable all GPEs in this register & clear anything that might be
          * pending from earlier.
          */
-        ret = uacpi_gas_write(&reg->enable, 0x00);
+        ret = uacpi_gas_write_mapped(&reg->enable, 0x00);
         if (uacpi_unlikely_error(ret))
             goto error_out;
 
-        ret = uacpi_gas_write(&reg->status, 0xFF);
+        ret = uacpi_gas_write_mapped(&reg->status, 0xFF);
         if (uacpi_unlikely_error(ret))
             goto error_out;
     }
@@ -970,7 +1115,7 @@ static void for_each_gpe_block(
 )
 {
     uacpi_iteration_decision decision;
-    struct gpe_interrupt_ctx *irq_ctx = gpe_interrupt_head;
+    struct gpe_interrupt_ctx *irq_ctx = g_gpe_interrupt_head;
     struct gpe_block *block;
 
     while (irq_ctx) {
@@ -1016,13 +1161,30 @@ static struct gp_event *get_gpe(
     uacpi_namespace_node *gpe_device, uacpi_u16 idx
 )
 {
-    struct gpe_search_ctx ctx = {
-        .gpe_device = gpe_device,
-        .idx = idx,
-    };
+    struct gpe_search_ctx ctx = { 0 };
+
+    ctx.gpe_device = gpe_device;
+    ctx.idx = idx;
 
     for_each_gpe_block(do_find_gpe, &ctx);
     return ctx.out_event;
+}
+
+static void gp_event_toggle_masks(struct gp_event *event, uacpi_bool set_on)
+{
+    uacpi_u8 this_mask;
+    struct gpe_register *reg = event->reg;
+
+    this_mask = gpe_get_mask(event);
+
+    if (set_on) {
+        reg->runtime_mask |= this_mask;
+        reg->current_mask = reg->runtime_mask;
+        return;
+    }
+
+    reg->runtime_mask &= ~this_mask;
+    reg->current_mask = reg->runtime_mask;
 }
 
 static uacpi_status gpe_remove_user(struct gp_event *event)
@@ -1033,12 +1195,13 @@ static uacpi_status gpe_remove_user(struct gp_event *event)
         return UACPI_STATUS_INVALID_ARGUMENT;
 
     if (--event->num_users == 0) {
-        event->reg->runtime_mask &= ~gpe_get_mask(event);
-        event->reg->current_mask = event->reg->runtime_mask;
+        gp_event_toggle_masks(event, UACPI_FALSE);
 
         ret = set_gpe_state(event, GPE_STATE_DISABLED);
-        if (uacpi_unlikely_error(ret))
+        if (uacpi_unlikely_error(ret)) {
+            gp_event_toggle_masks(event, UACPI_TRUE);
             event->num_users++;
+        }
     }
 
     return ret;
@@ -1062,12 +1225,13 @@ static uacpi_status gpe_add_user(
         if (clear_if_first == EVENT_CLEAR_IF_FIRST_YES)
             clear_gpe(event);
 
-        event->reg->runtime_mask |= gpe_get_mask(event);
-        event->reg->current_mask = event->reg->runtime_mask;
+        gp_event_toggle_masks(event, UACPI_TRUE);
 
         ret = set_gpe_state(event, GPE_STATE_ENABLED);
-        if (uacpi_unlikely_error(ret))
+        if (uacpi_unlikely_error(ret)) {
+            gp_event_toggle_masks(event, UACPI_FALSE);
             event->num_users--;
+        }
     }
 
     return ret;
@@ -1087,92 +1251,75 @@ const uacpi_char *uacpi_gpe_triggering_to_string(
     }
 }
 
-static uacpi_status do_install_gpe_handler(
-    uacpi_namespace_node *gpe_device, uacpi_u16 idx,
-    uacpi_gpe_triggering triggering, enum gpe_handler_type type,
-    uacpi_gpe_handler handler, uacpi_handle ctx
-)
-{
-    struct gp_event *event;
-    struct gpe_native_handler *native_handler;
-
-    if (uacpi_unlikely(triggering > UACPI_GPE_TRIGGERING_MAX))
-        return UACPI_STATUS_INVALID_ARGUMENT;
-
-    if (gpe_device == UACPI_NULL) {
-        gpe_device = uacpi_namespace_get_predefined(
-            UACPI_PREDEFINED_NAMESPACE_GPE
-        );
-    }
-
-    event = get_gpe(gpe_device, idx);
-    if (uacpi_unlikely(event == UACPI_NULL))
-        return UACPI_STATUS_NOT_FOUND;
-
-    if (event->handler_type == GPE_HANDLER_TYPE_NATIVE_HANDLER ||
-        event->handler_type == GPE_HANDLER_TYPE_NATIVE_HANDLER_RAW)
-        return UACPI_STATUS_ALREADY_EXISTS;
-
-    native_handler = uacpi_kernel_alloc(sizeof(*native_handler));
-    if (uacpi_unlikely(native_handler == UACPI_NULL))
-        return UACPI_STATUS_OUT_OF_MEMORY;
-
-    native_handler->cb = handler;
-    native_handler->ctx = ctx;
-    native_handler->previous_handler = event->any_handler;
-    native_handler->previous_handler_type = event->handler_type;
-    native_handler->previous_triggering = event->triggering;
-    native_handler->previously_enabled = UACPI_FALSE;
-
-    if ((event->handler_type == GPE_HANDLER_TYPE_AML_HANDLER ||
-         event->handler_type == GPE_HANDLER_TYPE_IMPLICIT_NOTIFY) &&
-         event->num_users != 0) {
-        native_handler->previously_enabled = UACPI_TRUE;
-        gpe_remove_user(event);
-
-        if (uacpi_unlikely(event->triggering != triggering)) {
-            uacpi_warn(
-                "GPE(%02X) user handler claims %s triggering, originally "
-                "configured as %s\n", idx,
-                uacpi_gpe_triggering_to_string(triggering),
-                uacpi_gpe_triggering_to_string(event->triggering)
-            );
-        }
-    }
-
-    event->native_handler = native_handler;
-    event->handler_type = type;
-    event->triggering = triggering;
-    return UACPI_STATUS_OK;
-}
-
-uacpi_status uacpi_install_gpe_handler(
-    uacpi_namespace_node *gpe_device, uacpi_u16 idx,
-    uacpi_gpe_triggering triggering, uacpi_gpe_handler handler,
-    uacpi_handle ctx
-)
-{
-    return do_install_gpe_handler(
-        gpe_device, idx, triggering, GPE_HANDLER_TYPE_NATIVE_HANDLER,
-        handler, ctx
-    );
-}
-
-uacpi_status uacpi_install_gpe_handler_raw(
-    uacpi_namespace_node *gpe_device, uacpi_u16 idx,
-    uacpi_gpe_triggering triggering, uacpi_gpe_handler handler,
-    uacpi_handle ctx
-)
-{
-    return do_install_gpe_handler(
-        gpe_device, idx, triggering, GPE_HANDLER_TYPE_NATIVE_HANDLER_RAW,
-        handler, ctx
-    );
-}
-
 static uacpi_bool gpe_needs_polling(struct gp_event *event)
 {
     return event->num_users && event->triggering == UACPI_GPE_TRIGGERING_EDGE;
+}
+
+static uacpi_status gpe_mask_unmask(
+    struct gp_event *event, uacpi_bool should_mask
+)
+{
+    struct gpe_register *reg;
+    uacpi_u8 mask;
+
+    reg = event->reg;
+    mask = gpe_get_mask(event);
+
+    if (should_mask) {
+        if (reg->masked_mask & mask)
+            return UACPI_STATUS_INVALID_ARGUMENT;
+
+        // 1. Mask the GPE, this makes sure its state is no longer modifyable
+        reg->masked_mask |= mask;
+
+        /*
+         * 2. Wait for in-flight work & IRQs to finish, these might already
+         *    be past the respective "if (masked)" check and therefore may
+         *    try to re-enable a masked GPE.
+         */
+        uacpi_kernel_wait_for_work_completion();
+
+        /*
+         * 3. Now that this GPE's state is unmodifyable and we know that currently
+         *    in-flight IRQs will see the masked state, we can safely disable this
+         *    event knowing it won't be re-enabled by a racing IRQ.
+         */
+        set_gpe_state(event, GPE_STATE_DISABLED);
+
+        /*
+         * 4. Wait for the last possible IRQ to finish, now that this event is
+         *    disabled.
+         */
+        uacpi_kernel_wait_for_work_completion();
+
+        return UACPI_STATUS_OK;
+    }
+
+    if (!(reg->masked_mask & mask))
+        return UACPI_STATUS_INVALID_ARGUMENT;
+
+    reg->masked_mask &= ~mask;
+    if (!event->block_interrupts && event->num_users)
+        set_gpe_state(event, GPE_STATE_ENABLED_CONDITIONALLY);
+
+    return UACPI_STATUS_OK;
+}
+
+/*
+ * Safely mask the event before we modify its handlers.
+ *
+ * This makes sure we can't get an IRQ in the middle of modifying this
+ * event's structures.
+ */
+static uacpi_bool gpe_mask_safe(struct gp_event *event)
+{
+    // No need to flush or do anything if it's not currently enabled
+    if (!(event->reg->current_mask & gpe_get_mask(event)))
+        return UACPI_FALSE;
+
+    gpe_mask_unmask(event, UACPI_TRUE);
+    return UACPI_TRUE;
 }
 
 static uacpi_iteration_decision do_initialize_gpe_block(
@@ -1216,18 +1363,27 @@ static uacpi_iteration_decision do_initialize_gpe_block(
 
 uacpi_status uacpi_finalize_gpe_initialization(void)
 {
-    static uacpi_bool gpes_finalized = UACPI_FALSE;
+    uacpi_status ret;
     uacpi_bool poll_blocks = UACPI_FALSE;
 
-    if (gpes_finalized)
-        return UACPI_STATUS_OK;
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    if (g_gpes_finalized)
+        goto out;
+
+    g_gpes_finalized = UACPI_TRUE;
 
     for_each_gpe_block(do_initialize_gpe_block, &poll_blocks);
     if (poll_blocks)
-        detect_gpes(gpe_interrupt_head->gpe_head);
+        detect_gpes(g_gpe_interrupt_head->gpe_head);
 
-    gpes_finalized = UACPI_TRUE;
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 static uacpi_status sanitize_device_and_find_gpe(
@@ -1248,6 +1404,102 @@ static uacpi_status sanitize_device_and_find_gpe(
     return UACPI_STATUS_OK;
 }
 
+static uacpi_status do_install_gpe_handler(
+    uacpi_namespace_node *gpe_device, uacpi_u16 idx,
+    uacpi_gpe_triggering triggering, enum gpe_handler_type type,
+    uacpi_gpe_handler handler, uacpi_handle ctx
+)
+{
+    uacpi_status ret;
+    struct gp_event *event;
+    struct gpe_native_handler *native_handler;
+    uacpi_bool did_mask;
+
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    if (uacpi_unlikely(triggering > UACPI_GPE_TRIGGERING_MAX))
+        return UACPI_STATUS_INVALID_ARGUMENT;
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
+    if (event->handler_type == GPE_HANDLER_TYPE_NATIVE_HANDLER ||
+        event->handler_type == GPE_HANDLER_TYPE_NATIVE_HANDLER_RAW) {
+        ret = UACPI_STATUS_ALREADY_EXISTS;
+        goto out;
+    }
+
+    native_handler = uacpi_kernel_alloc(sizeof(*native_handler));
+    if (uacpi_unlikely(native_handler == UACPI_NULL)) {
+        ret = UACPI_STATUS_OUT_OF_MEMORY;
+        goto out;
+    }
+
+    native_handler->cb = handler;
+    native_handler->ctx = ctx;
+    native_handler->previous_handler = event->any_handler;
+    native_handler->previous_handler_type = event->handler_type;
+    native_handler->previous_triggering = event->triggering;
+    native_handler->previously_enabled = UACPI_FALSE;
+
+    did_mask = gpe_mask_safe(event);
+
+    if ((event->handler_type == GPE_HANDLER_TYPE_AML_HANDLER ||
+        event->handler_type == GPE_HANDLER_TYPE_IMPLICIT_NOTIFY) &&
+        event->num_users != 0) {
+        native_handler->previously_enabled = UACPI_TRUE;
+        gpe_remove_user(event);
+
+        if (uacpi_unlikely(event->triggering != triggering)) {
+            uacpi_warn(
+                "GPE(%02X) user handler claims %s triggering, originally "
+                "configured as %s\n", idx,
+                uacpi_gpe_triggering_to_string(triggering),
+                uacpi_gpe_triggering_to_string(event->triggering)
+            );
+        }
+    }
+
+    event->native_handler = native_handler;
+    event->handler_type = type;
+    event->triggering = triggering;
+
+    if (did_mask)
+        gpe_mask_unmask(event, UACPI_FALSE);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
+}
+
+uacpi_status uacpi_install_gpe_handler(
+    uacpi_namespace_node *gpe_device, uacpi_u16 idx,
+    uacpi_gpe_triggering triggering, uacpi_gpe_handler handler,
+    uacpi_handle ctx
+)
+{
+    return do_install_gpe_handler(
+        gpe_device, idx, triggering, GPE_HANDLER_TYPE_NATIVE_HANDLER,
+        handler, ctx
+    );
+}
+
+uacpi_status uacpi_install_gpe_handler_raw(
+    uacpi_namespace_node *gpe_device, uacpi_u16 idx,
+    uacpi_gpe_triggering triggering, uacpi_gpe_handler handler,
+    uacpi_handle ctx
+)
+{
+    return do_install_gpe_handler(
+        gpe_device, idx, triggering, GPE_HANDLER_TYPE_NATIVE_HANDLER_RAW,
+        handler, ctx
+    );
+}
+
 uacpi_status uacpi_uninstall_gpe_handler(
     uacpi_namespace_node *gpe_device, uacpi_u16 idx,
     uacpi_gpe_handler handler
@@ -1256,18 +1508,31 @@ uacpi_status uacpi_uninstall_gpe_handler(
     uacpi_status ret;
     struct gp_event *event;
     struct gpe_native_handler *native_handler;
+    uacpi_bool did_mask;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
     if (event->handler_type != GPE_HANDLER_TYPE_NATIVE_HANDLER &&
-        event->handler_type != GPE_HANDLER_TYPE_NATIVE_HANDLER_RAW)
-        return UACPI_STATUS_NOT_FOUND;
+        event->handler_type != GPE_HANDLER_TYPE_NATIVE_HANDLER_RAW) {
+        ret = UACPI_STATUS_NOT_FOUND;
+        goto out;
+    }
 
     native_handler = event->native_handler;
-    if (uacpi_unlikely(native_handler->cb != handler))
-        return UACPI_STATUS_INVALID_ARGUMENT;
+    if (uacpi_unlikely(native_handler->cb != handler)) {
+        ret = UACPI_STATUS_INVALID_ARGUMENT;
+        goto out;
+    }
+
+    did_mask = gpe_mask_safe(event);
 
     event->aml_handler = native_handler->previous_handler;
     event->triggering = native_handler->previous_triggering;
@@ -1277,14 +1542,18 @@ uacpi_status uacpi_uninstall_gpe_handler(
          event->handler_type == GPE_HANDLER_TYPE_IMPLICIT_NOTIFY) &&
          native_handler->previously_enabled) {
         gpe_add_user(event, EVENT_CLEAR_IF_FIRST_NO);
-
-        if (gpe_needs_polling(event))
-            maybe_dispatch_gpe(gpe_device, event);
     }
 
-    uacpi_kernel_wait_for_work_completion();
     uacpi_free(native_handler, sizeof(*native_handler));
-    return UACPI_STATUS_OK;
+
+    if (did_mask)
+        gpe_mask_unmask(event, UACPI_FALSE);
+
+    if (gpe_needs_polling(event))
+        maybe_dispatch_gpe(gpe_device, event);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_enable_gpe(
@@ -1294,21 +1563,31 @@ uacpi_status uacpi_enable_gpe(
     uacpi_status ret;
     struct gp_event *event;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
-    if (uacpi_unlikely(event->handler_type == GPE_HANDLER_TYPE_NONE))
-        return UACPI_STATUS_NO_HANDLER;
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
+    if (uacpi_unlikely(event->handler_type == GPE_HANDLER_TYPE_NONE)) {
+        ret = UACPI_STATUS_NO_HANDLER;
+        goto out;
+    }
 
     ret = gpe_add_user(event, EVENT_CLEAR_IF_FIRST_YES);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
 
     if (gpe_needs_polling(event))
         maybe_dispatch_gpe(gpe_device, event);
 
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_disable_gpe(
@@ -1318,11 +1597,20 @@ uacpi_status uacpi_disable_gpe(
     uacpi_status ret;
     struct gp_event *event;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
-    return gpe_remove_user(event);
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
+    ret = gpe_remove_user(event);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_clear_gpe(
@@ -1332,13 +1620,21 @@ uacpi_status uacpi_clear_gpe(
     uacpi_status ret;
     struct gp_event *event;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
-    return clear_gpe(event);
-}
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
 
+    ret = clear_gpe(event);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
+}
 
 static uacpi_status gpe_suspend_resume(
     uacpi_namespace_node *gpe_device, uacpi_u16 idx, enum gpe_state state
@@ -1347,12 +1643,21 @@ static uacpi_status gpe_suspend_resume(
     uacpi_status ret;
     struct gp_event *event;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
     event->block_interrupts = state == GPE_STATE_DISABLED;
-    return set_gpe_state(event, state);
+    ret = set_gpe_state(event, state);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_suspend_gpe(
@@ -1376,15 +1681,27 @@ uacpi_status uacpi_finish_handling_gpe(
     uacpi_status ret;
     struct gp_event *event;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
-    event = get_gpe(gpe_device, idx);
-    if (uacpi_unlikely(event == UACPI_NULL))
-        return UACPI_STATUS_NOT_FOUND;
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
 
-    return restore_gpe(event);
+    event = get_gpe(gpe_device, idx);
+    if (uacpi_unlikely(event == UACPI_NULL)) {
+        ret = UACPI_STATUS_NOT_FOUND;
+        goto out;
+    }
+
+    ret = restore_gpe(event);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
+
 }
 
 static uacpi_status gpe_get_mask_unmask(
@@ -1393,32 +1710,22 @@ static uacpi_status gpe_get_mask_unmask(
 {
     uacpi_status ret;
     struct gp_event *event;
-    struct gpe_register *reg;
-    uacpi_u8 mask;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
-    reg = event->reg;
-    mask = gpe_get_mask(event);
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
 
-    if (should_mask) {
-        if (reg->masked_mask & mask)
-            return UACPI_STATUS_INVALID_ARGUMENT;
+    ret = gpe_mask_unmask(event, should_mask);
 
-        set_gpe_state(event, GPE_STATE_DISABLED);
-        reg->masked_mask |= mask;
-        return UACPI_STATUS_OK;
-    }
-
-    if (!(reg->masked_mask & mask))
-        return UACPI_STATUS_INVALID_ARGUMENT;
-
-    reg->masked_mask &= ~mask;
-    if (!event->block_interrupts && event->num_users)
-        set_gpe_state(event, GPE_STATE_ENABLED_CONDITIONALLY);
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_mask_gpe(
@@ -1442,19 +1749,34 @@ uacpi_status uacpi_setup_gpe_for_wake(
 {
     uacpi_status ret;
     struct gp_event *event;
+    uacpi_bool did_mask;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    if (wake_device != UACPI_NULL) {
+        uacpi_bool is_dev = wake_device == uacpi_namespace_root();
+
+        if (!is_dev) {
+            ret = uacpi_namespace_node_is(wake_device, UACPI_OBJECT_DEVICE, &is_dev);
+            if (uacpi_unlikely_error(ret))
+                return ret;
+        }
+
+        if (!is_dev)
+            return UACPI_STATUS_INVALID_ARGUMENT;
+    }
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
+    did_mask = gpe_mask_safe(event);
+
     if (wake_device != UACPI_NULL) {
-        uacpi_object *obj;
-
-        obj = uacpi_namespace_node_get_object(wake_device);
-        if (wake_device != uacpi_namespace_root() &&
-            obj->type != UACPI_OBJECT_DEVICE)
-            return UACPI_STATUS_INVALID_ARGUMENT;
-
         switch (event->handler_type) {
         case GPE_HANDLER_TYPE_NONE:
             event->handler_type = GPE_HANDLER_TYPE_IMPLICIT_NOTIFY;
@@ -1486,7 +1808,8 @@ uacpi_status uacpi_setup_gpe_for_wake(
         default:
             uacpi_warn("invalid GPE(%02X) handler type: %d\n",
                        event->idx, event->handler_type);
-            return UACPI_STATUS_INTERNAL_ERROR;
+            ret = UACPI_STATUS_INTERNAL_ERROR;
+            goto out_unmask;
         }
 
         /*
@@ -1500,8 +1823,10 @@ uacpi_status uacpi_setup_gpe_for_wake(
 
             implicit_handler = event->implicit_handler;
             while (implicit_handler) {
-                if (implicit_handler->device == wake_device)
-                    return UACPI_STATUS_ALREADY_EXISTS;
+                if (implicit_handler->device == wake_device) {
+                    ret = UACPI_STATUS_ALREADY_EXISTS;
+                    goto out_unmask;
+                }
 
                 implicit_handler = implicit_handler->next;
             }
@@ -1521,7 +1846,13 @@ uacpi_status uacpi_setup_gpe_for_wake(
     }
 
     event->wake = UACPI_TRUE;
-    return UACPI_STATUS_OK;
+
+out_unmask:
+    if (did_mask)
+        gpe_mask_unmask(event, UACPI_FALSE);
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 static uacpi_status gpe_enable_disable_for_wake(
@@ -1533,12 +1864,20 @@ static uacpi_status gpe_enable_disable_for_wake(
     struct gpe_register *reg;
     uacpi_u8 mask;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
-    if (!event->wake)
-        return UACPI_STATUS_INVALID_ARGUMENT;
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
+    if (!event->wake) {
+        ret = UACPI_STATUS_INVALID_ARGUMENT;
+        goto out;
+    }
 
     reg = event->reg;
     mask = gpe_get_mask(event);
@@ -1548,7 +1887,9 @@ static uacpi_status gpe_enable_disable_for_wake(
     else
         reg->wake_mask &= mask;
 
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_enable_gpe_for_wake(
@@ -1565,13 +1906,6 @@ uacpi_status uacpi_disable_gpe_for_wake(
     return gpe_enable_disable_for_wake(gpe_device, idx, UACPI_FALSE);
 }
 
-enum gpe_block_action {
-    GPE_BLOCK_ACTION_DISABLE_ALL,
-    GPE_BLOCK_ACTION_ENABLE_ALL_FOR_RUNTIME,
-    GPE_BLOCK_ACTION_ENABLE_ALL_FOR_WAKE,
-    GPE_BLOCK_ACTION_CLEAR_ALL,
-};
-
 struct do_for_all_gpes_ctx {
     enum gpe_block_action action;
     uacpi_status ret;
@@ -1582,39 +1916,28 @@ static uacpi_iteration_decision do_for_all_gpes(
 )
 {
     struct do_for_all_gpes_ctx *ctx = opaque;
-    struct gpe_register *reg;
-    uacpi_u8 value;
-    uacpi_size i;
 
-    for (i = 0; i < block->num_registers; ++i) {
-        reg = &block->registers[i];
-
-        switch (ctx->action) {
-        case GPE_BLOCK_ACTION_DISABLE_ALL:
-            value = 0;
-            break;
-        case GPE_BLOCK_ACTION_ENABLE_ALL_FOR_RUNTIME:
-            value = reg->runtime_mask & ~reg->masked_mask;
-            break;
-        case GPE_BLOCK_ACTION_ENABLE_ALL_FOR_WAKE:
-            value = reg->wake_mask;
-            break;
-        case GPE_BLOCK_ACTION_CLEAR_ALL:
-            ctx->ret = uacpi_gas_write(&reg->status, 0xFF);
-            if (uacpi_unlikely_error(ctx->ret))
-                return UACPI_ITERATION_DECISION_BREAK;
-            continue;
-        default:
-            continue;
-        }
-
-        reg->current_mask = value;
-        ctx->ret = uacpi_gas_write(&reg->enable, value);
-        if (uacpi_unlikely_error(ctx->ret))
-            return UACPI_ITERATION_DECISION_BREAK;
-    }
+    ctx->ret = gpe_block_apply_action(block, ctx->action);
+    if (uacpi_unlikely_error(ctx->ret))
+        return UACPI_ITERATION_DECISION_BREAK;
 
     return UACPI_ITERATION_DECISION_CONTINUE;
+}
+
+static uacpi_status for_all_gpes_locked(struct do_for_all_gpes_ctx *ctx)
+{
+    uacpi_status ret;
+
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    for_each_gpe_block(do_for_all_gpes, ctx);
+
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ctx->ret;
 }
 
 uacpi_status uacpi_disable_all_gpes(void)
@@ -1622,9 +1945,7 @@ uacpi_status uacpi_disable_all_gpes(void)
     struct do_for_all_gpes_ctx ctx = {
         .action = GPE_BLOCK_ACTION_DISABLE_ALL,
     };
-
-    for_each_gpe_block(do_for_all_gpes, &ctx);
-    return ctx.ret;
+    return for_all_gpes_locked(&ctx);
 }
 
 uacpi_status uacpi_enable_all_runtime_gpes(void)
@@ -1632,9 +1953,7 @@ uacpi_status uacpi_enable_all_runtime_gpes(void)
     struct do_for_all_gpes_ctx ctx = {
         .action = GPE_BLOCK_ACTION_ENABLE_ALL_FOR_RUNTIME,
     };
-
-    for_each_gpe_block(do_for_all_gpes, &ctx);
-    return ctx.ret;
+    return for_all_gpes_locked(&ctx);
 }
 
 uacpi_status uacpi_enable_all_wake_gpes(void)
@@ -1642,12 +1961,10 @@ uacpi_status uacpi_enable_all_wake_gpes(void)
     struct do_for_all_gpes_ctx ctx = {
         .action = GPE_BLOCK_ACTION_ENABLE_ALL_FOR_WAKE,
     };
-
-    for_each_gpe_block(do_for_all_gpes, &ctx);
-    return ctx.ret;
+    return for_all_gpes_locked(&ctx);
 }
 
-static uacpi_status initialize_gpes()
+static uacpi_status initialize_gpes(void)
 {
     uacpi_status ret;
     uacpi_namespace_node *gpe_node;
@@ -1706,39 +2023,69 @@ uacpi_status uacpi_install_gpe_block(
     uacpi_address_space address_space, uacpi_u16 num_registers, uacpi_u32 irq
 )
 {
-    uacpi_object *obj;
+    uacpi_status ret;
+    uacpi_bool is_dev;
 
-    obj = uacpi_namespace_node_get_object(gpe_device);
-    if (obj == UACPI_NULL || obj->type != UACPI_OBJECT_DEVICE)
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_namespace_node_is(gpe_device, UACPI_OBJECT_DEVICE, &is_dev);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+    if (!is_dev)
         return UACPI_STATUS_INVALID_ARGUMENT;
-    if (uacpi_unlikely(get_gpe(gpe_device, 0) != UACPI_NULL))
-        return UACPI_STATUS_ALREADY_EXISTS;
 
-    return create_gpe_block(
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    if (uacpi_unlikely(get_gpe(gpe_device, 0) != UACPI_NULL)) {
+        ret = UACPI_STATUS_ALREADY_EXISTS;
+        goto out;
+    }
+
+    ret = create_gpe_block(
         gpe_device, irq, 0, address, address_space, num_registers
     );
+
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_uninstall_gpe_block(
     uacpi_namespace_node *gpe_device
 )
 {
-    uacpi_object *obj;
-    struct gpe_search_ctx search_ctx = {
-        .idx = 0,
-        .gpe_device = gpe_device,
-    };
+    uacpi_status ret;
+    uacpi_bool is_dev;
+    struct gpe_search_ctx search_ctx = { 0 };
 
-    obj = uacpi_namespace_node_get_object(gpe_device);
-    if (uacpi_unlikely(obj == UACPI_NULL || obj->type != UACPI_OBJECT_DEVICE))
+    search_ctx.idx = 0;
+    search_ctx.gpe_device = gpe_device;
+
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_namespace_node_is(gpe_device, UACPI_OBJECT_DEVICE, &is_dev);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+    if (!is_dev)
         return UACPI_STATUS_INVALID_ARGUMENT;
 
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
     for_each_gpe_block(do_find_gpe, &search_ctx);
-    if (search_ctx.out_block == UACPI_NULL)
-        return UACPI_STATUS_NOT_FOUND;
+    if (search_ctx.out_block == UACPI_NULL) {
+        ret = UACPI_STATUS_NOT_FOUND;
+        goto out;
+    }
 
     uninstall_gpe_block(search_ctx.out_block);
-    return UACPI_STATUS_OK;
+
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 static uacpi_interrupt_ret handle_global_lock(uacpi_handle ctx)
@@ -1778,6 +2125,28 @@ static uacpi_interrupt_ret handle_sci(uacpi_handle ctx)
     return int_ret;
 }
 
+uacpi_status uacpi_initialize_events_early(void)
+{
+    uacpi_status ret;
+
+    if (uacpi_is_hardware_reduced())
+        return UACPI_STATUS_OK;
+
+    g_gpe_state_slock = uacpi_kernel_create_spinlock();
+    if (uacpi_unlikely(g_gpe_state_slock == UACPI_NULL))
+        return UACPI_STATUS_OUT_OF_MEMORY;
+
+    ret = uacpi_recursive_lock_init(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    ret = initialize_fixed_events();
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
+    return UACPI_STATUS_OK;
+}
+
 uacpi_status uacpi_initialize_events(void)
 {
     uacpi_status ret;
@@ -1785,16 +2154,12 @@ uacpi_status uacpi_initialize_events(void)
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_OK;
 
-    ret = initialize_fixed_events();
-    if (uacpi_unlikely_error(ret))
-        return ret;
-
     ret = initialize_gpes();
     if (uacpi_unlikely_error(ret))
         return ret;
 
     ret = uacpi_kernel_install_interrupt_handler(
-        g_uacpi_rt_ctx.fadt.sci_int, handle_sci, gpe_interrupt_head,
+        g_uacpi_rt_ctx.fadt.sci_int, handle_sci, g_gpe_interrupt_head,
         &g_uacpi_rt_ctx.sci_handle
     );
     if (uacpi_unlikely_error(ret)) {
@@ -1804,6 +2169,7 @@ uacpi_status uacpi_initialize_events(void)
         );
         return ret;
     }
+    g_uacpi_rt_ctx.sci_handle_valid = UACPI_TRUE;
 
     g_uacpi_rt_ctx.global_lock_event = uacpi_kernel_create_event();
     if (uacpi_unlikely(g_uacpi_rt_ctx.global_lock_event == UACPI_NULL))
@@ -1834,14 +2200,25 @@ uacpi_status uacpi_initialize_events(void)
 
 void uacpi_deinitialize_events(void)
 {
-    struct gpe_interrupt_ctx *ctx, *next_ctx = gpe_interrupt_head;
+    struct gpe_interrupt_ctx *ctx, *next_ctx = g_gpe_interrupt_head;
     uacpi_size i;
 
+    g_gpes_finalized = UACPI_FALSE;
+
+    if (g_uacpi_rt_ctx.sci_handle_valid) {
+        uacpi_kernel_uninstall_interrupt_handler(
+            handle_sci, g_uacpi_rt_ctx.sci_handle
+        );
+        g_uacpi_rt_ctx.sci_handle_valid = UACPI_FALSE;
+    }
+
     while (next_ctx) {
+        struct gpe_block *block, *next_block;
+
         ctx = next_ctx;
         next_ctx = ctx->next;
 
-        struct gpe_block *block, *next_block = ctx->gpe_head;
+        next_block = ctx->gpe_head;
         while (next_block) {
             block = next_block;
             next_block = block->next;
@@ -1854,7 +2231,14 @@ void uacpi_deinitialize_events(void)
             uacpi_uninstall_fixed_event_handler(i);
     }
 
-    gpe_interrupt_head = UACPI_NULL;
+    if (g_gpe_state_slock != UACPI_NULL) {
+        uacpi_kernel_free_spinlock(g_gpe_state_slock);
+        g_gpe_state_slock = UACPI_NULL;
+    }
+
+    uacpi_recursive_lock_deinit(&g_event_lock);
+
+    g_gpe_interrupt_head = UACPI_NULL;
 }
 
 uacpi_status uacpi_install_fixed_event_handler(
@@ -1865,15 +2249,23 @@ uacpi_status uacpi_install_fixed_event_handler(
     uacpi_status ret;
     struct fixed_event_handler *ev;
 
-    if (uacpi_unlikely(event > UACPI_FIXED_EVENT_MAX))
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+
+    if (uacpi_unlikely(event < 0 || event > UACPI_FIXED_EVENT_MAX))
         return UACPI_STATUS_INVALID_ARGUMENT;
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_OK;
 
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
+
     ev = &fixed_event_handlers[event];
 
-    if (ev->handler != UACPI_NULL)
-        return UACPI_STATUS_ALREADY_EXISTS;
+    if (ev->handler != UACPI_NULL) {
+        ret = UACPI_STATUS_ALREADY_EXISTS;
+        goto out;
+    }
 
     ev->handler = handler;
     ev->ctx = user;
@@ -1882,10 +2274,11 @@ uacpi_status uacpi_install_fixed_event_handler(
     if (uacpi_unlikely_error(ret)) {
         ev->handler = UACPI_NULL;
         ev->ctx = UACPI_NULL;
-        return ret;
     }
 
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_uninstall_fixed_event_handler(
@@ -1895,21 +2288,31 @@ uacpi_status uacpi_uninstall_fixed_event_handler(
     uacpi_status ret;
     struct fixed_event_handler *ev;
 
-    if (uacpi_unlikely(event > UACPI_FIXED_EVENT_MAX))
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+
+    if (uacpi_unlikely(event < 0 || event > UACPI_FIXED_EVENT_MAX))
         return UACPI_STATUS_INVALID_ARGUMENT;
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_OK;
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
 
     ev = &fixed_event_handlers[event];
 
     ret = set_event(event, UACPI_EVENT_DISABLED);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
+
+    uacpi_kernel_wait_for_work_completion();
 
     ev->handler = UACPI_NULL;
     ev->ctx = UACPI_NULL;
 
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_fixed_event_info(
@@ -1921,10 +2324,16 @@ uacpi_status uacpi_fixed_event_info(
     uacpi_u64 raw_value;
     uacpi_event_info info = 0;
 
-    if (uacpi_unlikely(event > UACPI_FIXED_EVENT_MAX))
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+
+    if (uacpi_unlikely(event < 0 || event > UACPI_FIXED_EVENT_MAX))
         return UACPI_STATUS_INVALID_ARGUMENT;
     if (uacpi_is_hardware_reduced())
         return UACPI_STATUS_NOT_FOUND;
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
+    if (uacpi_unlikely_error(ret))
+        return ret;
 
     if (fixed_event_handlers[event].handler != UACPI_NULL)
         info |= UACPI_EVENT_INFO_HAS_HANDLER;
@@ -1933,18 +2342,20 @@ uacpi_status uacpi_fixed_event_info(
 
     ret = uacpi_read_register_field(ev->enable_field, &raw_value);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
     if (raw_value)
         info |= UACPI_EVENT_INFO_ENABLED | UACPI_EVENT_INFO_HW_ENABLED;
 
     ret = uacpi_read_register_field(ev->status_field, &raw_value);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
     if (raw_value)
         info |= UACPI_EVENT_INFO_HW_STATUS;
 
     *out_info = info;
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 uacpi_status uacpi_gpe_info(
@@ -1958,9 +2369,15 @@ uacpi_status uacpi_gpe_info(
     uacpi_u64 raw_value;
     uacpi_event_info info = 0;
 
-    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
+
+    ret = sanitize_device_and_find_gpe(&gpe_device, idx, &event);
+    if (uacpi_unlikely_error(ret))
+        goto out;
 
     if (event->handler_type != GPE_HANDLER_TYPE_NONE)
         info |= UACPI_EVENT_INFO_HAS_HANDLER;
@@ -1975,20 +2392,22 @@ uacpi_status uacpi_gpe_info(
     if (reg->wake_mask & mask)
         info |= UACPI_EVENT_INFO_ENABLED_FOR_WAKE;
 
-    ret = uacpi_gas_read(&reg->enable, &raw_value);
+    ret = uacpi_gas_read_mapped(&reg->enable, &raw_value);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
     if (raw_value & mask)
         info |= UACPI_EVENT_INFO_HW_ENABLED;
 
-    ret = uacpi_gas_read(&reg->status, &raw_value);
+    ret = uacpi_gas_read_mapped(&reg->status, &raw_value);
     if (uacpi_unlikely_error(ret))
-        return ret;
+        goto out;
     if (raw_value & mask)
         info |= UACPI_EVENT_INFO_HW_STATUS;
 
     *out_info = info;
-    return UACPI_STATUS_OK;
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
 #define PM1_STATUS_BITS (               \
@@ -2009,12 +2428,22 @@ uacpi_status uacpi_clear_all_events(void)
         .action = GPE_BLOCK_ACTION_CLEAR_ALL,
     };
 
-    ret = uacpi_write_register(UACPI_REGISTER_PM1_STS, PM1_STATUS_BITS);
+    UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_NAMESPACE_LOADED);
+
+    ret = uacpi_recursive_lock_acquire(&g_event_lock);
     if (uacpi_unlikely_error(ret))
         return ret;
 
+    ret = uacpi_write_register(UACPI_REGISTER_PM1_STS, PM1_STATUS_BITS);
+    if (uacpi_unlikely_error(ret))
+        goto out;
+
     for_each_gpe_block(do_for_all_gpes, &ctx);
-    return ctx.ret;
+    ret = ctx.ret;
+
+out:
+    uacpi_recursive_lock_release(&g_event_lock);
+    return ret;
 }
 
-#endif
+#endif // !UACPI_REDUCED_HARDWARE && !UACPI_BAREBONES_MODE

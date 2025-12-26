@@ -2,20 +2,54 @@
 #include <uacpi/internal/utilities.h>
 #include <uacpi/internal/stdlib.h>
 #include <uacpi/internal/interpreter.h>
-#include <uacpi/platform/config.h>
 #include <uacpi/internal/mutex.h>
 
 DYNAMIC_ARRAY_WITH_INLINE_STORAGE(
     table_array, struct uacpi_installed_table, UACPI_STATIC_TABLE_ARRAY_LEN
 )
 DYNAMIC_ARRAY_WITH_INLINE_STORAGE_IMPL(
-    table_array, struct uacpi_installed_table,
+    table_array, struct uacpi_installed_table, static
 )
 
 static struct table_array tables;
 static uacpi_bool early_table_access;
 static uacpi_table_installation_handler installation_handler;
+
+#ifndef UACPI_BAREBONES_MODE
+
 static uacpi_handle table_mutex;
+
+#define ENSURE_TABLES_ONLINE()                         \
+    do {                                               \
+        if (!early_table_access)                       \
+            UACPI_ENSURE_INIT_LEVEL_AT_LEAST(          \
+                UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED \
+            );                                         \
+    } while (0)
+
+#else
+
+/*
+ * Use a dummy function instead of a macro to prevent the following error:
+ *     error: statement with no effect [-Werror=unused-value]
+ */
+static inline uacpi_status dummy_mutex_acquire_release(uacpi_handle mtx)
+{
+    UACPI_UNUSED(mtx);
+    return UACPI_STATUS_OK;
+}
+
+#define table_mutex UACPI_NULL
+#define uacpi_acquire_native_mutex_may_be_null dummy_mutex_acquire_release
+#define uacpi_release_native_mutex_may_be_null dummy_mutex_acquire_release
+
+#define ENSURE_TABLES_ONLINE()                       \
+    do {                                             \
+        if (!early_table_access)                     \
+            return UACPI_STATUS_INIT_LEVEL_MISMATCH; \
+    } while (0)
+
+#endif // !UACPI_BAREBONES_MODE
 
 static uacpi_status table_install_physical_with_origin_unlocked(
     uacpi_phys_addr phys, enum uacpi_table_origin origin,
@@ -48,15 +82,15 @@ static void dump_table_header(
         struct acpi_rsdp *rsdp = hdr;
 
         uacpi_info(
-            "RSDP 0x%016"UACPI_PRIX64" %08X v%02X (%.6s)\n",
-            UACPI_FMT64(phys_addr), rsdp->length, rsdp->revision,
-            rsdp->oemid
+            "RSDP 0x%016"UACPI_PRIX64" %08X v%02X (%6.6s)\n",
+            UACPI_FMT64(phys_addr), rsdp->revision >= 2 ? rsdp->length : 20,
+            rsdp->revision, rsdp->oemid
         );
         return;
     }
 
     uacpi_info(
-        "%.4s 0x%016"UACPI_PRIX64" %08X v%02X (%.6s %.8s)\n",
+        "%.4s 0x%016"UACPI_PRIX64" %08X v%02X (%6.6s %8.8s)\n",
         sdt->signature, UACPI_FMT64(phys_addr), sdt->length, sdt->revision,
         sdt->oemid, sdt->oem_table_id
     );
@@ -168,7 +202,9 @@ uacpi_status uacpi_setup_early_table_access(
 {
     uacpi_status ret;
 
+#ifndef UACPI_BAREBONES_MODE
     UACPI_ENSURE_INIT_LEVEL_IS(UACPI_INIT_LEVEL_EARLY);
+#endif
     if (uacpi_unlikely(early_table_access))
         return UACPI_STATUS_INIT_LEVEL_MISMATCH;
 
@@ -188,6 +224,7 @@ uacpi_status uacpi_setup_early_table_access(
     return ret;
 }
 
+#ifndef UACPI_BAREBONES_MODE
 static uacpi_iteration_decision warn_if_early_referenced(
     void *user, struct uacpi_installed_table *tbl, uacpi_size idx
 )
@@ -274,6 +311,7 @@ uacpi_status uacpi_initialize_tables(void)
 
     return UACPI_STATUS_OK;
 }
+#endif // !UACPI_BAREBONES_MODE
 
 void uacpi_deinitialize_tables(void)
 {
@@ -283,9 +321,11 @@ void uacpi_deinitialize_tables(void)
         struct uacpi_installed_table *tbl = table_array_at(&tables, i);
 
         switch (tbl->origin) {
+#ifndef UACPI_BAREBONES_MODE
         case UACPI_TABLE_ORIGIN_FIRMWARE_VIRTUAL:
             uacpi_free(tbl->ptr, tbl->hdr.length);
             break;
+#endif
         case UACPI_TABLE_ORIGIN_FIRMWARE_PHYSICAL:
         case UACPI_TABLE_ORIGIN_HOST_PHYSICAL:
             if (tbl->reference_count != 0)
@@ -303,11 +343,14 @@ void uacpi_deinitialize_tables(void)
         table_array_clear(&tables);
     }
 
+    installation_handler = UACPI_NULL;
+
+#ifndef UACPI_BAREBONES_MODE
     if (table_mutex)
         uacpi_kernel_free_mutex(table_mutex);
 
-    installation_handler = UACPI_NULL;
     table_mutex = UACPI_NULL;
+#endif
 }
 
 uacpi_status uacpi_set_table_installation_handler(
@@ -620,9 +663,10 @@ static uacpi_status table_install_physical_with_origin_unlocked(
         return ret;
 
     if (uacpi_unlikely(hdr.length < sizeof(struct acpi_sdt_hdr))) {
-        uacpi_error("invalid table '%.4s' (0x016%"UACPI_PRIX64") size: %u\n",
-                    hdr.signature, UACPI_FMT64(phys), hdr.length);
-        return UACPI_STATUS_INVALID_TABLE_LENGTH;
+        uacpi_warn(
+            "bogus table '%.4s' (0x%016"UACPI_PRIX64") size: %u bytes\n",
+            hdr.signature, UACPI_FMT64(phys), hdr.length
+        );
     }
 
     if (expected_signature != UACPI_NULL) {
@@ -649,7 +693,7 @@ static uacpi_status table_install_physical_with_origin_unlocked(
             break;
         case UACPI_TABLE_INSTALLATION_DISPOSITON_DENY:
             uacpi_info(
-                "table '%.4s' (0x016%"UACPI_PRIX64") installation denied "
+                "table '%.4s' (0x%016"UACPI_PRIX64") installation denied "
                 "by host\n", hdr.signature, UACPI_FMT64(phys)
             );
             ret = UACPI_STATUS_DENIED;
@@ -657,7 +701,7 @@ static uacpi_status table_install_physical_with_origin_unlocked(
 
         default:
             uacpi_info(
-                "table '%.4s' (0x016%"UACPI_PRIX64") installation "
+                "table '%.4s' (0x%016"UACPI_PRIX64") installation "
                 "overridden by host\n", hdr.signature, UACPI_FMT64(phys)
             );
 
@@ -710,6 +754,7 @@ static uacpi_status table_install_with_origin_unlocked(
         return UACPI_STATUS_INVALID_TABLE_LENGTH;
     }
 
+#ifndef UACPI_BAREBONES_MODE
     if (origin == UACPI_TABLE_ORIGIN_FIRMWARE_VIRTUAL &&
         installation_handler != UACPI_NULL) {
         uacpi_u64 override;
@@ -742,6 +787,7 @@ static uacpi_status table_install_with_origin_unlocked(
         }
         }
     }
+#endif
 
     return verify_and_install_table(
         hdr, 0, virt, origin, out_table
@@ -766,8 +812,7 @@ uacpi_status uacpi_table_install_with_origin(
 
 uacpi_status uacpi_table_install(void *virt, uacpi_table *out_table)
 {
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
 
     return uacpi_table_install_with_origin(
         virt, UACPI_TABLE_ORIGIN_HOST_VIRTUAL, out_table
@@ -778,8 +823,7 @@ uacpi_status uacpi_table_install_physical(
     uacpi_phys_addr addr, uacpi_table *out_table
 )
 {
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
 
     return uacpi_table_install_physical_with_origin(
         addr, UACPI_TABLE_ORIGIN_HOST_PHYSICAL, out_table
@@ -795,8 +839,7 @@ uacpi_status uacpi_for_each_table(
     struct uacpi_installed_table *tbl;
     uacpi_iteration_decision dec;
 
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
 
     ret = uacpi_acquire_native_mutex_may_be_null(table_mutex);
     if (uacpi_unlikely_error(ret))
@@ -889,17 +932,18 @@ static uacpi_iteration_decision do_search_tables(
     return UACPI_ITERATION_DECISION_BREAK;
 }
 
+#ifndef UACPI_BAREBONES_MODE
 uacpi_status uacpi_table_match(
     uacpi_size base_idx, uacpi_table_match_callback cb, uacpi_table *out_table
 )
 {
     uacpi_status ret;
-    struct table_search_ctx ctx = {
-        .match_cb = cb,
-        .search_type = SEARCH_TYPE_MATCH,
-        .out_table = out_table,
-        .status = UACPI_STATUS_NOT_FOUND,
-    };
+    struct table_search_ctx ctx = { 0 };
+
+    ctx.match_cb = cb;
+    ctx.search_type = SEARCH_TYPE_MATCH;
+    ctx.out_table = out_table;
+    ctx.status = UACPI_STATUS_NOT_FOUND;
 
     ret = uacpi_for_each_table(base_idx, do_search_tables, &ctx);
     if (uacpi_unlikely_error(ret))
@@ -907,6 +951,7 @@ uacpi_status uacpi_table_match(
 
     return ctx.status;
 }
+#endif
 
 static uacpi_status find_table(
     uacpi_size base_idx, const uacpi_table_identifiers *id,
@@ -914,12 +959,12 @@ static uacpi_status find_table(
 )
 {
     uacpi_status ret;
-    struct table_search_ctx ctx = {
-        .id = id,
-        .out_table = out_table,
-        .search_type = SEARCH_TYPE_BY_ID,
-        .status = UACPI_STATUS_NOT_FOUND,
-    };
+    struct table_search_ctx ctx = { 0 };
+
+    ctx.id = id;
+    ctx.out_table = out_table;
+    ctx.search_type = SEARCH_TYPE_BY_ID;
+    ctx.status = UACPI_STATUS_NOT_FOUND;
 
     ret = uacpi_for_each_table(base_idx, do_search_tables, &ctx);
     if (uacpi_unlikely_error(ret))
@@ -932,19 +977,15 @@ uacpi_status uacpi_table_find_by_signature(
     const uacpi_char *signature_string, struct uacpi_table *out_table
 )
 {
-    struct uacpi_table_identifiers id = {
-        .signature = {
-            .text = {
-                signature_string[0],
-                signature_string[1],
-                signature_string[2],
-                signature_string[3]
-            }
-        }
-    };
+    struct uacpi_table_identifiers id = { 0 };
 
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    id.signature.text[0] = signature_string[0];
+    id.signature.text[1] = signature_string[1];
+    id.signature.text[2] = signature_string[2];
+    id.signature.text[3] = signature_string[3];
+
+    ENSURE_TABLES_ONLINE();
+
     return find_table(0, &id, out_table);
 }
 
@@ -954,8 +995,7 @@ uacpi_status uacpi_table_find_next_with_same_signature(
 {
     struct uacpi_table_identifiers id = { 0 };
 
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
 
     if (uacpi_unlikely(in_out_table->ptr == UACPI_NULL))
         return UACPI_STATUS_INVALID_ARGUMENT;
@@ -971,8 +1011,8 @@ uacpi_status uacpi_table_find(
     const uacpi_table_identifiers *id, uacpi_table *out_table
 )
 {
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
+
     return find_table(0, id, out_table);
 }
 
@@ -999,8 +1039,7 @@ static uacpi_status table_ctl(uacpi_size idx, struct table_ctl_request *req)
     uacpi_status ret;
     struct uacpi_installed_table *tbl;
 
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
 
     ret = uacpi_acquire_native_mutex_may_be_null(table_mutex);
     if (uacpi_unlikely_error(ret))
@@ -1069,6 +1108,7 @@ out:
     return ret;
 }
 
+#ifndef UACPI_BAREBONES_MODE
 uacpi_status uacpi_table_load_with_cause(
     uacpi_size idx, enum uacpi_table_load_cause cause
 )
@@ -1099,23 +1139,30 @@ uacpi_status uacpi_table_load(uacpi_size idx)
 
 void uacpi_table_mark_as_loaded(uacpi_size idx)
 {
-    table_ctl(idx, &(struct table_ctl_request) {
+    struct table_ctl_request req = {
         .type = TABLE_CTL_SET_FLAGS, .set = UACPI_TABLE_LOADED
-    });
+    };
+
+    table_ctl(idx, &req);
 }
+#endif // !UACPI_BAREBONES_MODE
 
 uacpi_status uacpi_table_ref(uacpi_table *tbl)
 {
-    return table_ctl(tbl->index, &(struct table_ctl_request) {
+    struct table_ctl_request req = {
         .type = TABLE_CTL_GET
-    });
+    };
+
+    return table_ctl(tbl->index, &req);
 }
 
 uacpi_status uacpi_table_unref(uacpi_table *tbl)
 {
-    return table_ctl(tbl->index, &(struct table_ctl_request) {
+    struct table_ctl_request req = {
         .type = TABLE_CTL_PUT
-    });
+    };
+
+    return table_ctl(tbl->index, &req);
 }
 
 uacpi_u16 fadt_version_sizes[] = {
@@ -1247,6 +1294,7 @@ static void convert_registers_to_gas(void)
     }
 }
 
+#ifndef UACPI_BAREBONES_MODE
 static void split_one_block(
     struct acpi_gas *src, struct acpi_gas *dst0, struct acpi_gas *dst1
 )
@@ -1276,6 +1324,7 @@ static void split_event_blocks(void)
         &g_uacpi_rt_ctx.pm1b_enable_blk
     );
 }
+#endif // !UACPI_BAREBONES_MODE
 
 static uacpi_status initialize_fadt(const void *virt)
 {
@@ -1290,7 +1339,7 @@ static uacpi_status initialize_fadt(const void *virt)
 
     uacpi_memcpy(fadt, hdr, UACPI_MIN(sizeof(*fadt), hdr->length));
 
-#ifndef UACPI_REDUCED_HARDWARE
+#if !defined(UACPI_REDUCED_HARDWARE) && !defined(UACPI_BAREBONES_MODE)
     g_uacpi_rt_ctx.is_hardware_reduced = fadt->flags & ACPI_HW_REDUCED_ACPI;
 #endif
 
@@ -1334,7 +1383,9 @@ static uacpi_status initialize_fadt(const void *virt)
 
     if (!uacpi_is_hardware_reduced()) {
         convert_registers_to_gas();
+#ifndef UACPI_BAREBONES_MODE
         split_event_blocks();
+#endif
     }
 
     return UACPI_STATUS_OK;
@@ -1342,9 +1393,57 @@ static uacpi_status initialize_fadt(const void *virt)
 
 uacpi_status uacpi_table_fadt(struct acpi_fadt **out_fadt)
 {
-    if (!early_table_access)
-        UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
+    ENSURE_TABLES_ONLINE();
 
     *out_fadt = &g_uacpi_rt_ctx.fadt;
+    return UACPI_STATUS_OK;
+}
+
+uacpi_status uacpi_for_each_subtable(
+    struct acpi_sdt_hdr *hdr, size_t hdr_size,
+    uacpi_subtable_iteration_callback cb, void *user
+)
+{
+    void *cursor;
+    size_t bytes_left;
+
+    cursor = UACPI_PTR_ADD(hdr, hdr_size);
+    bytes_left = hdr->length - hdr_size;
+
+    if (uacpi_unlikely(bytes_left > hdr->length))
+        return UACPI_STATUS_INVALID_TABLE_LENGTH;
+
+    while (bytes_left > sizeof(struct acpi_entry_hdr)) {
+        struct acpi_entry_hdr *subtable_hdr = cursor;
+
+        if (uacpi_unlikely(subtable_hdr->length > bytes_left ||
+                           subtable_hdr->length < sizeof(*subtable_hdr))) {
+            uacpi_error(
+                "corrupted '%.4s' subtable length: %u (%zu bytes left)\n",
+                hdr->signature, subtable_hdr->length, bytes_left
+            );
+            return UACPI_STATUS_INVALID_TABLE_LENGTH;
+        }
+
+        switch (cb(user, subtable_hdr)) {
+        case UACPI_ITERATION_DECISION_CONTINUE:
+            break;
+        case UACPI_ITERATION_DECISION_BREAK:
+            return UACPI_STATUS_OK;
+        default:
+            return UACPI_STATUS_INVALID_ARGUMENT;
+        }
+
+        cursor = UACPI_PTR_ADD(cursor, subtable_hdr->length);
+        bytes_left -= subtable_hdr->length;
+    }
+
+    if (uacpi_unlikely(bytes_left != 0)) {
+        uacpi_warn(
+            "found %zu stray bytes in table '%.4s'\n",
+            bytes_left, hdr->signature
+        );
+    }
+
     return UACPI_STATUS_OK;
 }

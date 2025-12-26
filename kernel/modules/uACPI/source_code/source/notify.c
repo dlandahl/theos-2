@@ -4,7 +4,10 @@
 #include <uacpi/internal/log.h>
 #include <uacpi/internal/mutex.h>
 #include <uacpi/internal/utilities.h>
+#include <uacpi/internal/stdlib.h>
 #include <uacpi/kernel_api.h>
+
+#ifndef UACPI_BAREBONES_MODE
 
 static uacpi_handle notify_mutex;
 
@@ -164,7 +167,7 @@ uacpi_status uacpi_install_notify_handler(
         goto out;
     }
 
-    new_handler = uacpi_kernel_calloc(1, sizeof(*new_handler));
+    new_handler = uacpi_kernel_alloc_zeroed(sizeof(*new_handler));
     if (uacpi_unlikely(new_handler == UACPI_NULL))
         return UACPI_STATUS_OUT_OF_MEMORY;
 
@@ -190,7 +193,7 @@ uacpi_status uacpi_uninstall_notify_handler(
     uacpi_status ret;
     uacpi_object *obj;
     uacpi_handlers *handlers;
-    uacpi_device_notify_handler *containing, *prev_handler;
+    uacpi_device_notify_handler *prev_handler, *containing = UACPI_NULL;
 
     UACPI_ENSURE_INIT_LEVEL_AT_LEAST(UACPI_INIT_LEVEL_SUBSYSTEM_INITIALIZED);
 
@@ -248,3 +251,5 @@ out_no_mutex:
 
     return ret;
 }
+
+#endif // !UACPI_BAREBONES_MODE

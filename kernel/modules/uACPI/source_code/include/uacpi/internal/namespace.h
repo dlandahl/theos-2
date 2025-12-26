@@ -5,6 +5,8 @@
 #include <uacpi/status.h>
 #include <uacpi/namespace.h>
 
+#ifndef UACPI_BAREBONES_MODE
+
 #define UACPI_NAMESPACE_NODE_FLAG_ALIAS (1 << 0)
 
 /*
@@ -112,8 +114,10 @@ uacpi_bool uacpi_namespace_node_is_dangling(uacpi_namespace_node *node);
 uacpi_bool uacpi_namespace_node_is_temporary(uacpi_namespace_node *node);
 uacpi_bool uacpi_namespace_node_is_predefined(uacpi_namespace_node *node);
 
-uacpi_status uacpi_namespace_read_lock();
-uacpi_status uacpi_namespace_read_unlock();
+uacpi_status uacpi_namespace_read_lock(void);
+uacpi_status uacpi_namespace_read_unlock(void);
 
-uacpi_status uacpi_namespace_write_lock();
-uacpi_status uacpi_namespace_write_unlock();
+uacpi_status uacpi_namespace_write_lock(void);
+uacpi_status uacpi_namespace_write_unlock(void);
+
+#endif // !UACPI_BAREBONES_MODE

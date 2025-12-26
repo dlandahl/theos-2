@@ -5,6 +5,10 @@
 #include <uacpi/kernel_api.h>
 #include <uacpi/namespace.h>
 
+#define UACPI_MAJOR 3
+#define UACPI_MINOR 2
+#define UACPI_PATCH 0
+
 #ifdef UACPI_REDUCED_HARDWARE
 #define UACPI_MAKE_STUB_FOR_REDUCED_HARDWARE(fn, ret) \
     UACPI_NO_UNUSED_PARAMETER_WARNINGS_BEGIN          \
@@ -45,6 +49,9 @@ extern "C" {
  * yields about 73 tables in terms of capacity. uACPI also has an internal
  * static buffer for tables, "UACPI_STATIC_TABLE_ARRAY_LEN", which is configured
  * as 16 descriptors in length by default.
+ *
+ * This function is used to initialize the barebones mode, see
+ * UACPI_BAREBONES_MODE in config.h for more information.
  */
 uacpi_status uacpi_setup_early_table_access(
     void *temporary_buffer, uacpi_size buffer_size
@@ -87,6 +94,8 @@ uacpi_status uacpi_setup_early_table_access(
  * hosts are able to handle at early init.
  */
 #define UACPI_FLAG_PROACTIVE_TBL_CSUM (1ull << 5)
+
+#ifndef UACPI_BAREBONES_MODE
 
 /*
  * Initializes the uACPI subsystem, iterates & records all relevant RSDT/XSDT
@@ -241,6 +250,8 @@ UACPI_ALWAYS_ERROR_FOR_REDUCED_HARDWARE(
  */
 uacpi_status uacpi_acquire_global_lock(uacpi_u16 timeout, uacpi_u32 *out_seq);
 uacpi_status uacpi_release_global_lock(uacpi_u32 seq);
+
+#endif // !UACPI_BAREBONES_MODE
 
 /*
  * Reset the global uACPI state by freeing all internally allocated data

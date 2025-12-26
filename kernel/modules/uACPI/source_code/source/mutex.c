@@ -6,6 +6,8 @@
 #include <uacpi/kernel_api.h>
 #include <uacpi/internal/namespace.h>
 
+#ifndef UACPI_BAREBONES_MODE
+
 #ifndef UACPI_REDUCED_HARDWARE
 
 #define GLOBAL_LOCK_PENDING (1 << 0)
@@ -13,7 +15,7 @@
 #define GLOBAL_LOCK_OWNED_BIT 1
 #define GLOBAL_LOCK_OWNED (1 << GLOBAL_LOCK_OWNED_BIT)
 
-#define GLOBAL_LOCK_MASK 0b11u
+#define GLOBAL_LOCK_MASK 3u
 
 static uacpi_bool try_acquire_global_lock_from_firmware(uacpi_u32 *lock)
 {
@@ -390,3 +392,5 @@ uacpi_status uacpi_rw_unlock_write(struct uacpi_rw_lock *lock)
 {
     return uacpi_release_native_mutex(lock->write_mutex);
 }
+
+#endif // !UACPI_BAREBONES_MODE

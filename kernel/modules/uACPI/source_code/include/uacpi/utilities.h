@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+#ifndef UACPI_BAREBONES_MODE
+
 /*
  * Checks whether the device at 'node' matches any of the PNP ids provided in
  * 'list' (terminated by a UACPI_NULL). This is done by first attempting to
@@ -45,8 +47,12 @@ uacpi_status uacpi_find_devices(
 
 typedef enum uacpi_interrupt_model {
     UACPI_INTERRUPT_MODEL_PIC = 0,
-    UACPI_INTERRUPT_MODEL_IOAPIC = 1,
-    UACPI_INTERRUPT_MODEL_IOSAPIC = 2,
+    UACPI_INTERRUPT_MODEL_IOAPIC,
+    UACPI_INTERRUPT_MODEL_IOSAPIC,
+    UACPI_INTERRUPT_MODEL_PLATFORM_SPECIFIC,
+    UACPI_INTERRUPT_MODEL_GIC,
+    UACPI_INTERRUPT_MODEL_LPIC,
+    UACPI_INTERRUPT_MODEL_RINTC,
 } uacpi_interrupt_model;
 
 uacpi_status uacpi_set_interrupt_model(uacpi_interrupt_model);
@@ -178,6 +184,8 @@ void uacpi_free_namespace_node_info(uacpi_namespace_node_info*);
 uacpi_status uacpi_get_namespace_node_info(
     uacpi_namespace_node *node, uacpi_namespace_node_info **out_info
 );
+
+#endif // !UACPI_BAREBONES_MODE
 
 #ifdef __cplusplus
 }

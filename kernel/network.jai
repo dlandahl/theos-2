@@ -2188,7 +2188,7 @@ network_thread :: () {
     work_to_do.counter_max = 1;
 
     while true  {
-        timeout := seconds_to_apollo(10);
+        timeout := INFINITE_TIMEOUT;
 
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);

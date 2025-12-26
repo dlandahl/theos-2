@@ -6,6 +6,8 @@
 #include <uacpi/internal/event.h>
 #include <uacpi/platform/arch_helpers.h>
 
+#ifndef UACPI_BAREBONES_MODE
+
 #ifndef UACPI_REDUCED_HARDWARE
 #define CALL_SLEEP_FN(name, state)                       \
     (uacpi_is_hardware_reduced() ?                       \
@@ -532,6 +534,7 @@ uacpi_status uacpi_wake_from_sleep_state(
 uacpi_status uacpi_reboot(void)
 {
     uacpi_status ret;
+    uacpi_handle pci_dev = UACPI_NULL, io_handle = UACPI_NULL;
     struct acpi_fadt *fadt = &g_uacpi_rt_ctx.fadt;
     struct acpi_gas *reset_reg = &fadt->reset_reg;
 
@@ -550,24 +553,30 @@ uacpi_status uacpi_reboot(void)
          * For SystemIO we don't do any checking, and we ignore bit width
          * because that's what NT does.
          */
-        ret = uacpi_kernel_raw_io_write(
-            reset_reg->address, 1, fadt->reset_value
-        );
+        ret = uacpi_kernel_io_map(reset_reg->address, 1, &io_handle);
+        if (uacpi_unlikely_error(ret))
+            return ret;
+
+        ret = uacpi_kernel_io_write8(io_handle, 0, fadt->reset_value);
         break;
     case UACPI_ADDRESS_SPACE_SYSTEM_MEMORY:
         ret = uacpi_write_register(UACPI_REGISTER_RESET, fadt->reset_value);
         break;
     case UACPI_ADDRESS_SPACE_PCI_CONFIG: {
-        // Bus is assumed to be 0 here
-        uacpi_pci_address address = {
-            .segment = 0,
-            .bus = 0,
-            .device = (reset_reg->address >> 32) & 0xFF,
-            .function = (reset_reg->address >> 16) & 0xFF,
-        };
+        uacpi_pci_address address = { 0 };
 
-        ret = uacpi_kernel_pci_write(
-            &address, reset_reg->address & 0xFFFF, 1, fadt->reset_value
+        // Bus is assumed to be 0 here
+        address.segment = 0;
+        address.bus = 0;
+        address.device = (reset_reg->address >> 32) & 0xFF;
+        address.function = (reset_reg->address >> 16) & 0xFF;
+
+        ret = uacpi_kernel_pci_device_open(address, &pci_dev);
+        if (uacpi_unlikely_error(ret))
+            break;
+
+        ret = uacpi_kernel_pci_write8(
+            pci_dev, reset_reg->address & 0xFFFF, fadt->reset_value
         );
         break;
     }
@@ -593,8 +602,15 @@ uacpi_status uacpi_reboot(void)
         }
 
         uacpi_error("reset timeout\n");
-        return UACPI_STATUS_HARDWARE_TIMEOUT;
+        ret = UACPI_STATUS_HARDWARE_TIMEOUT;
     }
+
+    if (pci_dev != UACPI_NULL)
+        uacpi_kernel_pci_device_close(pci_dev);
+    if (io_handle != UACPI_NULL)
+        uacpi_kernel_io_unmap(io_handle);
 
     return ret;
 }
+
+#endif // !UACPI_BAREBONES_MODE
