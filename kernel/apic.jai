@@ -587,68 +587,9 @@ Uacpi_State :: struct {
 
 #import "uACPI";
 
-#program_export uacpi_do_atomic_cmpxchg64 :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg64\"\n");
-    bluescreen();
-}
-
-#program_export uacpi_do_atomic_cmpxchg32 :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg32\"\n");
-    bluescreen();
-}
-
-#program_export uacpi_do_atomic_cmpxchg16 :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg16\"\n");
-    bluescreen();
-}
-
-#program_export uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
+#program_export
+uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
     rsdp_address.* = cast(uacpi_phys_addr) global.acpi_rsdp;
-    return .OK;
-}
-
-#program_export uacpi_kernel_raw_memory_read :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_raw_memory_read\"\n");
-    bluescreen();
-}
-
-#program_export uacpi_kernel_raw_memory_write :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_raw_memory_write\"\n");
-    bluescreen();
-}
-
-#program_export uacpi_kernel_raw_io_read :: (address: uacpi_io_addr, byte_width: uacpi_u8, out_value: *uacpi_u64) -> uacpi_status #c_call {
-    value: u64;
-
-    #asm {
-        address === d;
-        value   === a;
-    }
-
-    if byte_width == {
-        case 1; #asm { in.8  value, address; }
-        case 2; #asm { in.16 value, address; }
-        case 4; #asm { in.32 value, address; }
-        case; bluescreen();
-    }
-
-    out_value.* = value;
-    return .OK;
-}
-
-#program_export uacpi_kernel_raw_io_write :: (address: uacpi_io_addr, byte_width: uacpi_u8, value: uacpi_u64) -> uacpi_status #c_call {
-    #asm {
-        address === d;
-        value   === a;
-    }
-
-    if byte_width == {
-        case 1; #asm { out.8  address, value; }
-        case 2; #asm { out.16 address, value; }
-        case 4; #asm { out.32 address, value; }
-        case; bluescreen();
-    }
-
     return .OK;
 }
 
@@ -661,7 +602,8 @@ uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi
     return .OK;
 }
 
-#program_export uacpi_kernel_io_unmap :: () #c_call {
+#program_export
+uacpi_kernel_io_unmap :: () #c_call {
     write_string("uACPI kernel call: \"uacpi_kernel_io_unmap\"\n");
     bluescreen();
 }
@@ -695,19 +637,6 @@ uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
         phys := alloc_block(*global.physical_block_allocator, size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
-        return virt;
-    }
-}
-
-#program_export
-uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
-    size_bytes := size*count;
-
-    push_context {
-        phys := alloc_block(*global.physical_block_allocator, size_bytes);
-        virt := cast(*void) phys + DIRECT_MAPPING_BASE;
-
-        memset(virt, 0, cast(s64) size_bytes);
         return virt;
     }
 }
@@ -977,14 +906,8 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
     }
 }
 
-// Todo: Why does uacpi need this?
-#program_export
-__popcountdi2 :: (a: s32) -> s32 #c_call {
-    return popcount(a);
-}
 
-
-do_uacpi_kernel_io_read :: (device: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #expand {
+do_uacpi_kernel_io_read :: (device: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #c_call {
     #asm {
         mov address: gpr === d, device;
         add address, offset;
@@ -1012,7 +935,7 @@ uacpi_kernel_io_read32 :: (device: uacpi_handle, offset: uacpi_size, value: *u32
 
 
 
-do_uacpi_kernel_io_write :: (device: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #expand {
+do_uacpi_kernel_io_write :: (device: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #c_call {
     #asm {
         mov address: gpr === d, device;
         add address, offset;
@@ -1040,7 +963,7 @@ uacpi_kernel_io_write32 :: (device: uacpi_handle, offset: uacpi_size, value: u32
 
 
 
-do_uacpi_kernel_pci_read :: (handle: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #expand {
+do_uacpi_kernel_pci_read :: (handle: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #c_call {
     using cast(*uacpi_pci_address) *handle;
 
     for global.pci_ecam {
@@ -1080,7 +1003,7 @@ uacpi_kernel_pci_read32 :: (handle: uacpi_handle, offset: uacpi_size, value: *u3
 
 
 
-do_uacpi_kernel_pci_write :: (handle: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #expand {
+do_uacpi_kernel_pci_write :: (handle: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #c_call {
     using cast(*uacpi_pci_address) *handle;
 
     for global.pci_ecam {

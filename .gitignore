@@ -20,3 +20,5 @@ server.py
 *.vbox
 
 kernel/modules/new_uACPI/
+
+kernel/modules/old_uACPI/
