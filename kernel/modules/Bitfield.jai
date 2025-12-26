@@ -160,7 +160,7 @@ print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct
 #import "Compiler";
 #import "Basic";
 
-calculate_mask_and_offset :: ($bitfield: Type, loc: Source_Code_Location, call: Code) -> int, int {
+calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: Code) -> int, int {
     ti := cast(*Type_Info_Enum) bitfield;
     validate_bitfield(ti, loc);
 
@@ -223,7 +223,8 @@ calculate_mask_and_offset :: ($bitfield: Type, loc: Source_Code_Location, call: 
 }
 
 #import "Bit_Operations";
-get_single_bit_mask :: ($bitfield: Type, loc: Source_Code_Location, call: Code) -> int {
+
+get_single_bit_mask :: (bitfield: Type, loc: Source_Code_Location, call: Code) -> int {
     bit := calculate_mask_and_offset(bitfield, loc, call);
 
     count := popcount(bit);

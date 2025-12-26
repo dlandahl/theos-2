@@ -282,6 +282,7 @@ kernel_entry :: () #no_context {
         time := get_monotonic_system_time();
         random_seed(cast(S128)time);
 
+        log("Initializing uACPI.");
         initialize_uacpi();
         find_all_pci_devices();
 
@@ -290,8 +291,6 @@ kernel_entry :: () #no_context {
         for *core: processor_cores {
             while !core.online pause();
         }
-
-        #asm { sti; }
 
         for* pci_devices {
 
@@ -312,6 +311,8 @@ kernel_entry :: () #no_context {
                 }
             }
         }
+
+        #asm { sti; }
 
         // user_mode_stress_test();
         // semaphore_test();

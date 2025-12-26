@@ -363,7 +363,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 }
 
 register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
-        
+
     for entry: global.pci_routing_table {
         device := (entry.address >> 16) & 0xFFFF;
 
@@ -375,10 +375,38 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
             continue;
         }
 
+        gsi := entry.index;
+
+        if !gsi && pci.interrupt_line gsi = pci.interrupt_line;
+
+        if !gsi && entry.source != null {
+            res: *uacpi_resources;
+            uacpi_get_current_resources(entry.source, *res);
+            assert(res != null);
+
+            resource := res.entries;
+            while true {
+                type := cast(uacpi_resource_type)resource.type;
+
+                if type == {
+                  case .END_TAG;
+                    break;
+                  case .IRQ;
+                    // Todo.
+                  case .EXTENDED_IRQ;
+                    // Todo.
+                }
+                resource = cast(*void)resource + resource.length;
+            }
+        }
+
         gate := allocate_interrupt_gate();
         register_interrupt_gate(interrupt_handler, gate);
 
-        ioapic_add_interrupt_redirection_table_entry(entry.index, cast(u64)gate | (1 << 13) | (1 << 15));
+        ioapic_add_interrupt_redirection_table_entry(gsi, cast(u64)gate | (1 << 13) | (1 << 15));
+
+        pin_names := string.["INTA#", "INTB#", "INTC#", "INTD#"];
+        log("Mapped legacy PCI interrupt, pin: %, GSI: %", pin_names[entry.pin], gsi);
         return true;
     }
 
@@ -655,9 +683,9 @@ i8254x_interrupt :: (stack: *void) #c_call {
         if cause & .RXT0__Receiver_Timer_Interrupt {
             signal(*net.work_to_do);
         }
-
-        write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
     }
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 I8254x_Network_Interface_Card :: struct {
@@ -682,18 +710,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     device.command &= ~.INTERRUPT_DISABLE;
 
     success := register_legacy_pci_interrupt(device, isr__i8254x_interrupt);
-
-//    parse_pci_capability_list(device);
-//    enabled := enable_msi_or_msi_x(device, isr__i8254x_interrupt);
-//
-//    if enabled == .NONE {
-//        if !success {
-//            log_error("Failed to set up interrupt.");
-//            bluescreen();
-//        } else {
-//            log("Enabled legacy interrupts.");
-//        }
-//    }
+    assert(success);
 
     nic: I8254x_Network_Interface_Card;
 
@@ -701,7 +718,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     nic.mmio = map_base_address_register(bar0);
 
     {
-        // Reset the controller
+        // Reset the controller.
 
         // The bit should be readable after one microsecond, and should eventually clear once reset is complete.
         // Spin for 2us to be safe.
@@ -721,23 +738,21 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
-    // Disable interrupts
-    nic.IMC__interrupt_mask_clear = 0xffff_ffff;
-    _ := nic.ICR__interrupt_cause_read;
-
-    // Get MAC address
-    mac: I8254x_MAC;
-    mac.ral = nic.RAL__receive_address_low;
-    mac.rah = nic.RAH__receive_address_high;
-    nic.mac_address = mac.array;
-
     {
+        // Get MAC address.
+
+        mac: I8254x_MAC;
+        mac.ral = nic.RAL__receive_address_low;
+        mac.rah = nic.RAH__receive_address_high;
+        nic.mac_address = mac.array;
+
         push_print_style(mac_address_print_style);
         log("MAC address: %", nic.mac_address);
     }
 
     {
-        // General configuration
+        // General configuration.
+
         ctrl := nic.CTRL__device_control;
 
         ctrl &= ~.LRST__link_reset;
@@ -758,13 +773,14 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         nic.FCAH__flow_control_address_high = 0;
         nic.FCT__flow_control_type = 0;
 
+        _ := nic.ICR__interrupt_cause_read;
         nic.IMS__interrupt_mask_set = 0xffff_ffff;
     }
 
     {
-        // Transmit packets
+        // Transmit packets.
 
-        // Allocate transmit descriptor queue
+        // Allocate transmit descriptor queue.
         transmit_desc_buffer := get_4k_page();
 
         nic.tx_queue.data = cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
@@ -789,7 +805,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
             | .RTLC__retransmit_on_late_collision
             | .EN__enable;
 
-        // COLD and CT, todo: magic numbers
+        // COLD and CT, todo: magic numbers.
         tctl |= (0x0f << 4) | (0x40 << 12);
 
         nic.TCTL__transmit_control = tctl;
@@ -802,12 +818,12 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     }
 
     {
-        // Receive packets
+        // Receive packets.
 
-        // Allocate receive descriptor queue
+        // Allocate receive descriptor queue.
         receive_desc_buffer := get_4k_page();
 
-        nic.rx_queue.data = cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
+        nic.rx_queue.data = cast(*I8254x_Receive_Descriptor) (receive_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nic.rx_queue.count = 4096 / size_of(I8254x_Receive_Descriptor);
 
         nic.RDBAL__receive_descriptor_base_low  = cast(u32, receive_desc_buffer & 0xffff_ffff);
@@ -927,7 +943,6 @@ Nvme_Property_Memory_Map :: struct {
 
     space_for_overlay: [0x2000] u8;
 
-    // Would be nice to be able to give a constant to #place
     #overlay(start) using _: struct {
         offset_for_transport_specific_properties: [0x1000] u8;
         doorbell_base: void;

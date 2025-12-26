@@ -2641,6 +2641,7 @@ uacpi_resource_extended_irq :: struct {
     wake_capability: uacpi_u8;
     num_irqs:        uacpi_u8;
     source:          uacpi_resource_source;
+    irqs:            void;
 //     irqs:            *uacpi_u32;// Incomplete array in C (zero-sized)
 }
 

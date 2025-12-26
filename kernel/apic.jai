@@ -1080,3 +1080,47 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
 __popcountdi2 :: (a: s32) -> s32 #c_call {
     return popcount(a);
 }
+
+// From a newer version of uACPI, todo:
+
+#program_export
+uacpi_kernel_io_read8 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_io_read16 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_io_read32 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_io_write8 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_io_write16 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_io_write32 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_read8 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_read16 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_read32 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_write8 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_write16 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_write32 :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_device_close :: () #c_call { bluescreen(); }
+
+#program_export
+uacpi_kernel_pci_device_open :: () #c_call { bluescreen(); }

@@ -21,12 +21,8 @@ byte_swap_protocol_header :: (header: *$T) #modify {
 
         for* info.members {
             if it.flags & .CONSTANT                 continue;
+            if it.type.runtime_size < 2             continue;
             if array_find(it.notes, "DontByteswap") continue;
-
-            if it.type.runtime_size < 2 {
-                // Don't need to byte-swap 1-byte fields, or void types.
-                continue;
-            }
 
             if it.type == type_info(tls_u24) {
                 print(*builder, "    header.%1 = byte_swap(header.%1);\n", it.name);
@@ -543,8 +539,8 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     tcp.sequence_number = sequence_number;
     tcp.ack_number = 0;
 
-    tcp.in\_stream.buffer = NewArray(0x1_0000, u8);
-    tcp.out_stream.buffer = NewArray(0x1_0000, u8);
+    tcp.in\_stream.buffer = NewArray(0x4000, u8);
+    tcp.out_stream.buffer = NewArray(0x4000, u8);
 
     tcp.in\_data.counter_max = 1;
     tcp.out_data.counter_max = 1;
@@ -579,6 +575,9 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
         }
     }
 
+    // Auto flush if the user thread wants us to close the connection.
+    tcp.do_flush ||= tcp.do_close;
+
     if tcp.do_flush {
         bytes_per_packet :: 512;
 
@@ -600,16 +599,13 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
     }
 
     if tcp.do_close {
-        // Make sure all queued data has been transmitted if the user requests to close the connection.
-        waiting_for_flush          := ring_buffer_size(tcp.out_stream) > 0;
+        // Make sure all queued data has been transmitted before actually closing.
         waiting_for_retransmission := tcp.in_flight.count > 0;
 
-        if !waiting_for_flush && !waiting_for_retransmission {
+        if !waiting_for_retransmission {
             transmit_tcp_segment(tcp, .FIN | .ACK);
             tcp.handshake_state = .FIN_SENT;
         }
-
-        // This code is racy depending on what the user thread does, but figure out the details later.
     }
 }
 
@@ -629,7 +625,6 @@ update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
         }
 
         tcp.ack_number = segment.sequence_number + 1;
-
         transmit_tcp_segment(tcp, .ACK);
 
         tcp.handshake_state = .ESTABLISHED;
@@ -2193,13 +2188,13 @@ network_thread :: () {
     work_to_do.counter_max = 1;
 
     while true  {
-        timeout := seconds_to_apollo(1);
+        timeout := seconds_to_apollo(10);
 
         if dhcp_handshake_state != .COMPLETED {
             update_dhcp(net);
 
-            // The network thread needs to keep updating while trying to establish a connection to a local network.
-            timeout = milliseconds_to_apollo(100);
+            // The network thread needs to keep updating while trying to connect to the local network.
+            timeout = milliseconds_to_apollo(50);
         }
 
         for* net.tcp_connections {
@@ -2210,8 +2205,8 @@ network_thread :: () {
 
         packets := i8254x_get_newly_received_packets(*adapter);
 
-        for network_packet: packets {
-            eth := cast(*Ethernet_Header) network_packet.data;
+        for packet: packets {
+            eth := cast(*Ethernet_Header) packet.data;
             byte_swap_protocol_header(eth);
 
             if eth.ethertype == .ARP {
@@ -2274,7 +2269,7 @@ network_thread :: () {
 
                     receive_tcp_segment(it, header, bytes);
 
-                    continue network_packet;
+                    continue packet;
                 }
 
                 log_error("Got TCP message for nonexistent connection on port %", header.destination_port);
