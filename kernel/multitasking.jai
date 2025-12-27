@@ -1,6 +1,4 @@
 
-#import "Bucket_Array";
-
 Task_Info :: struct {
 
     // These fields must match the task switch assembly routine
@@ -199,7 +197,7 @@ schedule_tasks :: () {
         using scheduler;
 
         for* sleeping {
-            if it.sleep_until > time_now continue;
+            if it.sleep_until > time_now break;
 
             it.sleeping = false;
 
@@ -450,7 +448,7 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
     if counter > 0 {
         counter -= 1;
-        release(*spinlock);
+        release(*spinlock, .IRQ);
         return true;
     }
 
@@ -495,6 +493,19 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         release(*spinlock, .IRQ);
         return false; // Timeout hit.
     }
+}
+
+try_wait :: (using sem: *Semaphore) -> bool {
+    acquire(*spinlock, .IRQ);
+
+    if counter > 0 {
+        counter -= 1;
+        release(*spinlock, .IRQ);
+        return true;
+    }
+
+    release(*spinlock, .IRQ);
+    return false;
 }
 
 signal :: (using sema: *Semaphore) {

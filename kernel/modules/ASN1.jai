@@ -26,9 +26,12 @@ Asn1_Parser :: struct {
     }
 
     error: bool;
+    debug_mode: bool;
 }
 
 get_current_construction :: (parser: Asn1_Parser) -> *Asn1_Parser.Construction {
+    // Be aware the returned pointer can become stale if you create a new construction, with asn1_sequence etc.
+
     if parser.construction_stack {
         return *parser.construction_stack[parser.construction_stack.count-1];
     }
@@ -45,39 +48,30 @@ peek_tag :: (parser: Asn1_Parser) -> Asn1_Tag {
     return cast(Asn1_Tag) data[cursor];
 }
 
-parse_error :: () #expand {
-    `parser.error = true;
-    `return 0;
-}
-
 read_length :: (parser: *Asn1_Parser) -> int {
     if parser.error return 0;
 
+    parse_error :: () #expand {
+        `parser.error = true;
+        `return 0;
+    }
+
     using get_current_construction(parser);
 
-    if cursor >= data.count {
-        parse_error();
-    }
+    if cursor >= data.count parse_error();
 
     first := data[cursor];
     cursor += 1;
 
     if (first & 0x80) == 0 {
-        if cursor + first > data.count {
-            parse_error();
-        }
-
+        if cursor + first > data.count parse_error();
         return first;
     }
 
     octets := first & 0x7f;
-    if octets == 0 || octets > 4 {
-        parse_error();
-    }
 
-    if cursor + octets > data.count {
-        parse_error();
-    }
+    if octets == 0 || octets > 4    parse_error();
+    if cursor + octets > data.count parse_error();
 
     length: int;
     for 0..octets-1 {
@@ -100,7 +94,10 @@ read_value :: (parser: *Asn1_Parser, expected_tag: Asn1_Tag) -> [] u8 {
     tag := cast(Asn1_Tag)data[cursor];
     cursor += 1;
 
-    assert(tag == expected_tag); // Todo
+    if tag != expected_tag {
+        parser.error = true;
+        return .{};
+    }
 
     length := read_length(parser);
 
@@ -110,21 +107,192 @@ read_value :: (parser: *Asn1_Parser, expected_tag: Asn1_Tag) -> [] u8 {
     return result;
 }
 
-read_bit_string :: (parser: *Asn1_Parser, bytes: *[]u8, unused_bits: *u8) -> bool {
-    if parser.error return false;
+Bit_String :: struct {
+    value: []u8;
+    unused: int; // How many of the low bits of the last byte in the array are not part of the string.
+}
 
-    raw := read_value(parser, .BIT_STRING);
-    if raw.count == 0 return false;
+read_bit_string :: (parser: *Asn1_Parser) -> _ := Bit_String.{} {
+    if parser.error return;
 
-    unused_bits.* = raw.data.*;
+    bits := read_value(parser, .BIT_STRING);
 
-    if raw.count == 1 {
-        bytes.* = .{};
-        return true;
+    if bits.count == 0 {
+        parser.error = true;
+        return;
     }
 
-    bytes.* = .{raw.count - 1, raw.data + 1};
-    return true;
+    result: Bit_String;
+    result.unused = bits.data.*;
+
+    bits.data += 1;
+    bits.count -= 1;
+
+    result.value = bits;
+
+    return result;
+}
+
+read_time :: (parser: *Asn1_Parser) -> Apollo_Time, is_utc := false {
+    if parser.error return APOLLO_TIME_INVALID;
+
+    tag := peek_tag(parser);
+    if tag != .UTC_TIME && tag != .GENERALIZED_TIME {
+        return APOLLO_TIME_INVALID;
+    }
+
+    value := read_value(parser, tag);
+
+    next_byte :: () -> u8 #expand {
+        if !value.count {
+            `return APOLLO_TIME_INVALID;
+        }
+
+        byte := value[0];
+        value.count -= 1;
+        value.data  += 1;
+        return byte;
+    }
+
+    next_two_digit_decimal :: () -> s8 #expand {
+        dec := (next_byte() - #char "0") * 10;
+        dec += (next_byte() - #char "0");
+        return cast(s8)dec;
+    }
+
+    cal: Calendar_Time;
+    cal.time_zone = .UTC;
+
+    cal.year = next_two_digit_decimal();
+
+    // Tag-specific year parsing.
+    if tag == {
+      case .UTC_TIME;
+        if cal.year < 50 cal.year += 2000;
+        else             cal.year += 1900;
+      case .GENERALIZED_TIME;
+        cal.year = cal.year * 100 + next_two_digit_decimal();
+    }
+
+    bounds_check :: (value: int, max: int) #expand {
+        if value < 0 || value > max {
+            `return APOLLO_TIME_INVALID;
+        }
+    }
+
+    cal.month_starting_at_0  = next_two_digit_decimal();
+    cal.month_starting_at_0 -= 1;
+    bounds_check(cal.month_starting_at_0, 11);
+
+    cal.day_of_month_starting_at_0  = next_two_digit_decimal();
+    cal.day_of_month_starting_at_0 -= 1;
+
+    {
+        // Bounds checking the day of the month.
+
+        days_in_month :: int.[ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ];
+        max_day := days_in_month[cal.month_starting_at_0];
+
+        is_leap_year := (cal.year % 4 == 0) && ((cal.year % 100 != 0) || (cal.year % 400 == 0));
+        if cal.month_starting_at_0 == 1 && is_leap_year {
+            max_day += 1;
+        }
+
+        bounds_check(cal.day_of_month_starting_at_0, max_day-1);
+    }
+
+    // This is the point where we switch to Apollo, because we're done dealing with years and dates,
+    // and can convert everything to seconds easily without handling e.g. leap years. That way we don't
+    // have to carry the calendar time values if they overflow, etc.
+    apollo := native_calendar_to_apollo(cal);
+
+    hours := next_two_digit_decimal();
+    bounds_check(hours, 23);
+    apollo += seconds_to_apollo(cast(int)hours * 60 * 60);
+
+    if !value.count {
+        // GENERALIZED_TIME is allowed to be done here. UTC_TIME must have minutes value and an explicit time zone.
+        return ifx tag == .UTC_TIME then APOLLO_TIME_INVALID else apollo;
+    }
+
+    has_minutes := (tag == .GENERALIZED_TIME && is_digit(value[0])) || (tag == .UTC_TIME);
+
+    if has_minutes {
+        minutes := next_two_digit_decimal();
+        bounds_check(minutes, 59);
+        apollo += seconds_to_apollo(cast(int)minutes * 60);
+    }
+
+    if !value.count {
+        // GENERALIZED_TIME is allowed to be done here. UTC_TIME must an explicit time zone.
+        return ifx tag == .UTC_TIME then APOLLO_TIME_INVALID else apollo;
+    }
+
+    next := next_byte();
+
+    // Seconds are always optional.
+    if has_minutes && is_digit(next) {
+        value.data -= 1; value.count += 1;
+
+        seconds := next_two_digit_decimal();
+        bounds_check(seconds, 59);
+        apollo += seconds_to_apollo(cast(int)seconds);
+
+        next = next_byte();
+
+        // Nested, since technically milliseconds are not allowed if seconds were not provided.
+        if tag == .GENERALIZED_TIME && next == #char "." {
+            milliseconds := cast(int)next_two_digit_decimal() * 10;
+            milliseconds += (next_byte() - #char "0");
+
+            bounds_check(milliseconds, 999);
+            apollo += milliseconds_to_apollo(milliseconds);
+
+            next = next_byte();
+        }
+    }
+
+    if next == #char "Z" {
+        // Let's not allow trailing bytes. It might mean the length is encoded wrong, which the user would want to be aware of.
+        if value.count return APOLLO_TIME_INVALID;
+
+        return apollo, is_utc=true;
+    }
+
+    if (next == #char "-") || (next == #char "+") {
+        direction := next;
+
+        hour_offset   := next_two_digit_decimal();
+        minute_offset := next_two_digit_decimal();
+
+        // Howland Island Time (UTC-12), Line Islands Time (UTC+14).
+        hour_max := ifx direction == #char "-" then 12 else 14;
+
+        bounds_check(hour_offset, hour_max);
+        bounds_check(minute_offset, 59);
+
+        total_offset := seconds_to_apollo(hour_offset*60*60 + minute_offset*60);
+
+        if direction == #char "+" {
+            apollo += total_offset;
+        } else {
+            apollo -= total_offset;
+        }
+
+        // There should be no more bytes after the offset.
+        if value.count return APOLLO_TIME_INVALID;
+
+        // (Timestamp was not UTC, but we converted it.)
+        return apollo, is_utc=true;
+    }
+
+    if tag == .UTC_TIME {
+        // 'UTC_TIME' is supposed to have an explicit time zone, either Z or +/-.
+        return APOLLO_TIME_INVALID;
+    }
+
+    if value.count return APOLLO_TIME_INVALID;
+    return apollo, is_utc=false;
 }
 
 
@@ -143,14 +311,27 @@ asn1_construction :: (parser: *Asn1_Parser, tag: Asn1_Tag, call := #caller_code)
     `defer pop(*parser.construction_stack);
 }
 
-asn1_sequence :: (parser: *Asn1_Parser, body: Code, flags: For_Flags) #expand {
+asn1_sequence :: (parser: *Asn1_Parser, body: Code, flags: For_Flags, loc := #caller_location) #expand {
     asn1_construction(parser, .SEQUENCE);
-    #insert body;
+
+    if parser.debug_mode {
+        log("Entering. Stack = % %", parser.construction_stack.count, loc);
+    }
+
+    if !parser.error {
+        #insert body;
+    }
+
+    if parser.debug_mode {
+        log("Exiting");
+    }
 }
 
 asn1_context :: (parser: *Asn1_Parser, body: Code, flags: For_Flags) #expand {
     asn1_construction(parser, .CONTEXT_0);
-    #insert body;
+    if !parser.error {
+        #insert body;
+    }
 }
 
 
@@ -162,24 +343,21 @@ X509_Certificate :: struct {
     tbs_signature_algorithm_oid: []u8;
     issuer: []u8;
 
-    issuer_country: string;
-    issuer_organizational_unit: string;
-
-    not_valid_before: string;
-    not_valid_after: string;
+    not_valid_before: Apollo_Time;
+    not_valid_after: Apollo_Time;
     subject: []u8;
 
     subject_public_key_algorithm_oid: []u8;
-    subject_public_key: []u8;
-    subject_public_key_unused_bits: u8;
+    subject_public_key: Bit_String;
 
     signature_algorithm_oid: []u8;
-    signature_value: []u8;
-    signature_unused_bits: u8;
+    signature: Bit_String;
 }
 
 parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
     parser := Asn1_Parser.{data=certificate};
+    parser.debug_mode = false;
+
     cert: X509_Certificate;
 
     for :asn1_sequence parser {
@@ -188,7 +366,7 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
 
             for :asn1_context parser {
                 version_value := read_value(*parser, .INTEGER);
-                cert.version = version_value[version_value.count - 1].(int) + 1;
+                cert.version = cast(int)version_value[version_value.count - 1] + 1;
             }
 
             cert.serial_number = read_value(*parser, .INTEGER);
@@ -197,16 +375,12 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
                 cert.tbs_signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
             }
 
+            // Todo: Parse issuer and subject structures.
             cert.issuer = read_value(*parser, .SEQUENCE);
 
             for :asn1_sequence parser {
-                tag := peek_tag(parser);
-                // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
-                cert.not_valid_before = cast(string) read_value(*parser, tag);
-
-                tag = peek_tag(parser);
-                // Todo: if tag != Asn1_Tag.UTC_TIME && tag != Asn1_Tag.GENERALIZED_TIME return false;
-                cert.not_valid_after = cast(string) read_value(*parser, tag);
+                cert.not_valid_before = read_time(*parser);
+                cert.not_valid_after  = read_time(*parser);
             }
 
             cert.subject = read_value(*parser, .SEQUENCE);
@@ -216,17 +390,17 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
                     cert.subject_public_key_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
                 }
 
-                read_bit_string(*parser, *cert.subject_public_key, *cert.subject_public_key_unused_bits);
+                cert.subject_public_key = read_bit_string(*parser);
             }
         }
 
-        // Todo: additional optional IDs and extensions.
+        // Todo: Additional optional IDs and extensions.
 
         for :asn1_sequence parser {
             cert.signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
         }
 
-        read_bit_string(*parser, *cert.signature_value, *cert.signature_unused_bits);
+        cert.signature = read_bit_string(*parser);
     }
 
     return !parser.error, cert;
@@ -249,7 +423,7 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
     cl := get_toplevel_command_line();
 
     // Auto run the test without generating an executable, if the module gets passed to the compiler directly on the command line.
-    if cl.count == 2 && contains(cl[1], "ASN_1.jai") {
+    if cl.count == 2 && contains(cl[1], "ASN1.jai") {
         set_build_options_dc(.{do_output = false});
 
         result, cert := parse_x509_certificate(test_cert);
@@ -258,6 +432,11 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
         context.print_style.default_format_int.base = 16;
         log("%\n", cert);
+
+        context.print_style.default_format_int.base = 10;
+        s1 := calendar_to_string(to_calendar(cert.not_valid_before));
+        s2 := calendar_to_string(to_calendar(cert.not_valid_after));
+        log("%\n%", s1, s2);
     }
 }
 
@@ -314,3 +493,49 @@ test_cert :: u8.[
     0x40, 0x29, 0x26, 0xdc, 0xb4, 0x0e, 0x34, 0x69, 0xa1, 0x59, 0x41, 0xe8, 0xe2, 0xcc, 0xa8, 0x4b,
     0xb6, 0x08, 0x46, 0x36, 0xa0
 ];
+
+
+
+
+#scope_module
+
+native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
+    // Todo: Doesn't work with dates before 1 AD. That doesn't seem to work on Linux either, but it should definitely be made to work.
+    // Maybe this should also work with out of bounds calendar values (hour=24 etc.), because that way users can do calendar calculations and store them correctly as apollo time without always having to carry the calendar time.
+
+    // Calculate Apollo Time relative to 1.1.1970 and then add the offset at the end, to make everything easier to think about.
+    LEAP_YEARS_BEFORE_1970 :: 477;
+
+    last_year := cast(s64) ct.year - 1;
+    leap_years_before := last_year/4 - last_year/100 + last_year/400;
+
+    leap_year_count := leap_years_before - LEAP_YEARS_BEFORE_1970;
+
+    year_difference := cast(s64) ct.year - 1970;
+
+    seconds := 31536000 * (year_difference - leap_year_count);
+    seconds += 31622400 * leap_year_count;
+
+    cumulative_days :: int.[
+        0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365
+    ];
+
+    seconds += cumulative_days[ct.month_starting_at_0] * 86400;
+
+    is_leap_year := (ct.year % 4 == 0) && ((ct.year % 100 != 0) || (ct.year % 400 == 0));
+
+    if ct.month_starting_at_0 > 1 && is_leap_year {
+        seconds += 86400;
+    }
+
+    seconds += cast(int) ct.day_of_month_starting_at_0 * 86400;
+    seconds += cast(int) ct.hour * 60 * 60;
+    seconds += cast(int) ct.minute * 60;
+    seconds += cast(int) ct.second;
+
+    apollo := seconds_to_apollo(seconds);
+    apollo += milliseconds_to_apollo(ct.millisecond);
+    apollo += APOLLO_TIME_FOR_JAN_1_1970;
+
+    return apollo;
+}

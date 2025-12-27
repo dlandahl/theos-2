@@ -8,6 +8,14 @@ using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
 #import "Random";
 #import "Hash";
 
+#import "Bucket_Array";
+
+array_add :: bucket_array_add;
+array_add :: (array: *Bucket_Array) -> *array.type {
+    loc, item := bucket_array_add(array, .{});
+    return item;
+}
+
 #import "Bitfield"(true);
 
 set :: bitfield_set;

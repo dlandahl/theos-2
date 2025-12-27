@@ -569,9 +569,9 @@ Uacpi_State :: struct {
 
             release(*work_queue_lock);
 
-            log("Beginning work item.\n");
+            log("Beginning work item.");
             item.handler(item.ctx);
-            log("Work item completed.\n");
+            log("Work item completed.");
 
             acquire(*work_queue_lock);
 
@@ -680,39 +680,42 @@ uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call 
     }
 }
 
-#program_export uacpi_kernel_stall :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_stall\"\n");
-    bluescreen();
+#program_export uacpi_kernel_stall :: (usec: uacpi_u8) #c_call {
+    push_context { busy_wait(usec); }    
 }
 
-#program_export uacpi_kernel_sleep :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_sleep\"\n");
-    bluescreen();
+#program_export uacpi_kernel_sleep :: (msec: uacpi_u64) #c_call {
+    push_context { sleep(cast(s64)msec, .milliseconds); }
 }
 
 
-
-// Just use spinlocks until we have actual mutexes.
 
 #program_export uacpi_kernel_create_mutex :: () -> uacpi_handle #c_call {
-    return uacpi_kernel_create_spinlock();
+    push_context {
+        // Todo: Fast fixed size allocator for these types of objects.
+        mut := New(Mutex);
+        return cast(uacpi_handle) mut;
+    }
 }
 
 #program_export uacpi_kernel_free_mutex :: (handle: uacpi_handle) #c_call {
-    uacpi_kernel_free_spinlock(handle);
+    push_context {
+        free(handle);
+    }
 }
-
-next_event_handle: uacpi_handle = xx 1;
 
 #program_export uacpi_kernel_create_event :: () -> uacpi_handle #c_call {
-    result := next_event_handle;
-    next_event_handle += 1;
-    return result;
+    push_context {
+        // Todo: Fast fixed size allocator for these types of objects.
+        sem := New(Semaphore);
+        return cast(uacpi_handle) sem;
+    }
 }
 
-#program_export uacpi_kernel_free_event :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_free_event\"\n");
-    bluescreen();
+#program_export uacpi_kernel_free_event :: (handle: uacpi_handle) #c_call {
+    push_context {
+        free(handle);
+    }
 }
 
 #program_export uacpi_kernel_get_thread_id :: () -> uacpi_thread_id #c_call {
@@ -721,27 +724,60 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_acquire_mutex :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_status #c_call {
-    uacpi_kernel_lock_spinlock(handle);
-    return .OK;
+    push_context {
+        mut := cast(*Mutex)handle;
+
+        if timeout == 0 {
+            success := trylock(mut);
+            return ifx success then .OK else .TIMEOUT;
+        }
+
+        acquire(mut); // Todo: Timeout.
+        return .OK;
+    }
 }
 
 #program_export uacpi_kernel_release_mutex :: (handle: uacpi_handle) #c_call {
-    uacpi_kernel_unlock_spinlock(handle, 0);
+    push_context {    
+        release(cast(*Mutex)handle);
+    }
 }
 
-#program_export uacpi_kernel_wait_for_event :: (handle: uacpi_handle, timeout: uacpi_u16) #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_wait_for_event\"\n");
-    bluescreen();
+#program_export uacpi_kernel_wait_for_event :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_status #c_call {
+    push_context {
+        sem := cast(*Semaphore)handle;
+
+        // Convert from uACPI timeout format to Apollo_Time.
+
+        if timeout == 0 {
+            success := try_wait(sem);
+            return ifx success then .OK else .TIMEOUT;
+        }
+
+        timeout_apollo: Apollo_Time;
+        if timeout == 0xFFFF {
+            timeout_apollo = INFINITE_TIMEOUT;
+        } else {
+            timeout_apollo = milliseconds_to_apollo(timeout);
+        }
+
+        success := wait_for(sem, timeout_apollo);
+        return ifx success then .OK else .TIMEOUT;
+    }
 }
 
-#program_export uacpi_kernel_signal_event :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_signal_event\"\n");
-    bluescreen();
+#program_export uacpi_kernel_signal_event :: (handle: uacpi_handle) #c_call {
+    push_context {
+        sem := cast(*Semaphore)handle;
+        signal(sem);
+    }    
 }
 
-#program_export uacpi_kernel_reset_event :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_reset_event\"\n");
-    bluescreen();
+#program_export uacpi_kernel_reset_event :: (handle: uacpi_handle) #c_call {
+    push_context {
+        sem := cast(*Semaphore)handle;
+        sem.counter = 0;
+    }    
 }
 
 #program_export uacpi_kernel_handle_firmware_request :: () #c_call {

@@ -3,7 +3,7 @@ byte_swap_in_place :: (value: *$T) {
     ti :: type_info(T);
 
     #if ti.type == .STRUCT {
-        byte_swap_protocol_header(value);
+        byte_swap_struct(value);
     } else #if ti.type == .ARRAY {
         for* value.* byte_swap_in_place(it);
     } else {
@@ -11,7 +11,7 @@ byte_swap_in_place :: (value: *$T) {
     }
 }
 
-byte_swap_protocol_header :: (header: *$T) #modify {
+byte_swap_struct :: (header: *$T) #modify {
     ti := cast(*Type_Info) T;
     return ti.type == .STRUCT;
 } {
@@ -83,7 +83,7 @@ init_ethernet_header :: (net: *Network_Connection) -> Ethernet_Header {
     eth.source_mac = net.adapter.mac_address;
     eth.ethertype = .IPv4;
 
-    byte_swap_protocol_header(*eth);
+    byte_swap_struct(*eth);
 
     return eth;
 }
@@ -165,7 +165,7 @@ init_ip_header :: (
     ip.source_address = net.our_ip;
     ip.destination_address = destination_ip;
 
-    byte_swap_protocol_header(*ip);
+    byte_swap_struct(*ip);
     ip.checksum = internet_checksum(ip);
 
     return ip;
@@ -211,7 +211,7 @@ transmit_arp_probe :: (net: *Network_Connection) {
     probe.source_mac      = net.adapter.mac_address;
     probe.ethertype       = .ARP;
 
-    byte_swap_protocol_header(*probe.eth);
+    byte_swap_struct(*probe.eth);
 
     probe.HTYPE__hardware_type = .ethernet;
     probe.PTYPE__protocol_type = .IPv4;
@@ -224,7 +224,7 @@ transmit_arp_probe :: (net: *Network_Connection) {
     probe.THA__target_hardware_address = .[0,0,0,0,0,0];
     probe.TPA__target_protocol_address = net.our_ip;
 
-    byte_swap_protocol_header(*probe.arp);
+    byte_swap_struct(*probe.arp);
 
     add_to_packet(*packet, probe);
     i8254x_transmit_packet(*net.adapter, packet);
@@ -239,7 +239,7 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
 
     arp := cast(*Arp_Packet) (eth + 1);
 
-    byte_swap_protocol_header(arp);
+    byte_swap_struct(arp);
 
     if arp.SPA__sender_protocol_address == arp.TPA__target_protocol_address {
         // Gratuitous ARP
@@ -271,7 +271,7 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
     reply.source_mac      = net.adapter.mac_address;
     reply.ethertype       = .ARP;
 
-    byte_swap_protocol_header(*reply.eth);
+    byte_swap_struct(*reply.eth);
 
     reply.HTYPE__hardware_type = .ethernet;
     reply.PTYPE__protocol_type = .IPv4;
@@ -284,7 +284,7 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
     reply.THA__target_hardware_address = arp.SHA__sender_hardware_address;
     reply.TPA__target_protocol_address = arp.SPA__sender_protocol_address;
 
-    byte_swap_protocol_header(*reply.arp);
+    byte_swap_struct(*reply.arp);
 
     add_to_packet(*packet, reply);
     i8254x_transmit_packet(*net.adapter, packet);
@@ -346,7 +346,7 @@ init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := ""
     h.flags = flags;
     h.window = 4096 * 4;
 
-    byte_swap_protocol_header(*h);
+    byte_swap_struct(*h);
     h.checksum = tcp_checksum(h, tcp.net.our_ip, tcp.remote_ip, payload);
 
     return h;
@@ -544,6 +544,8 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
 
     tcp.in\_data.counter_max = 1;
     tcp.out_data.counter_max = 1;
+
+    signal(*net.work_to_do); // Network thread will send SYN when it sees our connection in the NOT_STARTED state.
 
     return tcp;
 }
@@ -1055,7 +1057,6 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
             extensions_length -= extension_size;
         }
     }
-
     {
         // Receive security certificate.
 
@@ -1064,13 +1065,18 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         all_certificates_length := get(*receive(tls_u24));
 
+        // All we do for now is check if a certificate claims to be valid for the current date.
+        time := get_monotonic_time();
+
         while all_certificates_length > 0 {
             certificate_length := get(*receive(tls_u24));
             certificate := receive(certificate_length);
 
             success, cert := parse_x509_certificate(certificate);
 
-            assert(success);
+            if time < cert.not_valid_before || time > cert.not_valid_after {
+                log("Certificate Expired!");
+            }
 
             all_certificates_length -= size_of(tls_u24);
             all_certificates_length -= certificate_length;
@@ -1446,7 +1452,7 @@ init_dhcp_message :: (net: *Network_Connection) -> Dhcp_Message {
     dhcp.server_ip     = net.router_ip;
     dhcp.magic         = Dhcp_Message.MAGIC;
 
-    byte_swap_protocol_header(*dhcp);
+    byte_swap_struct(*dhcp);
 
     return dhcp;
 }
@@ -1531,7 +1537,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
         return;
     }
 
-    byte_swap_protocol_header(*dhcp);
+    byte_swap_struct(*dhcp);
 
     if dhcp.magic != Dhcp_Message.MAGIC {
         log_error("DHCP packet magic doesn't match.");
@@ -1644,7 +1650,7 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
     eth.source_mac = net.adapter.mac_address;
     eth.ethertype = .IPv4;
 
-    byte_swap_protocol_header(*eth);
+    byte_swap_struct(*eth);
     add_to_packet(*packet, eth);
 
     options: Dhcp_Options_Builder;
@@ -1672,7 +1678,7 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
         + size_of(Dhcp_Message)
         + get_size(options);
 
-    byte_swap_protocol_header(*udp);
+    byte_swap_struct(*udp);
     add_to_packet(*packet, udp);
 
     dhcp := init_dhcp_message(net);
@@ -1692,7 +1698,7 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
     eth.source_mac = net.adapter.mac_address;
     eth.ethertype = .IPv4;
 
-    byte_swap_protocol_header(*eth);
+    byte_swap_struct(*eth);
     add_to_packet(*packet, eth);
 
     options: Dhcp_Options_Builder;
@@ -1713,7 +1719,7 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
         + size_of(Dhcp_Message)
         + get_size(options);
 
-    byte_swap_protocol_header(*udp);
+    byte_swap_struct(*udp);
     add_to_packet(*packet, udp);
 
     dhcp := init_dhcp_message(net);
@@ -1734,7 +1740,7 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     eth.source_mac = net.adapter.mac_address;
     eth.ethertype = .IPv4;
 
-    byte_swap_protocol_header(*eth);
+    byte_swap_struct(*eth);
     add_to_packet(*packet, eth);
 
     options: Dhcp_Options_Builder;
@@ -1758,7 +1764,7 @@ transmit_dhcp_request :: (net: *Network_Connection) {
         + size_of(Dhcp_Message)
         + get_size(options);
 
-    byte_swap_protocol_header(*udp);
+    byte_swap_struct(*udp);
     add_to_packet(*packet, udp);
 
     dhcp := init_dhcp_message(net);
@@ -1784,6 +1790,12 @@ Icmp_Header :: struct {
     checksum: u16;
     data: u32;
 }
+
+Icmp_Request :: struct {
+    id: u32;
+    destination_ip: u32;
+    sent_at: Apollo_Time;
+};
 
 Icmp_Packet :: struct {
     eth: Ethernet_Header;
@@ -1826,7 +1838,7 @@ transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
     eth.source_mac      = ping.eth.destination_mac;
     eth.ethertype       = .IPv4;
 
-    byte_swap_protocol_header(*eth);
+    byte_swap_struct(*eth);
 
     ip = init_ip_header(net, .ICMP, ping.ip.source_address, size_of(Ipv4_Header) + size_of(Icmp_Header));
 
@@ -1909,7 +1921,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
         + size_of(Dns_Header)
         + cast(u16) url.count + 6;
 
-    byte_swap_protocol_header(*udp);
+    byte_swap_struct(*udp);
     add_to_packet(*packet, udp);
 
     dns: Dns_Header;
@@ -1917,7 +1929,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     dns.flags = .QR__query | .RD__recursion_desired;
     dns.questions = 1;
 
-    byte_swap_protocol_header(*dns);
+    byte_swap_struct(*dns);
     add_to_packet(*packet, dns);
 
     remaining := url;
@@ -1989,7 +2001,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     // Todo: parsing DNS records is very hardcoded right now
 
-    byte_swap_protocol_header(*packet.dns);
+    byte_swap_struct(*packet.dns);
 
     for* query: net.dns_queries_in_flight {
         if query.transaction_id != dns.transaction_id {
@@ -2150,17 +2162,12 @@ Network_Connection :: struct {
 
     arp_table: Table(u32, [6]u8);
 
-    pings_in_flight: [..] struct {
-        id: u32;
-        destination_ip: u32;
-        sent_at: Apollo_Time;
-    };
+    pings_in_flight: Bucket_Array(Icmp_Request, 64);
 
-    // Todo: bucket array.
-    dns_queries_in_flight: [..] Dns_Query;
+    dns_queries_in_flight: Bucket_Array(Dns_Query, 64);
     dns_client_port: u16;
 
-    tcp_connections: [..] Tcp_Connection;
+    tcp_connections: Bucket_Array(Tcp_Connection, 64);
     next_port: u16;
 
     work_to_do: Semaphore;
@@ -2207,7 +2214,7 @@ network_thread :: () {
 
         for packet: packets {
             eth := cast(*Ethernet_Header) packet.data;
-            byte_swap_protocol_header(eth);
+            byte_swap_struct(eth);
 
             if eth.ethertype == .ARP {
                 handle_arp(net, eth);
@@ -2225,7 +2232,7 @@ network_thread :: () {
             }
 
             ip := cast(*Ipv4_Header) (eth + 1);
-            byte_swap_protocol_header(ip);
+            byte_swap_struct(ip);
 
             ip_length := byte_swap(cast(u16) get(ip.*, .total_length)) - size_of(Ipv4_Header);
 
@@ -2237,7 +2244,7 @@ network_thread :: () {
 
               case .UDP;
                 udp := cast(*Udp_Header) (ip + 1);
-                byte_swap_protocol_header(udp);
+                byte_swap_struct(udp);
 
                 if udp.destination_port == DHCP_CLIENT_PORT {
                     handle_dhcp_packet(net, eth);
@@ -2258,7 +2265,7 @@ network_thread :: () {
 
               case .TCP;
                 header := cast(*Tcp_Header) (ip + 1);
-                byte_swap_protocol_header(header);
+                byte_swap_struct(header);
 
                 for* net.tcp_connections {
                     if it.port != header.destination_port {

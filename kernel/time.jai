@@ -25,6 +25,7 @@ get_monotonic_time :: get_monotonic_system_time;
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
     // Todo: Doesn't work with dates before 1 AD. That doesn't seem to work on Linux either, but it should definitely be made to work.
+    // Maybe this should also work with out of bounds calendar values (hour=24 etc.), because that way users can do calendar calculations and store them correctly as apollo time without always having to carry the calendar time.
 
     // Calculate Apollo Time relative to 1.1.1970 and then add the offset at the end, to make everything easier to think about.
     LEAP_YEARS_BEFORE_1970 :: 477;
@@ -67,6 +68,7 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
 // https://git.musl-libc.org/cgit/musl/tree/src/time/__secs_to_tm.c
 
 native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
+    // Todo: What about APOLLO_TIME_INVALID?
 
     // Apollo Time for March 1st 2000
     LEAPOCH :: Apollo_Time.{14200603904491421696, 52369};
@@ -118,6 +120,7 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     years += 4*quadrennia + 100*centuries + 400*quad_centuries;
 
     days_in_month :: int.[ 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29 ];
+
     months := 0;
 
     while days_in_month[months] <= days {
