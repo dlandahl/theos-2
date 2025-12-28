@@ -226,8 +226,8 @@ kernel_entry :: () #no_context {
 
         for y: 0..y_resolution-1 {
             for x: 0..x_resolution-1 {
-                red   := cast(int, 0xff * (1.0 / y_resolution) * y);
-                green := cast(int, 0xff * (1.0 / x_resolution) * x);
+                red   := cast(int) (0xff * (1.0 / y_resolution) * y);
+                green := cast(int) (0xff * (1.0 / x_resolution) * x);
 
                 // buffer[x + y * stride] = cast(u32, (red << 16) | (green << 8));
                 buffer[x + y * stride] = 0;

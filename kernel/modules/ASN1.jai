@@ -7,7 +7,9 @@ Asn1_Tag :: enum u8 {
     OCTET_STRING       :: 0x04;
     NULL               :: 0x05;
     OBJECT_IDENTIFIER  :: 0x06;
+    UTF8_STRING        :: 0x0c;
     PRINTABLE_STRING   :: 0x13;
+    IA5_STRING         :: 0x15;
     UTC_TIME           :: 0x17;
     GENERALIZED_TIME   :: 0x18;
     SEQUENCE           :: 0x30;
@@ -295,63 +297,163 @@ read_time :: (parser: *Asn1_Parser) -> Apollo_Time, is_utc := false {
     return apollo, is_utc=false;
 }
 
+read_string :: (parser: *Asn1_Parser) -> string {
+    if parser.error return "";
 
+    tag := peek_tag(parser);
+    if tag != .UTF8_STRING && tag != .PRINTABLE_STRING {
+        parser.error = true;
+        return "";
+    }
 
-asn1_construction :: (parser: *Asn1_Parser, tag: Asn1_Tag, call := #caller_code) #expand {
-    container := read_value(parser, tag);
-
-    const := array_add(*parser.construction_stack);
-    const.data = container;
-
-    #insert,scope(call) #code {
-        `it := null;
-        `it_index := 0;
-    };
-
-    `defer pop(*parser.construction_stack);
+    value := read_value(parser, tag);
+    return cast(string)value;
 }
 
-asn1_sequence :: (parser: *Asn1_Parser, body: Code, flags: For_Flags, loc := #caller_location) #expand {
-    asn1_construction(parser, .SEQUENCE);
+
+
+asn1_sequence :: #bake_arguments asn1_construction(tag=.SEQUENCE);
+asn1_context  :: #bake_arguments asn1_construction(tag=.CONTEXT_0);
+asn1_set      :: #bake_arguments asn1_construction(tag=.SET);
+
+asn1_construction :: (parser: *Asn1_Parser, body: Code, flags: For_Flags, loc := #caller_location, tag: Asn1_Tag) #expand {
+    if parser.error return;
+
+    container := read_value(parser, tag);
+    const := array_add(*parser.construction_stack);
+    const.data = container;
 
     if parser.debug_mode {
         log("Entering. Stack = % %", parser.construction_stack.count, loc);
     }
 
-    if !parser.error {
+    while true {
+        const = get_current_construction(parser); // Pointer may be stale now.
+
+        `it := const;
+        `it_index := parser.construction_stack.count;
+
+        // Even if we say continue, if we're at the end of the construction, stop automatically.
+        if it.cursor >= it.data.count break;
+
         #insert body;
+
+        // Break (skip the rest of the construction) is the default. Put continue to not break.
+        break;
     }
 
     if parser.debug_mode {
-        log("Exiting");
+        if parser.error log("Exiting with error.");
+        else log("Exiting");
     }
-}
 
-asn1_context :: (parser: *Asn1_Parser, body: Code, flags: For_Flags) #expand {
-    asn1_construction(parser, .CONTEXT_0);
-    if !parser.error {
-        #insert body;
-    }
+    pop(*parser.construction_stack);
 }
 
 
+
+OID_COUNTRY_NAME           :: u64.[2, 5, 4, 6];
+OID_STATE_OR_PROVINCE_NAME :: u64.[2, 5, 4, 8];
+OID_ORGANISATION_NAME      :: u64.[2, 5, 4, 10];
+
+OID_SIGNATURE_RSA_SHA256   :: u64.[1, 2, 840, 113549, 1, 1, 11];
+OID_SIGNATURE_ECDSA_SHA256 :: u64.[1, 2, 840, 10045, 4, 3, 2];
+OID_SIGNATURE_ED25519      :: u64.[1, 3, 101, 112];
+
+OID_KEY_TYPE_RSA           :: u64.[1, 2, 840, 113549, 1, 1, 1];
+OID_KEY_TYPE_EC            :: u64.[1, 2, 840, 10045, 2, 1];
+
+compare_oid :: (input: []u8, other: []u64) -> bool {
+    if input.count < 1 || other.count < 2 return false;
+
+    // Concise binary object representation (CBOR).
+    if input[0] / 40 != other[0] return false;
+    if input[0] % 40 != other[1] return false;
+
+    input_cursor := 1;
+    other_cursor := 2;
+
+    while other_cursor < other.count {
+        next_value: u64 = 0;
+
+        while true {
+            if input_cursor >= input.count {
+                return false;
+            }
+
+            byte := input[input_cursor];
+            input_cursor += 1;
+
+            next_value <<= 7;
+            next_value |= byte & 0x7f;
+
+            if !(byte & 0x80) break;
+        }
+
+        if next_value != other[other_cursor] {
+            return false;
+        }
+
+        other_cursor += 1;
+    }
+
+    return true;
+}
 
 X509_Certificate :: struct {
+
+    Distinguished_Name :: struct {
+        country:           string;
+        state_or_province: string;
+        organisation:      string;
+    }
+
     version: int;
     serial_number: []u8;
 
-    tbs_signature_algorithm_oid: []u8;
-    issuer: []u8;
+    signature_algorithm: enum {
+        TODO_UNKNOWN;
+        RSA_SHA256;
+        ECDSA_SHA256;
+        ED25519;
+    };
+
+    issuer: Distinguished_Name;
 
     not_valid_before: Apollo_Time;
     not_valid_after: Apollo_Time;
-    subject: []u8;
 
-    subject_public_key_algorithm_oid: []u8;
-    subject_public_key: Bit_String;
+    subject: Distinguished_Name;
 
-    signature_algorithm_oid: []u8;
+    public_key_algorithm: enum {
+        TODO_UNKNOWN;
+        RSA;
+        EC;
+    };
+
+    public_key: Bit_String;
     signature: Bit_String;
+}
+
+read_x509_distinguished_name :: (parser: *Asn1_Parser) -> X509_Certificate.Distinguished_Name {
+    dn: X509_Certificate.Distinguished_Name;
+
+    for :asn1_sequence parser {
+        for :asn1_set parser {
+            for :asn1_sequence parser {
+                oid := read_value(parser, .OBJECT_IDENTIFIER);
+                string_value := read_string(parser);
+
+                if compare_oid(oid, OID_COUNTRY_NAME)           dn.country           = string_value;
+                if compare_oid(oid, OID_STATE_OR_PROVINCE_NAME) dn.state_or_province = string_value;
+                if compare_oid(oid, OID_ORGANISATION_NAME)      dn.organisation      = string_value;
+            }
+        }
+
+        continue;
+    }
+
+    return dn;
 }
 
 parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
@@ -366,39 +468,45 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
 
             for :asn1_context parser {
                 version_value := read_value(*parser, .INTEGER);
-                cert.version = cast(int)version_value[version_value.count - 1] + 1;
+                if version_value.count > 1 return false, .{};
+
+                cert.version = version_value.data.* + 1;
             }
 
             cert.serial_number = read_value(*parser, .INTEGER);
 
             for :asn1_sequence parser {
-                cert.tbs_signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+                oid := read_value(*parser, .OBJECT_IDENTIFIER);
+
+                if compare_oid(oid, OID_SIGNATURE_RSA_SHA256)    cert.signature_algorithm = .RSA_SHA256;
+                if compare_oid(oid, OID_SIGNATURE_ECDSA_SHA256)  cert.signature_algorithm = .ECDSA_SHA256;
+                if compare_oid(oid, OID_SIGNATURE_ED25519)       cert.signature_algorithm = .ED25519;
             }
 
-            // Todo: Parse issuer and subject structures.
-            cert.issuer = read_value(*parser, .SEQUENCE);
+            cert.issuer = read_x509_distinguished_name(*parser);
 
             for :asn1_sequence parser {
                 cert.not_valid_before = read_time(*parser);
                 cert.not_valid_after  = read_time(*parser);
             }
 
-            cert.subject = read_value(*parser, .SEQUENCE);
+            cert.subject = read_x509_distinguished_name(*parser);
 
             for :asn1_sequence parser {
                 for :asn1_sequence parser {
-                    cert.subject_public_key_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
+                    oid := read_value(*parser, .OBJECT_IDENTIFIER);
+
+                    if compare_oid(oid, OID_KEY_TYPE_RSA) cert.public_key_algorithm = .RSA;
+                    if compare_oid(oid, OID_KEY_TYPE_EC)  cert.public_key_algorithm = .EC;
                 }
 
-                cert.subject_public_key = read_bit_string(*parser);
+                cert.public_key = read_bit_string(*parser);
             }
         }
 
         // Todo: Additional optional IDs and extensions.
 
-        for :asn1_sequence parser {
-            cert.signature_algorithm_oid = read_value(*parser, .OBJECT_IDENTIFIER);
-        }
+        for :asn1_sequence parser {}; // Signature algorithm, same as TBS signature algorithm.
 
         cert.signature = read_bit_string(*parser);
     }
