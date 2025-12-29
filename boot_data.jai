@@ -76,6 +76,7 @@ Large_Page :: struct {
     };
 
     // ------- Disk cache entry -------
+    // Todo: When we add swapping we can reuse the same members, since disk cache pages don't need to be swapped.
     more_recently_used: s32;
     less_recently_used: s32;
 

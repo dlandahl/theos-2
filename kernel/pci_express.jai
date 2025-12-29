@@ -377,7 +377,9 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
 
         gsi := entry.index;
 
-        if !gsi && pci.interrupt_line gsi = pci.interrupt_line;
+        if !gsi && pci.interrupt_line {
+            gsi = pci.interrupt_line;
+        }
 
         if !gsi && entry.source != null {
             res: *uacpi_resources;
@@ -400,6 +402,10 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
             }
         }
 
+        if !gsi {
+            continue;
+        }
+
         gate := allocate_interrupt_gate();
         register_interrupt_gate(interrupt_handler, gate);
 
@@ -407,6 +413,7 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
 
         pin_names := string.["INTA#", "INTB#", "INTC#", "INTD#"];
         log("Mapped legacy PCI interrupt, pin: %, GSI: %", pin_names[entry.pin], gsi);
+
         return true;
     }
 
@@ -414,12 +421,12 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
     return false;
 }
 
+
+
 // Links for modern Realtek ethernet cards (todo):
 // https://forum.osdev.org/viewtopic.php?t=57618
 // https://wiki.osdev.org/RTL8169
 // http://www.bitsavers.org/components/realtek/RTL8139/RTL8110S_8169S_DataSheet_1.3_200309.pdf
-
-
 
 mac_address_print_style := Print_Style.{
     default_format_int.base = 16,
@@ -439,7 +446,6 @@ I8254x_Registers :: struct {
     // Create enough room for overlay.
     _: [0x6000] u8;
 
-    // This code was prettier with #place.
     #overlay(start) using _: struct {
         _: [0x28] u8;
 

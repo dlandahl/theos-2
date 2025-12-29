@@ -400,7 +400,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: false;
+    USE_DNS :: true;
 
     log_category("Test");
 
@@ -419,15 +419,21 @@ network_test :: () {
     port: u16 = 4443;
 
     #if USE_DNS {
-        log("Sending DNS Query");
-        dns_query := transmit_dns_query(net, "discord.com");
+        log("Sending DNS Query.");
 
-        if Timeout(dns_query.complete, 60_000) {
-            bluescreen();
+        for 1..100 {
+            // Usually works the first time unless network is mega bad.
+
+            dns_query := transmit_dns_query(net, "discord.com");
+
+            if Timeout(dns_query.complete, 1000) {
+                continue;
+            }
+
+            ip_address = dns_query.answer;
+            port = 443;
+            break;
         }
-
-        ip_address = dns_query.answer;
-        port = 443;
     }
 
     transmit_ping(net, ip_address);
@@ -439,7 +445,7 @@ network_test :: () {
     tls := establish_tls_connection(connection);
 
     request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+    // request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
 
     tls_transmit_application_data(*tls, request);
 

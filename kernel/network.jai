@@ -2002,8 +2002,6 @@ Dns_Response_Code :: enum {
 handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     using packet := cast(*Dns_Packet) eth_;
 
-    // Todo: parsing DNS records is very hardcoded right now
-
     byte_swap_struct(*packet.dns);
 
     for* query: net.dns_queries_in_flight {
@@ -2066,7 +2064,8 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
             type := Read(Dns_Record_Type);
 
-            cursor += 4; // Class, TTL
+            Read(Dns_Class);
+            Read(u32); // TTL
 
             data_length := Read(u16);
 
@@ -2076,7 +2075,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                     return;
                 }
 
-                query.answer = Read(u32);
+                query.answer = (.*) cast(*u32) cursor;
 
                 log("Got DNS response regarding \"%\". IP is %", query.url, format_ip(query.answer));
 
@@ -2259,7 +2258,7 @@ network_thread :: () {
                     continue;
                 }
 
-                if udp.destination_port == 137 {
+                if udp.destination_port == 137 || udp.destination_port == 138 {
                     // NetBIOS Name Service.
                     continue;
                 }
