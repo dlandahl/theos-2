@@ -70,17 +70,17 @@ read_length :: (parser: *Asn1_Parser) -> int {
         return first;
     }
 
-    octets := first & 0x7f;
+    bytes := first & 0x7f;
 
-    if octets == 0 || octets > 4    parse_error();
-    if cursor + octets > data.count parse_error();
+    if bytes == 0 || bytes > 4     parse_error();
+    if cursor + bytes > data.count parse_error();
 
     length: int;
-    for 0..octets-1 {
+    for 0..bytes-1 {
         length = (length << 8) | data[cursor + it];
     }
 
-    cursor += octets;
+    cursor += bytes;
     return length;
 
     // Todo error: return parser.cursor + length.* <= parser.data.count;
@@ -226,7 +226,7 @@ read_time :: (parser: *Asn1_Parser) -> Apollo_Time, is_utc := false {
     }
 
     if !value.count {
-        // GENERALIZED_TIME is allowed to be done here. UTC_TIME must an explicit time zone.
+        // GENERALIZED_TIME is allowed to be done here. UTC_TIME must have an explicit time zone.
         return ifx tag == .UTC_TIME then APOLLO_TIME_INVALID else apollo;
     }
 
@@ -320,17 +320,14 @@ asn1_construction :: (parser: *Asn1_Parser, body: Code, flags: For_Flags, loc :=
     if parser.error return;
 
     container := read_value(parser, tag);
-    const := array_add(*parser.construction_stack);
-    const.data = container;
+    array_add(*parser.construction_stack, .{data = container});
 
     if parser.debug_mode {
         log("Entering. Stack = % %", parser.construction_stack.count, loc);
     }
 
     while true {
-        const = get_current_construction(parser); // Pointer may be stale now.
-
-        `it := const;
+        `it := get_current_construction(parser);
         `it_index := parser.construction_stack.count;
 
         // Even if we say continue, if we're at the end of the construction, stop automatically.
@@ -402,14 +399,14 @@ compare_oid :: (input: []u8, other: []u64) -> bool {
 
 X509_Certificate :: struct {
 
-    Distinguished_Name :: struct {
-        country:           string;
-        state_or_province: string;
-        organisation:      string;
-    }
-
     version: int;
     serial_number: []u8;
+
+    not_valid_before: Apollo_Time;
+    not_valid_after:  Apollo_Time;
+
+    issuer:  Distinguished_Name;
+    subject: Distinguished_Name;
 
     signature_algorithm: enum {
         TODO_UNKNOWN;
@@ -418,13 +415,6 @@ X509_Certificate :: struct {
         ED25519;
     };
 
-    issuer: Distinguished_Name;
-
-    not_valid_before: Apollo_Time;
-    not_valid_after: Apollo_Time;
-
-    subject: Distinguished_Name;
-
     public_key_algorithm: enum {
         TODO_UNKNOWN;
         RSA;
@@ -432,7 +422,13 @@ X509_Certificate :: struct {
     };
 
     public_key: Bit_String;
-    signature: Bit_String;
+    signature:  Bit_String;
+
+    Distinguished_Name :: struct {
+        country:           string;
+        state_or_province: string;
+        organisation:      string;
+    }
 }
 
 read_x509_distinguished_name :: (parser: *Asn1_Parser) -> X509_Certificate.Distinguished_Name {

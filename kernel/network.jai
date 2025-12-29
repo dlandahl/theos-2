@@ -529,7 +529,7 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
 
-    // Todo: Bucket_Array for pointer stability.
+    // Todo: This gets called from the user thread, but this array is owned by the network thread.
     tcp := array_add(*net.tcp_connections);
     tcp.net = net;
     tcp.port = port;
@@ -1077,6 +1077,9 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
             if time < cert.not_valid_before || time > cert.not_valid_after {
                 log("Certificate Expired!");
             }
+
+            log("Certificate issuer:\n    Country = %\n    Province = %\n    Organisation = %",
+                cert.issuer.country, cert.issuer.state_or_province, cert.issuer.organisation);
 
             all_certificates_length -= size_of(tls_u24);
             all_certificates_length -= certificate_length;
