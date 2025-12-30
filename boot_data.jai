@@ -15,10 +15,6 @@ Page_Tables :: struct {
     pdpt: [0x200] u64;
     pd:   [0x200] u64;
 
-    // Page tables for the UEFI stack, at the top of physical memory
-    stack_pdpt: [0x200] u64;
-    stack_pd:   [0x200] u64;
-
     // Page tables for the direct mapping, above the middle of virtual memory
     direct_pdpt:   [0x200] u64;
     direct_pd: [64][0x200] u64;

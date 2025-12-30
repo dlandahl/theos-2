@@ -8,6 +8,8 @@
 
 VIRTUALBOX_COMPATIBILITY :: true;
 
+load_buffer: *void;
+
 #program_export
 EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UINTN #c_call {
 
@@ -25,12 +27,16 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data := cast(*Boot_Data) boot_data_address;
         boot_data.* = .{};
 
-        // Memory for the loaded kernel executable.
+
+        KERNEL_EXE_LARGE_PAGES :: 8;
         kernel_base: *void;
-        EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x40_0000, *kernel_base));
+
+        // Memory for the loaded kernel executable and kernel stack.
+        EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x20_0000 * (KERNEL_EXE_LARGE_PAGES+1), *kernel_base));
         // Aligning this to 2MB is necessary because we map it as large pages, but this potentially wastes a lot of memory.
         // Maybe we can use one of the other UEFI allocators.
         kernel_base = cast(*void, (cast(s64) kernel_base + (0x20_0000 - 1)) & -0x20_0000);
+
 
         {
             // Get framebuffer and clear the screen
@@ -69,7 +75,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             if low == acpi_table_guid_low && high == acpi_table_guid_high {
                 magic: string = .{ 8, table.VendorTable };
-                boot_data.acpi_rsdp = table.VendorTable;
+                boot_data.acpi_rsdp = table.VendorTable + DIRECT_MAPPING_BASE;
                 break;
             }
         }
@@ -103,7 +109,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
         size: u64 = 0x20_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
-        load_buffer: *void;
 
         EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, size, *load_buffer));
         EFI_CHECK(kernel_file.Read(kernel_file, *size, load_buffer));
@@ -194,21 +199,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 boot_pt[it] = (4096 * cast(u64) it) | PAGE_PRESENT | PAGE_READ_WRITE;
             }
 
-            // UEFI seems to put the stack at the top of physical memory. I don't know if that's standardised. For now assume that the machine has 256Mb
-            index: int = 128;
-            for 0..20 {
-                boot_pd[index] = (0x1000_0000 - cast(u64) it*0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-                index -= 1;
-            }
-
             virtual_base : u64 : 0xffff_ffff_8000_0000;
             pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
             // 16Mb memory within the top two gigabytes, for the loaded kernel executable. The linker script specifies that this is where the loaded kernel executable should be placed.
-            // Todo: these page directory indeces are hardcoded in a few places below.
+            // Todo: these page directory indices are hardcoded in a few places below.
             // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
-            for 0..7 {
+            for 0..KERNEL_EXE_LARGE_PAGES-1 {
                 address := cast(u64) kernel_base + cast(u64) it * 0x20_0000;
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
@@ -244,7 +242,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             pd[13] = (cast(u64) load_buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[14] = (cast(u64) load_buffer - offset + 0x40_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // Translate load buffer address to virtual
+            // Translate load buffer address to virtual. Todo: Could we just use the direct mapping for this.
             load_buffer = cast(*void) (virtual_base + 12*0x20_0000 + offset);
 
 
@@ -367,51 +365,66 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);
         }
 
-        serial_out("Loading page tables...\n");
-        cr3 := boot_data.page_tables.pml4.data;
-        #asm {
-            cli;
-            set_cr3 cr3;
-        }
+        #asm { cli; }
 
-        {
-            serial_out("Loading kernel ELF...\n");
+        serial_out("Switching address space...\n");
 
-            elf := load_buffer;
+        page_table  := cast(u64)boot_data.page_tables.pml4.data;
+        stack_base  := cast(*void)0xffffffff80000000 + KERNEL_EXE_LARGE_PAGES * 0x20_0000;
+        entry_point := cast(*void)new_address_space_start;
 
-            elf_header := cast(*Elf64_Ehdr) elf;
-
-            for 0..elf_header.e_phnum-1 {
-
-                base := elf + elf_header.e_phoff;
-                base += it  * elf_header.e_phentsize;
-                program_header := cast(*Elf64_Phdr) base;
-
-                if program_header.p_type != PT_LOAD continue;
-
-                memcpy(
-                    cast(*void) program_header.p_vaddr,
-                    elf +       program_header.p_offset,
-                    cast(s32)   program_header.p_filesz
-                );
-
-                if program_header.p_memsz > program_header.p_filesz {
-                    start := program_header.p_vaddr + program_header.p_filesz;
-                    count := program_header.p_memsz - program_header.p_filesz;
-                    memset(cast(*void) start, 0, cast(s64) count);
-                }
-            }
-
-            serial_out("Jumping to the kernel...\n");
-            entry_point := (.*) cast(*() #no_context) *(elf_header.e_entry);
-            entry_point();
-        }
-
-        while true {}
+        switch_address_space := cast((*void, u64, *void) #c_call) switch_address_space_code.data;
+        switch_address_space(stack_base, page_table, entry_point);
     }
 
     return 0;
 }
+
+// Code to swap out the address space and the stack pointer that were given by UEFI, with the ones we want to use for the kernel. EFI/Microsoft calling convention. Represented in machine code because it's only four instructions.
+
+switch_address_space_code := u8.[
+    0x0f, 0x22, 0xda,   // mov cr3, rdx
+    0x48, 0x89, 0xcc,   // mov rsp, rcx
+    0x48, 0x89, 0xe5,   // mov rbp, rsp
+    0x41, 0xff, 0xd0,   // call r8 
+] #align 16;
+
+new_address_space_start :: () #c_call {
+    serial_out("Loading kernel ELF...\n");
+
+    elf := load_buffer;
+    elf_header := cast(*Elf64_Ehdr) elf;
+
+    for 0..elf_header.e_phnum-1 {
+
+        base := elf + elf_header.e_phoff;
+        base += it  * elf_header.e_phentsize;
+        program_header := cast(*Elf64_Phdr) base;
+
+        if program_header.p_type != PT_LOAD continue;
+
+        memcpy(
+            cast(*void) program_header.p_vaddr,
+            elf +       program_header.p_offset,
+            cast(s32)   program_header.p_filesz
+        );
+
+        if program_header.p_memsz > program_header.p_filesz {
+            start := program_header.p_vaddr + program_header.p_filesz;
+            count := program_header.p_memsz - program_header.p_filesz;
+            memset(cast(*void) start, 0, cast(s64) count);
+        }
+    }
+
+    serial_out("Jumping to the kernel...\n");
+    entry_point := (.*) cast(*() #no_context) *(elf_header.e_entry);
+    entry_point();
+
+    while true {}
+}
+
+
+
 
 EFI_CHECK :: check_efi_status;
 

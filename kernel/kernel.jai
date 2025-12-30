@@ -46,7 +46,7 @@ TRACE_INCLUDE_RUNTIME_CODE :: true;
 X64_Core :: struct {
     task_state_segment: Tss_With_Iopb #align 0x80;
 
-    // Align to cache block so no extra memory accesses are required on context switch.
+    // Align to cache block so no extra memory accesses are required on privilege change.
     global_descriptor_table: Global_Descriptor_Table #align 64;
 
     local_apic_id: u32;
@@ -235,7 +235,7 @@ kernel_entry :: () #no_context {
         }
 
         {
-            // Init virtual memory heap.
+            // Put a virtual memory heap after the direct mapping.
             GB :: 0x4000_0000;
             direct_mapping_size := cast(u64) boot_data.page_tables.direct_pd.count * GB;
 
@@ -400,7 +400,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: true;
+    USE_DNS :: false;
 
     log_category("Test");
 
@@ -422,7 +422,7 @@ network_test :: () {
         log("Sending DNS Query.");
 
         for 1..100 {
-            // Usually works the first time unless network is mega bad.
+            // Usually works the first time unless network is bad.
 
             dns_query := transmit_dns_query(net, "discord.com");
 
@@ -445,7 +445,7 @@ network_test :: () {
     tls := establish_tls_connection(connection);
 
     request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-    // request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
 
     tls_transmit_application_data(*tls, request);
 
@@ -1130,25 +1130,28 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
 find_block :: (using allocator: *Block_Allocator, address: u64) -> *Block_Desc, index: int {
     assert(is_held(spinlock)); // Caller should take the lock.
 
-    // Find the block corresponding to that address using linear search
+    // Find the block corresponding to that address using binary search
     looking_for := address - allocator.base_address;
 
-    m := -1;
+    l := 0;
+    r := blocks.count - 1;
+    m: int;
 
-    for blocks {
-        if it.base == looking_for {
-            m = it_index;
-            break;
-        }
+    while l <= r {
+        m = (l + r) / 2;
+        block_base := blocks[m].base;
+
+        if block_base < looking_for {
+            l = m + 1;
+        } else if block_base > looking_for {
+            r = m - 1;
+        } else return *blocks[m], m;
     }
 
-    if m == -1 return null, m;
-
-    return *blocks[m], m;
+    return null, m;
 }
 
-alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, loc := #caller_location) -> address: u64 #no_context {
-    Scoped_Acquire(*spinlock);
+alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) -> address: u64 {
 
     bytes_wanted: u64;
 
@@ -1158,8 +1161,12 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
         bytes_wanted = unaligned_bytes_wanted;
     }
 
+    Scoped_Acquire(*spinlock);
+
     for* blocks {
-        if !it.used && it.size >= bytes_wanted {
+        if it.used continue; // Todo: (Segregated) freelist.
+
+        if it.size >= bytes_wanted {
             it.used = true;
 
             remaining_bytes := it.size - bytes_wanted;
@@ -1169,7 +1176,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
                 // We didn't use the whole block, make a new one and move the others over.
 
                 if blocks.count >= max_block_descriptors-1 {
-                    bluescreen(loc);
+                    bluescreen();
                 }
 
                 blocks.count += 1;
@@ -1189,7 +1196,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
     // If we get here there isn't a large enough free block.
 
     write_string("Block allocator out of memory.");
-    bluescreen(loc);
+    bluescreen();
     return 0;
 }
 
@@ -1982,4 +1989,10 @@ fill_random :: (buffer: []u8) {
     for 0..remainder-1 {
         buffer[buffer.count-remainder + it] = xx random_get();
     }
+}
+
+
+
+Slab :: struct {
+
 }

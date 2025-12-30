@@ -217,7 +217,7 @@ startup_application_processors :: () {
 
     Ap_Startup_Data :: struct {
         // Layout matches the ap_startup assembly code.
-        stack: u64;
+        stack: *void;
         entry_point: *void;
         pml4: *u64;
     }
@@ -238,8 +238,7 @@ startup_application_processors :: () {
         // Todo: Maybe this needs a timeout in case a core fails to start.
         acquire(*ap_startup_spinlock, .RAW);
 
-        stack := alloc_block(*global.physical_block_allocator, 0x8_0000) + 0x8_0000;
-        ap_startup_data.stack = stack + DIRECT_MAPPING_BASE;
+        ap_startup_data.stack = alloc(0x8_0000) + 0x8_0000;
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
 
@@ -589,7 +588,7 @@ Uacpi_State :: struct {
 
 #program_export
 uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
-    rsdp_address.* = cast(uacpi_phys_addr) global.acpi_rsdp;
+    rsdp_address.* = cast(uacpi_phys_addr) global.acpi_rsdp - DIRECT_MAPPING_BASE;
     return .OK;
 }
 
@@ -634,10 +633,7 @@ uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
 #program_export
 uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     push_context {
-        phys := alloc_block(*global.physical_block_allocator, size);
-        virt := cast(*void) phys + DIRECT_MAPPING_BASE;
-
-        return virt;
+        return alloc(cast(s64)size);
     }
 }
 
@@ -646,8 +642,7 @@ uacpi_kernel_free :: (mem: *void) #c_call {
     if mem == null return;
 
     push_context {
-        phys := cast(u64) mem - DIRECT_MAPPING_BASE;
-        free_block(*global.physical_block_allocator, phys);
+        free(mem);
     }
 }
 

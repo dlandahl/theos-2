@@ -353,6 +353,8 @@ init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := ""
 }
 
 tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 {
+    auto_release_temp();
+
     Pseudo_Header :: struct {
         source_address: u32;
         destination_address: u32;
@@ -362,10 +364,10 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
 
         tcp: Tcp_Header;
 
-        payload: [0x300] u8;
+        payload: [MAX_PACKET_SIZE-40] u8;
     }
 
-    pseudo: Pseudo_Header;
+    pseudo := New(Pseudo_Header,, temp);
     pseudo.tcp = tcp;
     pseudo.source_address = source;
     pseudo.destination_address = dest;
@@ -377,7 +379,7 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
     count := payload.count;
     if count % 2 count += 1;
 
-    return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x300);
+    return internet_checksum(cast(*u8) pseudo, size_of(Pseudo_Header) + count - pseudo.payload.count);
 }
 
 Tcp_Connection :: struct {
@@ -2092,6 +2094,8 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
 
 
+MAX_PACKET_SIZE :: 1500;
+
 Network_Packet :: struct {
     data: *void;
     length: int;
@@ -2099,8 +2103,8 @@ Network_Packet :: struct {
 
 add_to_packet :: (packet: *Network_Packet, data: Any) {
     if data.type.type == .STRING {
-        s := data.value_pointer.(*string).*;
-        assert(packet.length + s.count <= 4096); // Todo
+        s := cast(*string) data.value_pointer;
+        assert(packet.length + s.count <= MAX_PACKET_SIZE);
 
         memcpy(packet.data + packet.length, s.data, s.count);
         packet.length += s.count;
@@ -2108,7 +2112,7 @@ add_to_packet :: (packet: *Network_Packet, data: Any) {
         return;
     }
 
-    assert(packet.length + data.type.runtime_size <= 4096); // Todo
+    assert(packet.length + data.type.runtime_size <= MAX_PACKET_SIZE);
 
     memcpy(packet.data + packet.length, data.value_pointer, data.type.runtime_size);
     packet.length += data.type.runtime_size;
