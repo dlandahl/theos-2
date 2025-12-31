@@ -533,8 +533,6 @@ Uacpi_State :: struct {
     };
     irq_contexts_used: int;
 
-    spinlock_storage: Bucket_Array(Spinlock, 16, always_iterate_by_pointer=true);
-
     Work_Item :: struct {
         type: uacpi_work_type;
         handler: uacpi_work_handler;
@@ -651,21 +649,18 @@ uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call 
     push_context {
         log_category("uACPI");
 
-        message: string;
-        message.data = c_string;
-        message.count = c_style_strlen(c_string);
+        data := c_string;
+        count := c_style_strlen(c_string);
 
-        if message[0] >= #char "a" && message[0] <= #char "z" {
-            message[0] -= #char "a" - #char "A";
+        if data[0] >= #char "a" && data[0] <= #char "z" {
+            data[0] -= #char "a" - #char "A";
         }
 
-        if message[message.count-1] == #char "\n"
-            && message[message.count-1] != #char "."
-            && message[message.count-2] != #char "." {
-                message[message.count-1] = #char ".";
+        if (data[count-1] == #char "\n") && (data[count-2] != #char ".") {
+            data[count-1] = #char ".";
         }
 
-        log(message);
+        log(.{count, data});
     }
 }
 
@@ -687,29 +682,25 @@ uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call 
 
 #program_export uacpi_kernel_create_mutex :: () -> uacpi_handle #c_call {
     push_context {
-        // Todo: Fast fixed size allocator for these types of objects.
-        mut := New(Mutex);
-        return cast(uacpi_handle) mut;
+        return New(Mutex,, global.small_objects);
     }
 }
 
 #program_export uacpi_kernel_free_mutex :: (handle: uacpi_handle) #c_call {
     push_context {
-        free(handle);
+        free(handle,, global.small_objects);
     }
 }
 
 #program_export uacpi_kernel_create_event :: () -> uacpi_handle #c_call {
     push_context {
-        // Todo: Fast fixed size allocator for these types of objects.
-        sem := New(Semaphore);
-        return cast(uacpi_handle) sem;
+        return New(Semaphore,, global.small_objects);
     }
 }
 
 #program_export uacpi_kernel_free_event :: (handle: uacpi_handle) #c_call {
     push_context {
-        free(handle);
+        free(handle,, global.small_objects);
     }
 }
 
@@ -844,63 +835,30 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
 
 #program_export
 uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
-    using global.uacpi_state;
     push_context {
-
-        locator, _ := bucket_array_add(*spinlock_storage, .{});
-        locator.slot_index += 1; // Because we return this in a pointer, if this value is zero, uACPI assumes we ran out of memory.
-
-        // ucapi_handle is *void, Bucket_Locator is two 32-bit integers. We can store the locator using the pointer value.
-        #assert size_of(uacpi_handle) >= size_of(Bucket_Locator);
-
-        handle := bit_cast(locator, uacpi_handle);
-
-        return handle;
+        return New(Spinlock,, global.small_objects);
     }
 }
 
 #program_export
 uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
-    using global.uacpi_state;
-
     push_context {
-        locator := bit_cast(handle, Bucket_Locator);
-        locator.slot_index -= 1;
-
-        bucket_array_remove(*spinlock_storage, locator);
+        free(handle,, global.small_objects);
     }
 }
 
 #program_export
 uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call {
-    using global.uacpi_state;
+    lock := cast(*Spinlock)handle;
+    acquire(lock);
 
-    push_context {
-        locator := bit_cast(handle, Bucket_Locator);
-        locator.slot_index -= 1;
-
-        lock := bucket_array_find_pointer(*spinlock_storage, locator);
-        acquire(lock, .IRQ);
-
-        flags := ifx lock.irq_state then X64_Flags.IF__interrupt else 0;
-
-        return cast,trunc(uacpi_cpu_flags) flags;
-    }
+    return 0;
 }
 
 #program_export
 uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #c_call {
-    using global.uacpi_state;
-
-    push_context {
-        locator := bit_cast(handle, Bucket_Locator);
-        locator.slot_index -= 1;
-
-        lock := bucket_array_find_pointer(*spinlock_storage, locator);
-
-        lock.irq_state = (cast(X64_Flags)flags) & .IF__interrupt > 0;
-        release(lock, .IRQ);
-    }
+    lock := cast(*Spinlock)handle;
+    release(lock);
 }
 
 #program_export

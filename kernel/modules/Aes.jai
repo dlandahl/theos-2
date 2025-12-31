@@ -1,8 +1,6 @@
 
 #assert CPU == .X64 "AES module relies on Intel hardware acceleration";
 
-// It might seem reasonable to use the Int128 module here, but in fact we need none of the operations implemented there and it would create a dependency on Basic.
-
 // Todo: there is advice here on how to improve pipelining in these algorithms:
 // www.intel.com/content/dam/doc/white-paper/advanced-encryption-standard-new-instructions-set-paper.pdf
 
@@ -20,14 +18,28 @@ to_i128 :: ($text: string) -> i128 #modify {
     return i128.{ bytes = xx text };
 }
 
-operator^ :: (a: i128, b: i128) -> i128 {
+operator^ :: inline (a: i128, b: i128) -> i128 {
     c: i128;
     c.low = a.low ^ b.low;
     c.high = a.high ^ b.high;
     return c;
 }
 
-operator== :: (a: i128, b: i128) -> bool {
+operator>> :: inline (a: i128, $$ b: int) -> i128 {
+    c := a;
+    c.low = (a.low >> b) | (a.high << (64 - b));
+    c.high >>= b;
+    return c;
+}
+
+operator<< :: inline (a: i128, $$ b: int) -> i128 {
+    c := a;
+    c.high = (a.high << b) | (a.low >> (64 - b));
+    c.low <<= b;
+    return c;
+}
+
+operator== :: inline (a: i128, b: i128) -> bool {
     // Don't use memcmp (or string ==) here, because in theory it creates a timing sidechannel.
     xor := a ^ b;
     return xor.low == 0 && xor.high == 0;
@@ -289,20 +301,18 @@ galois_multiply :: (x: i128, y: i128) -> i128 {
     R :: i128.{ bytes[15] = 0xe1 };
 
     for 0..127 {
-        if w.high & 0x8000_0000_0000_0000 {
+        if w.high & (1 << 63) {
             z ^= v;
         }
 
-        lsb := v.low & 1;
-        v.low = (v.low >> 1) | (v.high << 63);
-        v.high >>= 1;
+        set := v.low & 1;
+        v >>= 1;
 
-        if lsb != 0 {
+        if set {
             v ^= R;
         }
 
-        w.high = (w.high << 1) | (w.low >> 63);
-        w.low <<= 1;
+        w <<= 1;
     }
 
     return z;

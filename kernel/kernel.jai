@@ -79,6 +79,8 @@ Kernel_Globals :: struct {
     physical_block_allocator: Block_Allocator;
     virtual_block_allocator: Block_Allocator;
 
+    small_objects: Small_Objects_Allocator;
+
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
     fadt: *acpi_fadt;
@@ -226,8 +228,8 @@ kernel_entry :: () #no_context {
 
         for y: 0..y_resolution-1 {
             for x: 0..x_resolution-1 {
-                red   := cast(int) (0xff * (1.0 / y_resolution) * y);
-                green := cast(int) (0xff * (1.0 / x_resolution) * x);
+                red   := cast(int) (0xa0 * (1.0 / y_resolution) * y);
+                green := cast(int) (0xa0 * (1.0 / x_resolution) * x);
 
                 // buffer[x + y * stride] = cast(u32, (red << 16) | (green << 8));
                 buffer[x + y * stride] = 0;
@@ -400,7 +402,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: false;
+    USE_DNS :: true;
 
     log_category("Test");
 
@@ -759,7 +761,7 @@ Large_Page_Allocator :: struct {
     spinlock: Recursive_Spinlock;
 }
 
-allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
+allocate_large_page :: () -> u64 #no_context {
 
     using global.large_page_allocator;
     Scoped_Acquire(*spinlock);
@@ -799,9 +801,13 @@ allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
         return address;
     }
 
-    // There's no free memory
-    bluescreen(loc);
+    // There's no free memory. Todo: Swap to disk.
+    bluescreen();
     return 0;
+}
+
+release_large_page :: (address: u64) {
+    // Todo.
 }
 
 // These procs do a lot of hardcoded linked-list manipulation. It would be good to
@@ -1089,7 +1095,7 @@ get_physical_address :: (virtual: *void) -> u64, present: bool {
 
 
 // A block allocator that just linearly scans to find a large enough free block. Does not do the job of finding a best fit region to prevent fragmentation.
-// Is being used for both virtual and physical memory.
+// Is being used for both virtual and physical memory, but we probably want to switch to in-band block descriptors and then make a different allocator for virtual memory.
 
 Block_Desc :: struct {
     base: u64; // Relative to the start of the allocator's region
@@ -1164,7 +1170,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
     Scoped_Acquire(*spinlock);
 
     for* blocks {
-        if it.used continue; // Todo: (Segregated) freelist.
+        if it.used continue;
 
         if it.size >= bytes_wanted {
             it.used = true;
@@ -1280,6 +1286,152 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
         }
         blocks.count -= 1;
     }
+}
+
+
+
+Small_Objects_Allocator :: struct {
+    #as using allocator: Allocator; // So we can use it with ,,
+
+    PAGE_SIZE :: 0x20_0000; // Using 2 meg pages because they're very quick and easy to allocate in this OS, because it's the lowest level physical allocation granularity. I would prefer 64K, but 2MB physical granularity was chosen because it's an architectural page size so can be mapped to virtual memory in one go. That fact isn't relevant to this allocator and isn't made use of anywhere else yet either, so maybe I will change it. Also, 2MB pages can be addressed using s32, since that can reach 4000 terabytes (not enough for disk but enough for RAM.)
+
+    Page_Metadata :: struct {
+        page_freelist: *Page_Metadata;
+        objects_size: s16;
+        freelist: s16;
+        total_objects: s16;
+    }
+
+    // Bucket sizes: 32, 64, 128, 256, 512, 1024    
+    bucket_freelists: [6] *Page_Metadata;
+
+    lock: Spinlock;
+
+    allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+        if mode == {
+          case .RESIZE;
+            assert(false, "Trying to resize a small object.");
+
+          case .ALLOCATE;
+            return allocate_small_object(size);
+
+          case .FREE;
+            free_small_object(old_memory);
+        }
+
+        return null;
+    }
+}
+
+allocate_small_object :: (size: int) -> *void {
+    using global.small_objects;
+
+    Scoped_Acquire(*lock);
+
+    if size > 1024 {
+        bluescreen();
+        return null;
+    }
+
+    bucket_index := bit_scan_reverse(cast(u64)size-1);
+    bucket_index = max(bucket_index - 5, 0); // This makes 32 bytes the smallest bucket.
+
+    objects_size := cast(s16)(32 << bucket_index);
+
+    // Find or allocate a page to use.
+    page_freelist := *bucket_freelists[bucket_index];
+
+    if page_freelist.* == null {
+        new_page := allocate_large_page() + DIRECT_MAPPING_BASE;
+
+        header := cast(*Page_Metadata)new_page;
+        header.page_freelist = null;
+        header.objects_size  = objects_size;
+        header.freelist      = FREELIST_TAIL;
+        header.total_objects = 0;
+
+        page_freelist.* = header;
+    }
+
+    address := cast(*void)page_freelist.*;
+    header  := cast(*Page_Metadata)address;
+
+    metadata_size := objects_size; // Gap after Page_Metadata to keep objects aligned to their own size. This meets the worst case alignment requirement and doesn't waste any more memory.
+    objects_base  := address + metadata_size;
+    max_objects   := (PAGE_SIZE - metadata_size) / objects_size;
+
+    // Find a slot within the page. First, check if there's a freelist slot.
+    slot: *void;
+
+    if header.freelist != FREELIST_TAIL {
+        slot = objects_base + header.freelist * objects_size;
+        header.freelist = (.*) cast(*s16) slot;
+    }
+
+    else {
+        assert(header.total_objects < max_objects);
+        slot = objects_base + header.total_objects * objects_size;
+    }
+
+    header.total_objects += 1;
+
+    // Remove the page from the page freelist when it's full.
+    if header.total_objects == max_objects {
+        page_freelist.* = header.page_freelist;
+        header.page_freelist = null;
+    }
+
+    return slot;
+}
+
+free_small_object :: (address: *void) {
+    if address == null return;
+
+    using global.small_objects;
+    Scoped_Acquire(*lock);
+
+    header := cast(*Page_Metadata)address & ~(PAGE_SIZE-1);
+
+    bucket_index := bit_scan_reverse(header.objects_size-1);
+    bucket_index  = max(bucket_index - 5, 0);
+
+    max_objects  := (PAGE_SIZE - header.objects_size) / header.objects_size;
+
+    if header.total_objects == max_objects {
+        // Add the page to the page freelist if it is full before removing this object.
+        header.page_freelist = bucket_freelists[bucket_index];
+        bucket_freelists[bucket_index] = header;
+    }
+
+    header.total_objects -= 1;
+
+    if header.total_objects == 0 {
+        // Get rid of the page if this was the last object stored there.
+        release_large_page(cast(u64)address - DIRECT_MAPPING_BASE);
+
+        // Just walk the page freelist in order to remove this one. We could use a doubly-linked list, but
+        // there are really never going to be many entries in the list, since each page can hold thousands
+        // of objects, and we're not going to allocate large numbers of objects individually.
+        freelist := *bucket_freelists[bucket_index];
+
+        while true {
+            // If this is the freelist entry that points to us, it should instead point to what we point to, so that we're removed from the list.
+            if freelist.*.page_freelist == header {
+                freelist.*.page_freelist = header.page_freelist;
+                break;
+            }
+
+            freelist = *freelist.*.page_freelist;
+            assert(freelist.* != null, "Attempting to free now-empty small objects page, but the page was not in the freelist.");
+        }
+    }
+
+    // Insert the free slot into the page-local freelist.
+    (.*) cast(*s16) address = header.freelist;
+
+    object_offset := cast(s16)(address & (PAGE_SIZE-1));
+    object_index  := (object_offset - header.objects_size) / header.objects_size;
+    header.freelist = object_index;
 }
 
 
@@ -1874,7 +2026,10 @@ draw_text :: (text: string) #no_context {
 
                 c := cast(u32) font.data[pixel_in_font];
 
-                framebuffer.buffer[pixel_on_screen] = (c) | (c << 8) | (c << 16) | (c << 24);
+                red   := cast(int) (0xa0 * (1.0 / framebuffer.y_resolution) * (screen_y + char_y));
+                green := cast(int) (0xa0 * (1.0 / framebuffer.x_resolution) * (screen_x + char_x));
+
+                framebuffer.buffer[pixel_on_screen]  = (c) | (c << 8) | (c << 16) | (c << 24);
             }
         }
 

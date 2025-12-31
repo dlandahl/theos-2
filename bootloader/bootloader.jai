@@ -81,7 +81,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
 
-        display("Loading kernel .elf...\r\n");
+        display("Loading kernel .elf...");
 
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
@@ -115,7 +115,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
 
 
-        display("Detect memory size...\r\n");
+        display("Detect memory size...");
 
         limit :: (region: Boot_Data.Memory_Region) -> u64 {
             return region.address + region.pages * 4096;
@@ -174,7 +174,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
-            display("Building page tables...\r\n");
+            display("Building page tables...");
 
             memset(*boot_data.page_tables, 0, size_of(Page_Tables));
 
@@ -267,7 +267,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         entry_count = mmap_size / descriptor_size;
         boot_data.memory_map_entries_used = 0;
 
-        display("Parsing firmware memory map...\r\n");
+        display("Parsing firmware memory map...");
 
         for 0..entry_count-1 {
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
@@ -325,9 +325,9 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 monotonic := last_region.address < region.address;
                 if !monotonic {
-                    display("Error: Firmware memory map is not in order.\r\n");
-                    display("Last region: ", last_region.address, "|", last_region.pages, "|", last_region.type, "\r\n");
-                    display("This region: ",      region.address, "|",      region.pages, "|",      region.type, "\r\n");
+                    display("Error: Firmware memory map is not in order.");
+                    display("Last region: ", last_region.address, "|", last_region.pages, "|", last_region.type);
+                    display("This region: ",      region.address, "|",      region.pages, "|",      region.type);
 
                     break;
                 }
@@ -335,7 +335,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 if !contiguous {
                     gap_base := limit(last_region.*);
 
-                    display("Warning: Firmware memory map is not contiguous: ", gap_base, " <-> ", region.address, "\r\n");
+                    display("Warning: Firmware memory map is not contiguous: ", gap_base, " <-> ", region.address);
 
                     gap_region: Boot_Data.Memory_Region;
                     gap_region.type    = .NOT_REPORTED;
@@ -351,12 +351,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             bd.memory_map_entries_used += 1;
 
             if bd.memory_map_entries_used == bd.memory_map.count {
-                display("Ran out of memory map entries.\r\n");
+                display("Ran out of memory map entries.");
                 break;
             }
         }
 
-        display("Exiting boot services...\r\n");
+        display("Exiting boot services...");
         while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
             // ExitBootServices itself can sometimes change the memory map, in which case you need to call it again.
             // Todo: does this mean we need to update the one we give the kernel?
@@ -369,9 +369,9 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         serial_out("Switching address space...\n");
 
-        page_table  := cast(u64)boot_data.page_tables.pml4.data;
-        stack_base  := cast(*void)0xffffffff80000000 + KERNEL_EXE_LARGE_PAGES * 0x20_0000;
-        entry_point := cast(*void)new_address_space_start;
+        page_table  := cast(u64)   boot_data.page_tables.pml4.data;
+        stack_base  := cast(*void) 0xffffffff80000000 + KERNEL_EXE_LARGE_PAGES * 0x20_0000;
+        entry_point := cast(*void) new_address_space_start;
 
         switch_address_space := cast((*void, u64, *void) #c_call) switch_address_space_code.data;
         switch_address_space(stack_base, page_table, entry_point);
@@ -437,12 +437,12 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
 
     for ti.values if it == cast(int) status {
         enum_name := ti.names[it_index];
-        display("UEFI call failed on line ", loc.line_number, " with status ", enum_name, "\r\n");
+        display("UEFI call failed on line ", loc.line_number, " with status ", enum_name);
 
         return;
     }
 
-    display("UEFI call failed on line ", loc.line_number, " with unknown status code 0x", cast(u64) status, "\r\n");
+    display("UEFI call failed on line ", loc.line_number, " with unknown status code 0x", cast(u64) status);
 }
 
 display :: (args: .. Any) {
@@ -457,14 +457,21 @@ display :: (args: .. Any) {
             display_int(integer);
         }
     }
+
+    display_string("\r\n");
 }
 
 display_string :: (message: string) {
-    buffer: [256] u16;
-    wide_text := ascii_to_wide(message, buffer);
+    wide: [256] u16;
+
+    for cast([] u8) message {
+        wide[it_index] = cast(u16) it;
+    }
+
+    wide[message.count] = 0;
 
     console := context.system_table.ConOut;
-    console.OutputString(console, wide_text);
+    console.OutputString(console, wide.data);
 }
 
 display_int :: (value: u64) {
@@ -477,18 +484,6 @@ display_int :: (value: u64) {
 
     display_string(cast(string) result);
 }
-
-ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {
-    for cast([] u8) input {
-        buffer[it_index] = cast(u16) it;
-    }
-
-    buffer[input.count] = 0;
-    return buffer.data;
-}
-
-#program_export
-__chkstk :: () {}
 
 serial_out :: (data: string) #no_context {
     COM1 :: 0x3f8;
@@ -520,41 +515,5 @@ serial_out :: (data: string) #no_context {
     }
 }
 
-write_number :: (n: u64, base := 16) {
-    if n == 0 {
-        serial_out("0\r\n");
-        return;
-    }
-
-    if base > 16  base = 16;
-    if base < 2   base = 2;
-
-    ubase := cast,no_check(u64) base;
-
-    // This is of course a horrible hack.
-    // A u64 in base 2 can be up to 64 digits,
-    // so we need at least that much space. Add a few more digits for superstition.
-    buf: [69] u8;
-
-    starting_cursor : s32 = buf.count;
-    cursor := starting_cursor;
-
-
-    while n {
-        cursor -= 1;
-        index := n % ubase;
-        if index <= 9 {
-            buf[cursor] = cast(u8)(index + #char "0");
-        } else {
-            buf[cursor] = cast(u8)(index - 10 + #char "a");
-        }
-
-        n /= ubase;
-    }
-
-    s: string = ---;
-    s.data  = buf.data + cursor;
-    s.count = starting_cursor - cursor;
-    serial_out(s);
-    serial_out("\r\n");
-}
+#program_export
+__chkstk :: () {}

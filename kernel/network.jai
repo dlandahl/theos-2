@@ -541,8 +541,8 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     tcp.sequence_number = sequence_number;
     tcp.ack_number = 0;
 
-    tcp.in\_stream.buffer = NewArray(0x4000, u8);
-    tcp.out_stream.buffer = NewArray(0x4000, u8);
+    tcp.in\_stream.buffer = NewArray(0x1000, u8);
+    tcp.out_stream.buffer = NewArray(0x1000, u8);
 
     tcp.in\_data.counter_max = 1;
     tcp.out_data.counter_max = 1;
@@ -1591,8 +1591,6 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 }
 
-
-
 Dhcp_Option_Code :: enum u8 {
     PADDING      :: 0x0;
     SUBNET_MASK  :: 0x01;
@@ -1955,7 +1953,6 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
 
     i8254x_transmit_packet(*net.adapter, packet);
 
-    // Todo: bucket array.
     new_query := array_add(*net.dns_queries_in_flight);
     new_query.transaction_id = xid;
     new_query.url = copy_string(url);
