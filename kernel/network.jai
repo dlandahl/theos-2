@@ -2202,7 +2202,6 @@ network_thread :: () {
             timeout = milliseconds_to_apollo(50);
         }
 
-
         for* net.tcp_connections {
             update_tcp_connection(it);
         }
@@ -2242,7 +2241,7 @@ network_thread :: () {
                 handle_icmp_packet(net, eth);
 
               case .UDP;
-        udp := cast(*Udp_Header) (ip + 1);
+                udp := cast(*Udp_Header) (ip + 1);
                 byte_swap_struct(udp);
 
                 if udp.destination_port == DHCP_CLIENT_PORT {
@@ -2263,7 +2262,7 @@ network_thread :: () {
                 log("UDP packet for port % unhandled.\n", udp.destination_port);
 
               case .TCP;
-        header := cast(*Tcp_Header) (ip + 1);
+                header := cast(*Tcp_Header) (ip + 1);
                 byte_swap_struct(header);
 
                 for* net.tcp_connections {
@@ -2275,7 +2274,7 @@ network_thread :: () {
 
                     receive_tcp_segment(it, header, bytes);
 
-            continue packet;
+                    continue packet;
                 }
 
                 log_error("Got TCP message for nonexistent connection on port %", header.destination_port);

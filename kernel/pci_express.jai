@@ -15,15 +15,18 @@ Ecam_Entry :: struct {
 }
 
 find_all_pci_devices :: () {
+    reported_bus_issue := false;
+
     for global.pci_ecam {
         for bus: it.start_bus..it.end_bus {
             for device: 0..255 {
                 header := read_configuration_space(it.base_address, bus, device, 0);
                 if !header continue;
 
-                if bus != 0 {
+                if !reported_bus_issue && bus != 0 {
                      // Todo.
-                    log_error("We assume there's only one bus when registering legacy PCI interrupts, but a device was found on a non-0 index PCI bus.");
+                    log_error("We assume there's only one bus when registering legacy PCI interrupts, but a device (%:%) was found on a non-0 index PCI bus: %", formatInt(header.vendor_id, base=16), formatInt(header.device_id, base=16), bus);
+                    reported_bus_issue = true;
                 }
 
                 new_device := array_add(*pci_devices);

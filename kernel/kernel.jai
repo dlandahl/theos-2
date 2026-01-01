@@ -692,7 +692,7 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 bluescreen :: (loc := #caller_location) #no_context {
-    disable_interrupts();
+    irq_disable();
 
     write_string("\nBluescreen!\n");
 
@@ -1534,14 +1534,14 @@ preempt_restore :: (expected: int, loc := #caller_location) #no_context {
 
 get_rflags :: () -> X64_Flags #foreign Assembly;
 
-disable_interrupts :: () -> X64_Flags #no_context {
+irq_disable :: () -> bool #no_context {
     flags := get_rflags();
     #asm { cli; }
-    return flags;
+    return flags & .IF__interrupt > 0;
 }
 
-restore_interrupts :: (flags: X64_Flags) #no_context {
-    if flags & .IF__interrupt {
+irq_restore :: (was_enabled: bool) #no_context {
+    if was_enabled {
         #asm { sti; }
     }
 }
@@ -1552,12 +1552,54 @@ restore_interrupts :: (flags: X64_Flags) #no_context {
 Any_Lock :: Type.[MCS_Spinlock, Spinlock, Mutex];
 
 
-
+// Lock type (like "irqsave") is a property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better.
 Lock_Type :: enum {
     RAW     :: 1;
     PREEMPT :: 2;
     IRQ     :: 3;
 }
+
+Spinlock :: struct (lock_type := Lock_Type.PREEMPT) {
+    now_serving: u16;
+    next_ticket: u16;
+
+    #if lock_type == .IRQ {
+        irq_state: bool; // Todo: this could go in the high bit of one of the fields above to save cache space.
+    }
+}
+
+is_held :: (lock: Spinlock) -> bool #no_context {
+    return lock.now_serving != lock.next_ticket;
+}
+
+acquire :: (lock: *Spinlock) #no_context {
+    #if lock.lock_type == {
+        case .PREEMPT; preempt_disable();
+        case .IRQ;     lock.irq_state = irq_disable();
+    }
+
+    my_ticket := fetch_add(*lock.next_ticket, 1);
+
+    while lock.now_serving != my_ticket {
+        #asm { pause; }
+    }
+}
+
+release :: (lock: *Spinlock) #no_context {
+    lock.now_serving += 1;
+
+    #if lock.lock_type == {
+        case .PREEMPT; preempt_restore(0 /* Todo */);
+        case .IRQ;     irq_restore(lock.irq_state);
+    }
+}
+
+Scoped_Acquire :: (lock: *Spinlock) #expand {
+    acquire(lock);
+    `defer release(lock);
+}
+
+
 
 // MCS lock based on https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf
 
@@ -1568,8 +1610,8 @@ MCS_Node :: struct {
 
 MCS_Spinlock :: *MCS_Node;
 
-acquire :: (lock: *MCS_Spinlock) -> X64_Flags #no_context {
-    flags := disable_interrupts();
+acquire :: (lock: *MCS_Spinlock) -> bool #no_context {
+    irq_state := irq_disable();
 
     core := get_current_core();
     my_node := *core.mcs_node;
@@ -1586,11 +1628,11 @@ acquire :: (lock: *MCS_Spinlock) -> X64_Flags #no_context {
         }
     }
 
-    return flags;
+    return irq_state;
 }
 
-release :: (lock: *MCS_Spinlock, flags: X64_Flags) #no_context {
-    defer restore_interrupts(flags);
+release :: (lock: *MCS_Spinlock, irq_state: bool) #no_context {
+    defer irq_restore(irq_state);
 
     core := get_current_core();
     my_node := *core.mcs_node;
@@ -1610,65 +1652,19 @@ release :: (lock: *MCS_Spinlock, flags: X64_Flags) #no_context {
 
 
 
-Spinlock :: struct {
-    now_serving: u16;
-    next_ticket: u16;
-    irq_state: bool; // Todo: this could go in the high bit of one of the fields above to save cache space.
-}
-
-is_held :: (lock: Spinlock) -> bool #no_context {
-    return lock.now_serving != lock.next_ticket;
-}
-
-acquire :: (lock: *Spinlock, $lock_type := Lock_Type.PREEMPT) #no_context {
-
-    #if lock_type == {
-      case .PREEMPT;
-        preempt_disable();
-      case .IRQ;
-        flags := disable_interrupts();
-        lock.irq_state = flags & .IF__interrupt > 0;
-    }
-
-    my_ticket := fetch_add(*lock.next_ticket, 1);
-
-    while lock.now_serving != my_ticket {
-        #asm { pause; }
-    }
-}
-
-release :: (lock: *Spinlock, $lock_type := Lock_Type.PREEMPT) #no_context {
-
-    lock.now_serving += 1;
-
-    #if lock_type == {
-      case .PREEMPT;
-        preempt_restore(0 /* Todo */);
-      case .IRQ;
-        flags := ifx lock.irq_state then X64_Flags.IF__interrupt else 0;
-        restore_interrupts(flags);
-    }
-}
-
-Scoped_Acquire :: (lock: *Spinlock) #expand {
-    acquire(lock);
-    `defer release(lock);
-}
-
-
-
 // Todo: Maybe it would be better to get rid of this, and rewrite the code to not require recursive spinlocks.
 
 Recursive_Spinlock :: struct {
-    lock: Spinlock;
+    lock: Spinlock(.RAW);
 
     held_by_core: int = -1;
     recursion_count: int;
+    irq_state: bool;
 }
 
 acquire :: (lock: *Recursive_Spinlock) #no_context {
 
-    flags := disable_interrupts();
+    irq_state := irq_disable();
     core_id := 0;
 
     if global.multiprocessing_initialized {
@@ -1683,9 +1679,9 @@ acquire :: (lock: *Recursive_Spinlock) #no_context {
         return;
     }
 
-    acquire(*lock.lock, .RAW);
+    acquire(*lock.lock);
     lock.held_by_core = core_id;
-    lock.lock.irq_state = flags & .IF__interrupt > 0;
+    lock.irq_state = irq_state;
 }
 
 release :: (lock: *Recursive_Spinlock) #no_context {
@@ -1707,10 +1703,9 @@ release :: (lock: *Recursive_Spinlock) #no_context {
     }
 
     lock.held_by_core = -1; // Prevent a race due to acquiring the lock, then setting held_by_core immediately afterwards.
-    release(*lock.lock, .RAW);
+    release(*lock.lock);
 
-    flags := ifx lock.lock.irq_state then X64_Flags.IF__interrupt else 0;
-    restore_interrupts(flags);
+    irq_restore(lock.irq_state);
 }
 
 Scoped_Acquire :: (lock: *Recursive_Spinlock) #expand {

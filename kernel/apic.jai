@@ -236,7 +236,7 @@ startup_application_processors :: () {
         // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
         // Maybe if processors could use their APIC ID to find their stack memory it would be faster.
         // Todo: Maybe this needs a timeout in case a core fails to start.
-        acquire(*ap_startup_spinlock, .RAW);
+        acquire(*ap_startup_spinlock);
 
         ap_startup_data.stack = alloc(0x8_0000) + 0x8_0000;
 
@@ -261,11 +261,11 @@ ap_startup_bin :: #run,host -> [] u8 {
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
-ap_startup_spinlock: Spinlock;
+ap_startup_spinlock: Spinlock(lock_type = .RAW);
 
 ap_entry_point :: () #c_call {
 
-    release(*ap_startup_spinlock, .RAW);
+    release(*ap_startup_spinlock);
 
     push_context {
         init_processor_core();
@@ -540,7 +540,7 @@ Uacpi_State :: struct {
     }
 
     work_queue: Queue(Work_Item);
-    work_queue_lock: Spinlock;
+    work_queue_lock: Spinlock(.IRQ);
     work_thread: *Task_Info;
     work_in_progress: bool;
 
@@ -836,7 +836,7 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
 #program_export
 uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
     push_context {
-        return New(Spinlock,, global.small_objects);
+        return New(Spinlock(.IRQ),, global.small_objects);
     }
 }
 

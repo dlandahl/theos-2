@@ -627,7 +627,7 @@ calibrate_tsc :: () -> hz: u64 {
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
     for 1..100 {
-        flags := disable_interrupts();
+        irq_state := irq_disable();
 
         counter_start := counter_register.*;
         tsc0 := rdtsc();
@@ -647,7 +647,7 @@ calibrate_tsc :: () -> hz: u64 {
             }
         }
 
-        restore_interrupts(flags);
+        irq_restore(irq_state);
 
         delta[2] = delta[1];
         delta[1] = delta[0];

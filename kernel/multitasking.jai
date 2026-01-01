@@ -61,17 +61,6 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
     return null;
 }
 
-lock_scheduler_for_current_task :: () -> *Task_Info, *Scheduler {
-    preempt_disable();
-
-    current := get_current_task();
-    scheduler := *current.on_core.scheduler;
-
-    acquire(*scheduler.spinlock, .RAW);
-
-    return current, scheduler;
-}
-
 get_current_task :: () -> *Task_Info #no_context {
     offset :: #run offset_of(X64_Core, "scheduler.current_task");
     return cast(*Task_Info)gs_relative_read(offset);
@@ -188,7 +177,8 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
-    current, scheduler := lock_scheduler_for_current_task();
+    current := get_current_task();
+    scheduler := lock_scheduler_for_task(current);
 
     time_now := get_monotonic_system_time();
 
@@ -318,7 +308,8 @@ prepare_task_sleep :: (time: Apollo_Time) {
 }
 
 prepare_task_sleep_until :: (time: Apollo_Time) {
-    task, scheduler := lock_scheduler_for_current_task();
+    task := get_current_task();
+    scheduler := lock_scheduler_for_task(task);
 
     task.sleeping = true;
     task.sleep_until = time;
@@ -428,7 +419,7 @@ trylock :: (using mutex: *Mutex) -> bool {
 
 
 Semaphore :: struct {
-    spinlock: Spinlock;
+    spinlock: Spinlock(Lock_Type.IRQ);
     counter: int;
     counter_max: int; // 0 means no max.
 
@@ -444,11 +435,11 @@ Semaphore :: struct {
 
 wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
-    acquire(*spinlock, .IRQ);
+    acquire(*spinlock);
 
     if counter > 0 {
         counter -= 1;
-        release(*spinlock, .IRQ);
+        release(*spinlock);
         return true;
     }
 
@@ -467,14 +458,14 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         // Prevent lost-wakeup by setting the task to sleep while still holding the lock.
         prepare_task_sleep(remaining_timeout);
 
-        release(*spinlock, .IRQ);
+        release(*spinlock);
 
         yield_execution();
 
-        acquire(*spinlock, .IRQ);
+        acquire(*spinlock);
 
         if waiter.signalled {
-            release(*spinlock, .IRQ);
+            release(*spinlock);
             return true;
         }
         
@@ -490,26 +481,26 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         }
 
         queue_remove(*queue, *waiter);
-        release(*spinlock, .IRQ);
+        release(*spinlock);
         return false; // Timeout hit.
     }
 }
 
 try_wait :: (using sem: *Semaphore) -> bool {
-    acquire(*spinlock, .IRQ);
+    acquire(*spinlock);
 
     if counter > 0 {
         counter -= 1;
-        release(*spinlock, .IRQ);
+        release(*spinlock);
         return true;
     }
 
-    release(*spinlock, .IRQ);
+    release(*spinlock);
     return false;
 }
 
 signal :: (using sema: *Semaphore) {
-    acquire(*spinlock, .IRQ);
+    acquire(*spinlock);
 
     if queue_is_empty(queue) {
         counter += 1;
@@ -518,7 +509,7 @@ signal :: (using sema: *Semaphore) {
             counter = counter_max;
         }
 
-        release(*spinlock, .IRQ);
+        release(*spinlock);
         return;
     }
 
@@ -528,14 +519,14 @@ signal :: (using sema: *Semaphore) {
 
     wake_task(waiter.task);
 
-    release(*spinlock, .IRQ);
+    release(*spinlock);
 }
 
 
 
 Condition_Variable :: struct {
     // Not using a mutex, so that we can notify in interrupt contexts.
-    lock: Spinlock;
+    lock: Spinlock(.IRQ);
 
     waiters: List_Queue(Semaphore);
 }
@@ -561,7 +552,7 @@ notify_all :: (using var: *Condition_Variable) {
     release(*lock);
 }
 
-wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, timeout := INFINITE_TIMEOUT) -> bool {
+wait_for :: (using var: *Condition_Variable, user_lock: *$T, timeout := INFINITE_TIMEOUT) -> bool {
     acquire(*lock);
 
     waiter: waiters.Node;
@@ -582,7 +573,7 @@ wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, timeout :=
     return true;
 }
 
-wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, $predicate: Code, timeout := INFINITE_TIMEOUT) -> bool {
+wait_for :: (using var: *Condition_Variable, user_lock: *$T, $predicate: Code, timeout := INFINITE_TIMEOUT) -> bool {
     while !(#insert predicate) {
         return wait_for(var, user_lock, timeout=timeout);
     }
