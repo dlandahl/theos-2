@@ -75,7 +75,6 @@ Kernel_Globals :: struct {
 
     large_page_allocator: Large_Page_Allocator;
 
-    physical_page_pool: Physical_4k_Page_Pool(1024);
     physical_block_allocator: Block_Allocator;
     virtual_block_allocator: Block_Allocator;
 
@@ -323,6 +322,7 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
+        for 1..200 get_4k_page();
         // user_mode_stress_test();
         // semaphore_test();
         network_test();
@@ -402,7 +402,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: true;
+    USE_DNS :: false;
 
     log_category("Test");
 
@@ -913,73 +913,13 @@ evict_disk_cache_entry :: (page: u64) #no_context {
 
 
 
-Physical_4k_Page_Pool :: struct(page_count: int) {
-    freelist: [page_count] s32;
-    freelist_length: s32;
-    highest_used: s32;
-
-    large_pages: [(page_count+511) / 512] struct {
-        index: s32;
-        used: s32;
-    };
-
-    large_pages_used: s32;
-
-    spinlock: Spinlock;
+get_4k_page :: () -> u64 {
+    result := cast(u64)allocate_small_object(4096) - DIRECT_MAPPING_BASE;
+    return result;
 }
 
-page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 #no_context {
-    large_page_index := index / 512;
-    page_index       := index % 512;
-
-    large_page := *pool.large_pages[large_page_index];
-
-    if pool.large_pages_used <= large_page_index {
-        large_page.index = cast(s32, allocate_large_page() / 0x20_0000);
-        pool.large_pages_used += 1;
-    }
-
-    large_page.used += 1;
-
-    address := cast(u64) large_page.index * 0x20_0000;
-    address += cast(u64) page_index * 4096;
-
-    return address;
-}
-
-get_4k_page :: () -> u64 #no_context {
-    return get_4k_page(*global.physical_page_pool);
-}
-
-get_4k_page :: (pool: *Physical_4k_Page_Pool) -> u64 #no_context {
-    using pool;
-    Scoped_Acquire(*spinlock);
-
-    if freelist_length != 0 {
-        freelist_length -= 1;
-
-        page_index := freelist[freelist_length];
-        address    := page_pool_index_to_address(pool, page_index);
-
-        return address;
-    }
-
-    if highest_used >= page_count {
-        bluescreen();
-    }
-
-    address := page_pool_index_to_address(pool, highest_used);
-    highest_used += 1;
-
-    return address;
-}
-
-free_4k_page :: (pool: *Physical_4k_Page_Pool, address: u64) #no_context {
-    // Todo
-}
-
-free_4k_page :: (address: u64) #no_context {
-    free_4k_page(*global.physical_page_pool, address);
+free_4k_page :: (address: u64) {
+    free_small_object(cast(*void)address + DIRECT_MAPPING_BASE);
 }
 
 
@@ -999,6 +939,7 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     }
 
     address := get_4k_page();
+    
 
     table[entry] = address | xx PRESENT | READ_WRITE;
 
@@ -1302,8 +1243,8 @@ Small_Objects_Allocator :: struct {
         total_objects: s16;
     }
 
-    // Bucket sizes: 32, 64, 128, 256, 512, 1024    
-    bucket_freelists: [6] *Page_Metadata;
+    // Bucket sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096
+    bucket_freelists: [8] *Page_Metadata;
 
     lock: Spinlock;
 
@@ -1328,7 +1269,7 @@ allocate_small_object :: (size: int) -> *void {
 
     Scoped_Acquire(*lock);
 
-    if size > 1024 {
+    if size > 4096 {
         bluescreen();
         return null;
     }
@@ -1363,20 +1304,21 @@ allocate_small_object :: (size: int) -> *void {
     // Find a slot within the page. First, check if there's a freelist slot.
     slot: *void;
 
-    if header.freelist != FREELIST_TAIL {
-        slot = objects_base + header.freelist * objects_size;
+    if header.freelist != FREELIST_TAIL && false {
+        slot = objects_base + cast(int)header.freelist * objects_size;
         header.freelist = (.*) cast(*s16) slot;
     }
 
     else {
         assert(header.total_objects < max_objects);
-        slot = objects_base + header.total_objects * objects_size;
+        slot = objects_base + cast(int)header.total_objects * objects_size;
     }
 
     header.total_objects += 1;
 
     // Remove the page from the page freelist when it's full.
     if header.total_objects == max_objects {
+        assert(false);
         page_freelist.* = header.page_freelist;
         header.page_freelist = null;
     }
@@ -1407,33 +1349,32 @@ free_small_object :: (address: *void) {
 
     if header.total_objects == 0 {
         // Get rid of the page if this was the last object stored there.
-        release_large_page(cast(u64)address - DIRECT_MAPPING_BASE);
-
+        //
         // Just walk the page freelist in order to remove this one. We could use a doubly-linked list, but
         // there are really never going to be many entries in the list, since each page can hold thousands
         // of objects, and we're not going to allocate large numbers of objects individually.
         freelist := *bucket_freelists[bucket_index];
 
         while true {
-            // If this is the freelist entry that points to us, it should instead point to what we point to, so that we're removed from the list.
-            if freelist.*.page_freelist == header {
-                freelist.*.page_freelist = header.page_freelist;
+            if freelist.* == header {
+                freelist.* = header.page_freelist;
                 break;
             }
 
             freelist = *freelist.*.page_freelist;
-            assert(freelist.* != null, "Attempting to free now-empty small objects page, but the page was not in the freelist.");
+            assert(freelist.* != null, "Attempting to release now-empty small objects page, but the page was not in the freelist.");
         }
+
+        release_large_page(cast(u64)address - DIRECT_MAPPING_BASE);
+    } else {
+        // Insert the free slot into the page-local freelist.
+        (.*) cast(*s16) address = header.freelist;
+
+        object_offset := cast(s16)(address & (PAGE_SIZE-1));
+        object_index  := (object_offset - header.objects_size) / header.objects_size;
+        header.freelist = object_index;
     }
-
-    // Insert the free slot into the page-local freelist.
-    (.*) cast(*s16) address = header.freelist;
-
-    object_offset := cast(s16)(address & (PAGE_SIZE-1));
-    object_index  := (object_offset - header.objects_size) / header.objects_size;
-    header.freelist = object_index;
 }
-
 
 
 Acpi_Rsdp :: struct {

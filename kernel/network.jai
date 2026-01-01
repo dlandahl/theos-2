@@ -199,13 +199,14 @@ Arp_Packet :: struct {
 
 transmit_arp_probe :: (net: *Network_Connection) {
 
-    probe: struct {
+    Probe :: struct {
         using eth: Ethernet_Header;
         using arp: Arp_Packet;
     }
+    probe: Probe;
 
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = New(Probe,, temp);
 
     probe.destination_mac = BROADCAST_MAC;
     probe.source_mac      = net.adapter.mac_address;
@@ -230,8 +231,6 @@ transmit_arp_probe :: (net: *Network_Connection) {
     i8254x_transmit_packet(*net.adapter, packet);
 
     // Todo: actually respond to IP address conflicts
-
-    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
 }
 
 handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
@@ -259,13 +258,14 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
         return;
     }
 
-    reply: struct {
+    Arp_Reply :: struct {
         using eth: Ethernet_Header;
         using arp: Arp_Packet;
     }
+    reply: Arp_Reply;
 
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = New(Arp_Reply,, temp);
 
     reply.destination_mac = arp.SHA__sender_hardware_address;
     reply.source_mac      = net.adapter.mac_address;
@@ -289,8 +289,6 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
     add_to_packet(*packet, reply);
     i8254x_transmit_packet(*net.adapter, packet);
     log("ARP reply sent");
-
-    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
 
     return;
 }
@@ -501,7 +499,7 @@ transmit_tcp_segment :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, p
     }
 
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = alloc(MAX_PACKET_SIZE,, global.small_objects);
 
     eth := init_ethernet_header(tcp.net);
     add_to_packet(*packet, eth);
@@ -684,7 +682,7 @@ receive_tcp_segment :: (tcp: *Tcp_Connection, segment: *Tcp_Header, bytes: int) 
     // Remove segments that have been acknowledged from the retransmit buffer.
     for* tcp.in_flight {
         if it.sequence <= segment.ack_number {
-            free_4k_page(cast(u64)it.packet.data - DIRECT_MAPPING_BASE);
+            free(it.packet.data,, global.small_objects);
             remove it;
         }
     }
@@ -1646,7 +1644,7 @@ commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Options_Builder) 
 // Todo: these three "transmit_dhcp_" routines are basically identical except for the Options.
 transmit_dhcp_discover :: (net: *Network_Connection) {
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = talloc(MAX_PACKET_SIZE);
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
@@ -1694,7 +1692,7 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
 
 transmit_dhcp_decline :: (net: *Network_Connection) {
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = talloc(MAX_PACKET_SIZE);
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
@@ -1736,7 +1734,7 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
 transmit_dhcp_request :: (net: *Network_Connection) {
 
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = talloc(MAX_PACKET_SIZE);
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
@@ -1831,9 +1829,7 @@ handle_icmp_packet :: (net: *Network_Connection, eth: *Ethernet_Header) {
 
 transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
     packet: Network_Packet;
-
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-    defer free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+    packet.data = New(Icmp_Packet,, temp);
 
     using pong: Icmp_Packet;
 
@@ -1864,12 +1860,11 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
     icmp.checksum = internet_checksum(icmp);
 
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = New(Icmp_Packet,, temp);
 
     add_to_packet(*packet, ping);
 
-    success := i8254x_transmit_packet(*net.adapter, packet);
-    if !success bluescreen();
+    i8254x_transmit_packet(*net.adapter, packet);
 
     time := get_monotonic_time();
 
@@ -1902,7 +1897,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     // Todo: User thread version of this.
 
     packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.data = alloc(MAX_PACKET_SIZE);
 
     xid := cast,trunc(u16) random_get();
 
@@ -2207,6 +2202,7 @@ network_thread :: () {
             timeout = milliseconds_to_apollo(50);
         }
 
+
         for* net.tcp_connections {
             update_tcp_connection(it);
         }
@@ -2246,7 +2242,7 @@ network_thread :: () {
                 handle_icmp_packet(net, eth);
 
               case .UDP;
-                udp := cast(*Udp_Header) (ip + 1);
+        udp := cast(*Udp_Header) (ip + 1);
                 byte_swap_struct(udp);
 
                 if udp.destination_port == DHCP_CLIENT_PORT {
@@ -2267,7 +2263,7 @@ network_thread :: () {
                 log("UDP packet for port % unhandled.\n", udp.destination_port);
 
               case .TCP;
-                header := cast(*Tcp_Header) (ip + 1);
+        header := cast(*Tcp_Header) (ip + 1);
                 byte_swap_struct(header);
 
                 for* net.tcp_connections {
@@ -2279,7 +2275,7 @@ network_thread :: () {
 
                     receive_tcp_segment(it, header, bytes);
 
-                    continue packet;
+            continue packet;
                 }
 
                 log_error("Got TCP message for nonexistent connection on port %", header.destination_port);

@@ -354,7 +354,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
         log("Mapping BAR % to address %", bar, cast(*void)virtual);
     }
 
-    for 0..(bar.limit-1) / 4096 {
+    for 0..(bar.limit+4095) / 4096 {
         offset := it * 4096;
         map_page(virtual + offset, bar.base + offset, uncacheable_flags);
     }
@@ -789,11 +789,11 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // Allocate transmit descriptor queue.
         transmit_desc_buffer := get_4k_page();
 
-        nic.tx_queue.data = cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
+        nic.tx_queue.data = cast(*I8254x_Transmit_Descriptor) (transmit_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nic.tx_queue.count = 4096 / size_of(I8254x_Transmit_Descriptor);
 
-        nic.TDBAL__transmit_descriptor_base_low  = cast(u32, transmit_desc_buffer & 0xffff_ffff);
-        nic.TDBAH__transmit_descriptor_base_high = cast(u32, transmit_desc_buffer >> 32);
+        nic.TDBAL__transmit_descriptor_base_low  = cast(u32) (transmit_desc_buffer & 0xffff_ffff);
+        nic.TDBAH__transmit_descriptor_base_high = cast(u32) (transmit_desc_buffer >> 32);
 
         nic.TDLEN__transmit_descriptor_length = 4096;
 
@@ -832,27 +832,31 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         nic.rx_queue.data = cast(*I8254x_Receive_Descriptor) (receive_desc_buffer + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nic.rx_queue.count = 4096 / size_of(I8254x_Receive_Descriptor);
 
-        nic.RDBAL__receive_descriptor_base_low  = cast(u32, receive_desc_buffer & 0xffff_ffff);
-        nic.RDBAH__receive_descriptor_base_high = cast(u32, receive_desc_buffer >> 32);
+        nic.RDBAL__receive_descriptor_base_low  = cast(u32) (receive_desc_buffer & 0xffff_ffff);
+        nic.RDBAH__receive_descriptor_base_high = cast(u32) (receive_desc_buffer >> 32);
 
         nic.RDLEN__receive_descriptor_length = 4096;
+        nic.RDTR__receive_delay_timer_register = 0;
 
         nic.RCTL__receive_control =
-              .BSIZE0__buffer_size_bit_0
-            | .BSIZE1__buffer_size_bit_1
-            | .BSEX__buffer_size_extension
-            | .BAM__broadcast_accept_mode
+             .BAM__broadcast_accept_mode
+        // Clear all three size bits means 2048.
+        //  | .BSIZE0__buffer_size_bit_0
+        //  | .BSIZE1__buffer_size_bit_1
+        //  | .BSEX__buffer_size_extension
+        // Disable promiscuous mode.
         //  | .UPE__unicast_promiscuous
         //  | .MPE__multicast_promiscuous
             | .RDMTS1__minimum_threshold_1
             | .EN__enable;
 
+        base := allocate_large_page();
         for* nic.rx_queue {
-            it.buffer_address = get_4k_page();
+            it.buffer_address = base + cast(u64)it_index * 2048;
         }
 
         nic.RDH__receive_descriptor_head = 0;
-        nic.RDT__receive_descriptor_tail = cast(u32, nic.rx_queue.count-1);
+        nic.RDT__receive_descriptor_tail = cast(u32) (nic.rx_queue.count-1);
     }
 
     return nic;
@@ -866,7 +870,7 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
     for* packets_received {
         i8254_packet := *nic.rx_queue[nic.rx_queue_head];
 
-        it.data = cast(*void, i8254_packet.buffer_address + DIRECT_MAPPING_BASE);
+        it.data = cast(*void)i8254_packet.buffer_address + DIRECT_MAPPING_BASE;
         it.length = i8254_packet.length;
 
         nic.rx_queue_head += 1;
@@ -875,15 +879,8 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
     return packets_received;
 }
 
-i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet) -> bool {
+i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet, loc := #caller_location) {
     log_category("8254x");
-
-    if !packet.data || !packet.length {
-        log_error("Uninitialized packet: %", packet);
-        return false;
-    }
-
-    success := true;
 
     desc := *nic.tx_queue[nic.tx_queue_tail];
 
@@ -898,14 +895,11 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
 
     if Timeout(nic.TPT__total_packets_transmitted) {
         log_error("Failed to transmit network packet. (%)", desc.status);
-        success = false;
     }
 
     if desc.status > 1 { // I don't know why it's sometimes 0... we expect it to always be at least 1 after transmission due to the RS__report status flag.
         log("Transmit descriptor status: %", desc.status);
     }
-
-    return success;
 }
 
 

@@ -289,7 +289,8 @@ galois_multiply :: (x: i128, y: i128) -> i128 {
 
       csrc.nist.rip/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-spec.pdf
 
-      However this might be superseded by the PCLMULQDQ version from Intel below, since we already depend on the AES instruction set.
+      However this might be superseded by the PCLMULQDQ version from Intel below, since we already depend
+      on the AES instruction set.
 
     */
 
