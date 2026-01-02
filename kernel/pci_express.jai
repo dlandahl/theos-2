@@ -1,11 +1,6 @@
 
 #import "Bit_Array";
 
-Acpi_Mcfg :: struct {
-    using header: Acpi_Table_Header;
-    reserved: u64 #align 4;
-}
-
 Ecam_Entry :: struct {
     base_address: u64;
     segment_group: u16;
@@ -15,6 +10,26 @@ Ecam_Entry :: struct {
 }
 
 find_all_pci_devices :: () {
+    table: uacpi_table;
+    status := uacpi_table_find_by_signature(ACPI_MCFG_SIGNATURE, *table);
+    defer uacpi_table_unref(*table);
+
+    if status != .OK {
+        log_error("ACPI MCFG table not found.");
+        bluescreen();
+    }
+
+    mcfg_table := cast(*acpi_mcfg)table.hdr;
+
+    ecam_length_bytes := mcfg_table.hdr.length - size_of(acpi_mcfg);
+
+    ecam: [] Ecam_Entry;
+    ecam.data = cast(*Ecam_Entry) (mcfg_table + 1);
+    ecam.count = ecam_length_bytes / size_of(Ecam_Entry);
+
+    global.pci_ecam = ecam;
+
+
     reported_bus_issue := false;
 
     for global.pci_ecam {
@@ -49,29 +64,6 @@ find_all_pci_devices :: () {
             }
         }
     }
-
-    find_routing_table_under_bridge :: (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
-        node_info: *uacpi_namespace_node_info;
-        uacpi_get_namespace_node_info(node, *node_info);
-
-        routing: *uacpi_pci_routing_table;
-        uacpi_get_pci_routing_table(node, *routing);
-
-        entries := cast(*uacpi_pci_routing_table_entry) (routing + 1);
-
-        global.pci_routing_table.count = cast(s64) routing.num_entries;
-        global.pci_routing_table.data = entries;
-
-        return .BREAK;
-    }
-
-    uacpi_find_devices("PNP0A03", find_routing_table_under_bridge, null);
-
-    if global.pci_routing_table.data == null {
-        uacpi_find_devices("PNP0A08", find_routing_table_under_bridge, null);
-    }
-
-    assert(global.pci_routing_table.data != null);
 }
 
 pci_devices: [..] Pci_Device;

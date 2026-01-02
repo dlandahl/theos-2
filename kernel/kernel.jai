@@ -80,10 +80,7 @@ Kernel_Globals :: struct {
 
     small_objects: Small_Objects_Allocator;
 
-    root_acpi_table: *Acpi_Table_Header;
-    acpi_version: int;
     fadt: *acpi_fadt;
-
     uacpi_state: Uacpi_State;
 
     // Hardware requires 16 byte alignment on IDT
@@ -253,27 +250,20 @@ kernel_entry :: () #no_context {
             next_free_interrupt_gate = 32;
         }
 
-        rsdp := cast(*Acpi_Rsdp) boot_data.acpi_rsdp;
-        acpi_version = rsdp.revision;
-
-        assert(acpi_version == 0 || acpi_version == 2);
-
-        if acpi_version >= 2 {
-            root_acpi_table = xx (rsdp.xsdt_address + DIRECT_MAPPING_BASE);
-        } else {
-            root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
-        }
-
         text_drawing_state.font = parse_netpbm(font_file);
         text_drawing_state.font_loaded = true;
+
+        {
+            temporary_buffer := talloc(0x8000);
+            uacpi_setup_early_table_access(temporary_buffer, 0x8000);
+        }
 
         initialize_apic();
 
         initialize_hpet();
-        hpet_configure_timer(timer_index = 0, frequency = 10, true);
+        hpet_configure_timer(timer_index=0, frequency=10, periodic=true);
 
-
-        rtc_init();
+        initialize_rtc();
 
         // Get the time at the most recent second. Maybe we can use an interrupt to detect boot time more accurately.
         boot_calendar_time := rtc_get_calendar_time();
@@ -291,8 +281,8 @@ kernel_entry :: () #no_context {
         time := get_monotonic_system_time();
         random_seed(cast(S128)time);
 
-        initialize_uacpi();
         find_all_pci_devices();
+        initialize_uacpi();
 
         startup_application_processors();
 
@@ -1274,7 +1264,7 @@ allocate_small_object :: (size: int) -> *void {
         return null;
     }
 
-    bucket_index := bit_scan_reverse(cast(u64)size-1);
+    bucket_index := bit_scan_reverse(size-1);
     bucket_index = max(bucket_index - 5, 0); // This makes 32 bytes the smallest bucket.
 
     objects_size := cast(s16)(32 << bucket_index);
@@ -1304,7 +1294,7 @@ allocate_small_object :: (size: int) -> *void {
     // Find a slot within the page. First, check if there's a freelist slot.
     slot: *void;
 
-    if header.freelist != FREELIST_TAIL && false {
+    if header.freelist != FREELIST_TAIL {
         slot = objects_base + cast(int)header.freelist * objects_size;
         header.freelist = (.*) cast(*s16) slot;
     }
@@ -1318,7 +1308,6 @@ allocate_small_object :: (size: int) -> *void {
 
     // Remove the page from the page freelist when it's full.
     if header.total_objects == max_objects {
-        assert(false);
         page_freelist.* = header.page_freelist;
         header.page_freelist = null;
     }
@@ -1376,64 +1365,6 @@ free_small_object :: (address: *void) {
     }
 }
 
-
-Acpi_Rsdp :: struct {
-    signature: [8] u8;
-    checksum:      u8;
-    oem_id:    [6] u8;
-    revision:      u8;
-    rsdt_address:  u32;
-
-    length:        u32;
-    xsdt_address:  u64 #align 4;
-    checksum_2:    u8;
-    reserved:  [3] u8;
-}
-
-Acpi_Table_Header :: struct {
-    signature:    [4] u8;
-    length:           u32;
-    revision:         u8;
-    checksum:         u8;
-
-    oem_id:       [6] u8;
-    oem_table_id: [8] u8;
-    oem_revision:     u32;
-
-    creator_id:       u32;
-    creator_revision: u32;
-
-    // Note that this is only aligned to 4 bytes, so if you put this in a struct followed by a u64, it will be wrong.
-} #no_padding
-
-find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
-    table_size := global.root_acpi_table.length - size_of(Acpi_Table_Header);
-
-    pointer_size := cast(u64) ifx global.acpi_version then 8 else 4;
-    pointer_count := table_size / pointer_size;
-
-    table_base := cast(u64) (global.root_acpi_table + 1);
-
-    for table_index: 0..pointer_count - 1 {
-        offset := table_index * pointer_size + table_base;
-
-        physical_address: u64 = (.*) cast(*u32)offset;
-
-        if global.acpi_version {
-            physical_address = (.*) cast(*u64)offset;
-        }
-
-        header := cast(*Acpi_Table_Header) (physical_address + DIRECT_MAPPING_BASE);
-
-        for 0..3 if header.signature[it] != signature[it] {
-            continue table_index;
-        }
-
-        return header;
-    }
-
-    return null;
-}
 
 
 
@@ -1550,6 +1481,7 @@ irq_restore :: (was_enabled: bool) #no_context {
 
 // Things that have 'acquire' and 'release' procedures defined. For use with polymorphic type restrictions.
 Any_Lock :: Type.[MCS_Spinlock, Spinlock, Mutex];
+
 
 
 // Lock type (like "irqsave") is a property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better.

@@ -186,7 +186,7 @@ Rtc_Register :: enum u8 {
     // CENTURY may be somewhere here, as described by ACPI
 }
 
-rtc_init :: () {
+initialize_rtc :: () {
     _24H_CLOCK : u8 : 0x2;
     BCD_MODE   : u8 : 0x4;
 
@@ -264,16 +264,6 @@ rtc_get_calendar_time :: () -> Calendar_Time {
 
 // High precision event timer (HPET)
 
-Hpet_Acpi_Table :: struct {
-    #as header: Acpi_Table_Header;
-    hardware_revision: u8;
-    flags: u8;
-    vendor: u16;
-    address_space: enum u8 { MAIN_MEMORY :: 0; IO :: 1; };
-    stuff: [3] u8;
-    base_address: u64 #align 1;
-}
-
 Hpet_Register :: enum u64 {
     CAPABILITIES :: 0x0;
     CONFIG       :: 0x10;
@@ -336,21 +326,22 @@ HPET :: struct {
 initialize_hpet :: () {
     hpet := *global.high_precision_timer;
 
-    acpi_header := find_acpi_table("HPET");
+    {
+        table: uacpi_table;
+        status := uacpi_table_find_by_signature(ACPI_HPET_SIGNATURE, *table);
+        assert(status == .OK, "HPET is not available.");
 
-    if acpi_header == null {
-        log_error("HPET is not available");
-        bluescreen();
+        acpi_table := cast(*acpi_hpet)table.hdr;
+        assert(cast(uacpi_address_space)acpi_table.address.address_space_id == .SYSTEM_MEMORY);
+
+        virtual := alloc_block(*global.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
+        map_page(virtual, acpi_table.address.address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+
+        offset_in_page := acpi_table.address.address % 0x1000;
+        hpet.base_address = xx (virtual + offset_in_page);
+
+        uacpi_table_unref(*table);
     }
-
-    acpi_table := cast(*Hpet_Acpi_Table) acpi_header;
-    assert(acpi_table.address_space == .MAIN_MEMORY);
-
-    virtual := alloc_block(*global.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-    map_page(virtual, acpi_table.base_address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
-
-    offset_in_page := acpi_table.base_address % 0x1000;
-    hpet.base_address = xx (virtual + offset_in_page);
 
     capabilities := cast(Hpet_Capability_Flags) read(Hpet_Register.CAPABILITIES);
 

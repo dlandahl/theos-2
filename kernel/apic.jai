@@ -1,11 +1,4 @@
 
-Acpi_Madt :: struct {
-    using #as header: Acpi_Table_Header;
-
-    local_apic_address: u32;
-    flags: u32;
-}
-
 Interrupt_Controller_Structure :: struct {
     subtype: Subtype;
     length: u8;
@@ -101,9 +94,7 @@ initialize_apic :: () {
         out.8 0x21, ax;
         out.8 0xa1, ax;
     }
-
-    acpi_header := cast(*Acpi_Madt) find_acpi_table("APIC");
-
+    
     Apic_Base_Flags :: enum_flags {
         BSC__boot_strap_core :: 1 << 8;
         EXTD__2xapic_mode    :: 1 << 10;
@@ -155,9 +146,15 @@ initialize_apic :: () {
     // Iterate interrupt controller structures
     //
 
-    cursor := cast(u64) acpi_header + size_of(Acpi_Madt);
+    table: uacpi_table;
+    status := uacpi_table_find_by_signature(ACPI_MADT_SIGNATURE, *table);
+    assert(status == .OK, "Could not find Multiple Apic Description Table.");
 
-    while cursor < cast(u64) acpi_header + acpi_header.length {
+    madt_table := cast(*acpi_madt) table.hdr;
+
+    cursor := cast(u64) (madt_table + 1);
+
+    while cursor < cast(u64) madt_table + madt_table.hdr.length {
 
         ics := cast(*Interrupt_Controller_Structure) cursor;
         defer cursor += ics.length;
@@ -199,6 +196,8 @@ initialize_apic :: () {
             // Todo
         }
     }
+
+    uacpi_table_unref(*table);
 
     timer_gate := allocate_interrupt_gate();
     register_interrupt_gate(isr__scheduling_timer_interrupt, timer_gate);
@@ -469,23 +468,6 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
 
 initialize_uacpi :: () {
 
-    // Initializing PCI requires uACPI to get the PCI routing table, so this code needs to run first. But uACPI wants to access PCI devices while initializing, so they already need to be discoverable. Therefore this code is here for now, even though it doesn't really fit, I don't really want to make a separate function for it or have it in the entry point.
-
-    mcfg := cast(*Acpi_Mcfg) find_acpi_table("MCFG");
-    if !mcfg {
-        log_error("ACPI MCFG table not found.");
-        bluescreen();
-    }
-
-    ecam_length_bytes := mcfg.length - size_of(Acpi_Mcfg);
-
-    ecam: [] Ecam_Entry;
-    ecam.data = cast(*Ecam_Entry, mcfg + 1);
-    ecam.count = ecam_length_bytes / size_of(Ecam_Entry);
-
-    global.pci_ecam = ecam;
-
-
     // uACPI uses thread local storage.
     tls := get_4k_page() + DIRECT_MAPPING_BASE;
     #asm FSGSBASE { wrfsbase tls; }
@@ -518,6 +500,29 @@ initialize_uacpi :: () {
     // Note: according to uACPI kernel_api.h, work items should be done on CPU0 due to firmware bugs.
     cpu0 := *global.processor_cores[0];
     put_task_on_core(uacpi.work_thread, cpu0);
+
+    find_routing_table_under_bridge :: (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
+        node_info: *uacpi_namespace_node_info;
+        uacpi_get_namespace_node_info(node, *node_info);
+
+        routing: *uacpi_pci_routing_table;
+        uacpi_get_pci_routing_table(node, *routing);
+
+        entries := cast(*uacpi_pci_routing_table_entry) (routing + 1);
+
+        global.pci_routing_table.count = cast(s64) routing.num_entries;
+        global.pci_routing_table.data = entries;
+
+        return .BREAK;
+    }
+
+    uacpi_find_devices("PNP0A03", find_routing_table_under_bridge, null);
+
+    if global.pci_routing_table.data == null {
+        uacpi_find_devices("PNP0A08", find_routing_table_under_bridge, null);
+    }
+
+    assert(global.pci_routing_table.data != null);
 }
 
 //
@@ -601,8 +606,7 @@ uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi
 
 #program_export
 uacpi_kernel_io_unmap :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_io_unmap\"\n");
-    bluescreen();
+    // Nothing to do.
 }
 
 #program_export
