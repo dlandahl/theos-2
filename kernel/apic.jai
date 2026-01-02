@@ -290,6 +290,15 @@ get_current_core :: inline () -> *X64_Core #no_context {
     return core;
 }
 
+get_core_id :: () -> int #no_context {
+    if !global.multiprocessing_initialized {
+        return 0; // This is valid, if we haven't started multiprocessing then we know we're on core 0.
+    }
+
+    offset := offset_of(X64_Core, "id");
+    return cast(int)gs_relative_read(offset);
+}
+
 gs_relative_read  :: (offset: int) -> u64 #foreign Assembly;
 gs_relative_write :: (offset: int) -> u64 #foreign Assembly;
 gs_relative_inc   :: (offset: int) -> u64 #foreign Assembly;
@@ -324,9 +333,8 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, entry: 
 DEFAULT_ISA_FAULT_HANDLER :: #string END
 #program_export
 default_isa_fault_handler_%1 :: (stack: *void) #c_call {
-    core := get_current_core();
-    Scoped_Acquire(*global.text_output_spinlock);
 
+    core := get_current_core();
     write_string("Something bad happened (%1) on core ");
     write_number(core.id);
     write_string(" running thread ");
@@ -340,8 +348,6 @@ END;
 #program_export
 debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
     push_context {
-
-        Scoped_Acquire(*global.text_output_spinlock);
 
         core := get_current_core();
         task := core.scheduler.current_task;
@@ -381,8 +387,6 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
         context.print_style.default_format_struct.use_newlines_if_long_form = true;
         context.print_style.default_format_int.base = 16;
 
-        Scoped_Acquire(*global.text_output_spinlock);
-
         print("\nBreakpoint hit. Context:\n%", stack.*);
     }
 
@@ -392,8 +396,6 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
 #program_export
 page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     push_context,defer_pop;
-
-    Scoped_Acquire(*global.text_output_spinlock);
 
     core := get_current_core();
     task := core.scheduler.current_task;
@@ -431,7 +433,6 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = true)) #c_call {
     push_context {
-        Scoped_Acquire(*global.text_output_spinlock);
 
         core := get_current_core();
         task := core.scheduler.current_task;
@@ -460,6 +461,7 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
         index       :=            bitfield_get(selector_error, .selector_index);
 
         print("Error code: external=%, table=%, index=% (0x%)\n", is_external, table_names[table], formatInt(index, base=10), index);
+
         bluescreen();
     }
 } @InterruptRoutineWithErrorCode

@@ -125,10 +125,16 @@ Kernel_Globals :: struct {
         font_loaded: bool;
     }
 
+    // For low level string formatting when allocators are not available (early in boot, IRQ handler, or reporting memory management bugs.)
+    /* string_buffering: struct {
+        active: Spinlock(.IRQ);
+        buffer: [1000]u8;
+        cursor: int;
+        core_id: int;
+    } */
+
     COM1: Serial_Port(0x3f8); // Used for writing to log files and the host console on VirtualBox and QEMU.
     COM2: Serial_Port(0x2f8); // Used for writing trace data.
-
-    text_output_spinlock: Recursive_Spinlock; // Used to prevent multiple calls to write_string from different cores becoming interleaved.
 
     network_connection: Network_Connection;
 
@@ -485,7 +491,6 @@ set_global_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
 
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        acquire(*global.text_output_spinlock);
 
         write_string("Assertion failure");
         if message.count {
@@ -494,13 +499,10 @@ set_global_context_callbacks :: () #no_context {
         write_string("\n");
 
         bluescreen(location);
-
-        release(*global.text_output_spinlock);
         return true;
     };
 
     kernel_default_logger = (message: string, data: *void, info: Log_Info) {
-        Scoped_Acquire(*global.text_output_spinlock);
 
         if context.log_category {
             write_string("[");
@@ -682,7 +684,6 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 bluescreen :: (loc := #caller_location) #no_context {
-    irq_disable();
 
     write_string("\nBluescreen!\n");
 
@@ -711,20 +712,6 @@ bluescreen :: (loc := #caller_location) #no_context {
         write_string("\n");
     }
 
-    if false {
-        // Temporary hack to make debugging easier. If one core dies and leaks
-        // the serial port spinlock, other CPU cores should still be able to
-        // keep running.
-
-        lock := *global.text_output_spinlock;
-        core := get_current_core();
-
-        if is_held(lock.lock) && lock.held_by_core == core.id {
-            lock.recursion_count = 0;
-            release(lock);
-        }
-    }
-
     using global.framebuffer;
 
     for y: 0..y_resolution-1 {
@@ -748,7 +735,7 @@ Large_Page_Allocator :: struct {
     lru_least: s32;
     lru_most:  s32;
 
-    spinlock: Recursive_Spinlock;
+    spinlock: Spinlock;
 }
 
 allocate_large_page :: () -> u64 #no_context {
@@ -805,8 +792,6 @@ release_large_page :: (address: u64) {
 
 find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     using global;
-
-    Scoped_Acquire(*large_page_allocator.spinlock);
 
     block_index := disk_address / 0x20_0000;
     block_hash  := block_index % cast(u64) large_pages.count;
@@ -1403,8 +1388,42 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
     }
 }
 
+
+/*
+// These are to stop multiple calls to write_string from different cores being interleaved, when we can't use dynamic memory for string formatting.
+start_write_string_buffering :: () #no_context #expand {
+    buffering := *global.string_buffering;
+
+    acquire(*buffering.active);
+
+    buffering.core_id = get_core_id();
+    buffering.cursor  = 0;
+}
+
+finish_write_string_buffering :: () #no_context {
+    buffering := *global.string_buffering;
+
+    text: string;
+    text.data = buffering.buffer.data;
+    text.count = buffering.cursor;
+
+    buffering.core_id = -1; // Core ID needs to be invalid before we release the lock, to prevent a race.
+    release(*buffering.active);
+
+    kernel_write_string(text);
+}
+*/
+
 kernel_write_string :: (text: string) #no_context {
-    Scoped_Acquire(*global.text_output_spinlock);
+
+    /*{
+        using global.string_buffering;
+
+        if is_held(active) && get_core_id() == core_id { // Todo: This is a race. Core ID comparison needs to be made atomic.
+            memcpy(buffer.data + cursor, text.data, text.count);
+            return;
+        }
+    }*/
 
     serial_out(text, *global.COM1);
     draw_text(text);
@@ -1437,31 +1456,13 @@ preempt_disable :: () -> int #no_context {
     offset := offset_of(X64_Core, "preempt_disable_count");
     gs_relative_inc(offset);
 
-    /*
-    if global.multiprocessing_initialized {
-        return get_current_core().preempt_disable_count;
-    }
-    */
-
     return 0;
 }
 
 preempt_restore :: (expected: int, loc := #caller_location) #no_context {
-    /*
-    if global.multiprocessing_initialized {
-        core := get_current_core();
-
-        if core.preempt_disable_count != expected {
-            bluescreen(loc);
-        }
-    }
-    */
-
     offset := offset_of(X64_Core, "preempt_disable_count");
     gs_relative_dec(offset);
 }
-
-
 
 get_rflags :: () -> X64_Flags #foreign Assembly;
 
@@ -1580,69 +1581,6 @@ release :: (lock: *MCS_Spinlock, irq_state: bool) #no_context {
     }
 
     my_node.next.blocked = false;
-}
-
-
-
-// Todo: Maybe it would be better to get rid of this, and rewrite the code to not require recursive spinlocks.
-
-Recursive_Spinlock :: struct {
-    lock: Spinlock(.RAW);
-
-    held_by_core: int = -1;
-    recursion_count: int;
-    irq_state: bool;
-}
-
-acquire :: (lock: *Recursive_Spinlock) #no_context {
-
-    irq_state := irq_disable();
-    core_id := 0;
-
-    if global.multiprocessing_initialized {
-        core := get_current_core();
-        core_id = core.id;
-    } else {
-        // If it's too early in boot for multiprocessing to be enabled, core_id can remain zero to indicate the bootstrap core.
-    }
-
-    if is_held(lock.lock) && lock.held_by_core == core_id {
-        lock.recursion_count += 1;
-        return;
-    }
-
-    acquire(*lock.lock);
-    lock.held_by_core = core_id;
-    lock.irq_state = irq_state;
-}
-
-release :: (lock: *Recursive_Spinlock) #no_context {
-
-    core_id := 0;
-
-    if global.multiprocessing_initialized {
-        core := get_current_core();
-        core_id = core.id;
-    } else {
-        // If it's too early in boot for multiprocessing to be enabled, core_id can remain zero to indicate the bootstrap core.
-    }
-
-    if lock.held_by_core != core_id bluescreen();
-
-    if lock.recursion_count > 0 {
-        lock.recursion_count -= 1;
-        return;
-    }
-
-    lock.held_by_core = -1; // Prevent a race due to acquiring the lock, then setting held_by_core immediately afterwards.
-    release(*lock.lock);
-
-    irq_restore(lock.irq_state);
-}
-
-Scoped_Acquire :: (lock: *Recursive_Spinlock) #expand {
-    acquire(lock);
-    `defer release(lock);
 }
 
 
@@ -2012,10 +1950,4 @@ fill_random :: (buffer: []u8) {
     for 0..remainder-1 {
         buffer[buffer.count-remainder + it] = xx random_get();
     }
-}
-
-
-
-Slab :: struct {
-
 }
