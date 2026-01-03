@@ -125,14 +125,6 @@ Kernel_Globals :: struct {
         font_loaded: bool;
     }
 
-    // For low level string formatting when allocators are not available (early in boot, IRQ handler, or reporting memory management bugs.)
-    /* string_buffering: struct {
-        active: Spinlock(.IRQ);
-        buffer: [1000]u8;
-        cursor: int;
-        core_id: int;
-    } */
-
     COM1: Serial_Port(0x3f8); // Used for writing to log files and the host console on VirtualBox and QEMU.
     COM2: Serial_Port(0x2f8); // Used for writing trace data.
 
@@ -141,7 +133,9 @@ Kernel_Globals :: struct {
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
-    first_context: *#Context; // To have access to calls stacks early in boot.
+    pci_devices: [..] Pci_Device;
+
+    first_context: *#Context; // To have access to call stacks early in boot.
 }
 
 global: Kernel_Globals;
@@ -150,27 +144,25 @@ Assembly :: #library,no_dll "../.build/assembly";
 
 #program_export
 kernel_entry :: () #no_context {
-    using global;
 
     write_string_callback = kernel_write_string;
-
     set_global_context_callbacks();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
-    boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
+    global.boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
     // Used for AP bootstrap.
-    large_pages[0].state = .RESERVED;
+    global.large_pages[0].state = .RESERVED;
 
     memory_map_index: int;
-    for* page, page_index: large_pages {
+    for* page, page_index: global.large_pages {
 
         page_base  := page_index * 0x20_0000;
         page_limit := page_base  + 0x20_0000;
 
-        for memory_map_index..memory_map_entries_used-1 {
+        for memory_map_index..global.memory_map_entries_used-1 {
 
-            region := memory_map[it];
+            region := global.memory_map[it];
             region_limit := region.pages * 4096 + region.address;
 
             if region_limit <= cast(u64) page_base {
@@ -192,16 +184,16 @@ kernel_entry :: () #no_context {
     }
 
 
-    large_page_allocator.freelist = FREELIST_TAIL;
-    large_page_allocator.lru_least = LRU_TAIL;
-    large_page_allocator.lru_most  = LRU_TAIL;
+    global.large_page_allocator.freelist = FREELIST_TAIL;
+    global.large_page_allocator.lru_least = LRU_TAIL;
+    global.large_page_allocator.lru_most  = LRU_TAIL;
 
     // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
     init_tracing();
 
     // Todo: hardcoded.
 
-    for region: memory_map {
+    for region: global.memory_map {
         if !it_index continue;
         region_size := region.pages * 4096;
 
@@ -209,15 +201,15 @@ kernel_entry :: () #no_context {
             first_page := region.address / 0x20_0000;
 
             for first_page..first_page+32 {
-                large_pages[it].state = .RESERVED;
+                global.large_pages[it].state = .RESERVED;
             }
 
-            init_block_allocator(*physical_block_allocator, region.address, 0x200_0000, 0x10);
+            init_block_allocator(*global.physical_block_allocator, region.address, 0x200_0000, 0x10);
             break;
         }
     }
 
-    if physical_block_allocator.base_address == 0 {
+    if global.physical_block_allocator.base_address == 0 {
         write_string("Could not find enough memory for the kernel...\n");
         while true #asm { cli; hlt; }
     }
@@ -226,7 +218,7 @@ kernel_entry :: () #no_context {
     push_context {
         global.first_context = *context;
 
-        using framebuffer;
+        using global.framebuffer;
 
         for y: 0..y_resolution-1 {
             for x: 0..x_resolution-1 {
@@ -241,23 +233,23 @@ kernel_entry :: () #no_context {
         {
             // Put a virtual memory heap after the direct mapping.
             GB :: 0x4000_0000;
-            direct_mapping_size := cast(u64) boot_data.page_tables.direct_pd.count * GB;
+            direct_mapping_size := cast(u64) global.page_tables.direct_pd.count * GB;
 
             heap_base: u64 = DIRECT_MAPPING_BASE + direct_mapping_size;
             heap_size: u64 = 64 * GB;
 
             // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
-            init_block_allocator(*virtual_block_allocator, heap_base, heap_size, alignment=4096);
+            init_block_allocator(*global.virtual_block_allocator, heap_base, heap_size, alignment=4096);
         }
 
         {
             // Sequentially allocating interrupt gates, starting after the ISA exceptions
-            memset(interrupt_descriptor_table.data, 0, size_of(type_of(interrupt_descriptor_table)));
-            next_free_interrupt_gate = 32;
+            memset(global.interrupt_descriptor_table.data, 0, size_of(type_of(global.interrupt_descriptor_table)));
+            global.next_free_interrupt_gate = 32;
         }
 
-        text_drawing_state.font = parse_netpbm(font_file);
-        text_drawing_state.font_loaded = true;
+        global.text_drawing_state.font = parse_netpbm(font_file);
+        global.text_drawing_state.font_loaded = true;
 
         {
             temporary_buffer := talloc(0x8000);
@@ -275,7 +267,7 @@ kernel_entry :: () #no_context {
         boot_calendar_time := rtc_get_calendar_time();
 
         // Don't use Basic.calendar_to_apollo, because it's OS specific
-        boot_time = native_calendar_to_apollo(boot_calendar_time);
+        global.boot_time = native_calendar_to_apollo(boot_calendar_time);
 
         initialize_tsc();
 
@@ -292,11 +284,11 @@ kernel_entry :: () #no_context {
 
         startup_application_processors();
 
-        for *core: processor_cores {
+        for *core: global.processor_cores {
             while !core.online pause();
         }
 
-        for* pci_devices {
+        for* global.pci_devices {
 
             if false if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
@@ -398,7 +390,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: false;
+    USE_DNS :: true;
 
     log_category("Test");
 
@@ -422,14 +414,14 @@ network_test :: () {
         for 1..100 {
             // Usually works the first time unless network is bad.
 
-            dns_query := transmit_dns_query(net, "discord.com");
+            dns_query := transmit_dns_query(net, "thinkpad");
 
             if Timeout(dns_query.complete, 1000) {
                 continue;
             }
 
             ip_address = dns_query.answer;
-            port = 443;
+            // port = 443;
             break;
         }
     }
@@ -447,7 +439,7 @@ network_test :: () {
 
     tls_transmit_application_data(*tls, request);
 
-    for 1..2 {
+    for 1..3 {
         response := tls_receive_application_data(*tls);
         log("Got HTTPS response: %", response);
     }
@@ -730,6 +722,7 @@ bluescreen :: (loc := #caller_location) #no_context {
 
 Large_Page_Allocator :: struct {
     max_large_page_used: int;
+
     freelist: int;
 
     lru_least: s32;
@@ -784,7 +777,13 @@ allocate_large_page :: () -> u64 #no_context {
 }
 
 release_large_page :: (address: u64) {
-    // Todo.
+    using global;
+
+    Scoped_Acquire(*large_page_allocator.spinlock);
+
+    index := cast(s32)(address / 0x20_0000);
+    large_pages[index].freelist = cast(s32)large_page_allocator.freelist;
+    large_page_allocator.freelist = index;
 }
 
 // These procs do a lot of hardcoded linked-list manipulation. It would be good to
@@ -1208,6 +1207,7 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
 
 Small_Objects_Allocator :: struct {
     #as using allocator: Allocator; // So we can use it with ,,
+    allocator.proc = small_objects_allocator_proc;
 
     PAGE_SIZE :: 0x20_0000; // Using 2 meg pages because they're very quick and easy to allocate in this OS, because it's the lowest level physical allocation granularity. I would prefer 64K, but 2MB physical granularity was chosen because it's an architectural page size so can be mapped to virtual memory in one go. That fact isn't relevant to this allocator and isn't made use of anywhere else yet either, so maybe I will change it. Also, 2MB pages can be addressed using s32, since that can reach 4000 terabytes (not enough for disk but enough for RAM.)
 
@@ -1222,21 +1222,21 @@ Small_Objects_Allocator :: struct {
     bucket_freelists: [8] *Page_Metadata;
 
     lock: Spinlock;
+}
 
-    allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-        if mode == {
-          case .RESIZE;
-            assert(false, "Trying to resize a small object.");
+small_objects_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    if mode == {
+        case .RESIZE;
+        assert(false, "Trying to resize a small object.");
 
-          case .ALLOCATE;
-            return allocate_small_object(size);
+        case .ALLOCATE;
+        return allocate_small_object(size);
 
-          case .FREE;
-            free_small_object(old_memory);
-        }
-
-        return null;
+        case .FREE;
+        free_small_object(old_memory);
     }
+
+    return null;
 }
 
 allocate_small_object :: (size: int) -> *void {
@@ -1358,8 +1358,7 @@ Serial_Port :: struct (base_address: u16) {
 }
 
 serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
-
-    Scoped_Acquire(*spinlock);
+    acquire(*spinlock);
 
     for data {
         for 1..10_0000 {
@@ -1386,45 +1385,13 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
             out.b port, byte;
         }
     }
+
+    release(*spinlock);
 }
 
 
-/*
-// These are to stop multiple calls to write_string from different cores being interleaved, when we can't use dynamic memory for string formatting.
-start_write_string_buffering :: () #no_context #expand {
-    buffering := *global.string_buffering;
-
-    acquire(*buffering.active);
-
-    buffering.core_id = get_core_id();
-    buffering.cursor  = 0;
-}
-
-finish_write_string_buffering :: () #no_context {
-    buffering := *global.string_buffering;
-
-    text: string;
-    text.data = buffering.buffer.data;
-    text.count = buffering.cursor;
-
-    buffering.core_id = -1; // Core ID needs to be invalid before we release the lock, to prevent a race.
-    release(*buffering.active);
-
-    kernel_write_string(text);
-}
-*/
 
 kernel_write_string :: (text: string) #no_context {
-
-    /*{
-        using global.string_buffering;
-
-        if is_held(active) && get_core_id() == core_id { // Todo: This is a race. Core ID comparison needs to be made atomic.
-            memcpy(buffer.data + cursor, text.data, text.count);
-            return;
-        }
-    }*/
-
     serial_out(text, *global.COM1);
     draw_text(text);
 }

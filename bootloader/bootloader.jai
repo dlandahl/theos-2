@@ -28,6 +28,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data.* = .{};
 
 
+        TOP_2_GB : u64 : 0xffff_ffff_8000_0000;
+
         KERNEL_EXE_LARGE_PAGES :: 8;
         kernel_base: *void;
 
@@ -185,33 +187,46 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             PAGE_READ_WRITE : u64 : 0x2;
             PAGE_SIZE       : u64 : 0x80;
 
-            pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
-            boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
-            boot_pd[0]   = cast(u64) boot_pt.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+            {
+                pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+                boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+                boot_pd[0]   = cast(u64) boot_pt.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
-            // Low memory where the bootloader is loaded
-            boot_pd[1] = 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[2] = 0x40_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[3] = 0x60_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                // Low memory where the bootloader is loaded.
 
-            boot_pt[0] = 0;
-            for 1..511 {
-                boot_pt[it] = (4096 * cast(u64) it) | PAGE_PRESENT | PAGE_READ_WRITE;
+                boot_pt[0] = 0; // Trap null pointers. Todo: Should make this guard region much bigger, but we can't until later in boot, because low memory is used by the bootloader and AP startup.
+                for 1..511 {
+                    boot_pt[it] = (4096 * cast(u64) it) | PAGE_PRESENT | PAGE_READ_WRITE;
+                }
+                boot_pd[1] = 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                boot_pd[2] = 0x40_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                boot_pd[3] = 0x60_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
-            virtual_base : u64 : 0xffff_ffff_8000_0000;
-            pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
-            pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+            {
+                // 16Mb memory within the top two gigabytes, for the loaded kernel executable. The linker script specifies that this is where the loaded kernel executable should be placed.
 
-            // 16Mb memory within the top two gigabytes, for the loaded kernel executable. The linker script specifies that this is where the loaded kernel executable should be placed.
-            // Todo: these page directory indices are hardcoded in a few places below.
-            // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
-            for 0..KERNEL_EXE_LARGE_PAGES-1 {
-                address := cast(u64) kernel_base + cast(u64) it * 0x20_0000;
-                pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+                pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+
+                // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
+                for 0..KERNEL_EXE_LARGE_PAGES-1 {
+                    address := cast(u64) kernel_base + cast(u64) it * 0x20_0000;
+                    pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                }
+
+                offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
+
+                // Map the framebuffer after where the kernel executable will be loaded. 32MB should support a 4k framebuffer. Todo: enable write combining for this memory.
+                for 0..16 {
+                    pd[KERNEL_EXE_LARGE_PAGES + it] = (cast(u64) boot_data.framebuffer.buffer - offset + cast(u64)it*0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                }
+
+                // Translate framebuffer address to virtual.
+                boot_data.framebuffer.buffer = cast(*u32) (TOP_2_GB + KERNEL_EXE_LARGE_PAGES*0x20_0000 + offset);
             }
 
-            // Direct-map all physical memory to the bottom of kernel memory
+            // Direct-map all physical memory to the bottom of kernel memory.
             pml4[0x100] = cast(u64) direct_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
 
             for pd: 0..direct_pd.count-1 {
@@ -223,41 +238,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
             }
 
-            offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
+            // Translate load buffer address to virtual.
+            load_buffer += DIRECT_MAPPING_BASE;
 
-            // Map the framebuffer. Todo: enable write combining for this memory
-            pd[8]  = (cast(u64) boot_data.framebuffer.buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[9]  = (cast(u64) boot_data.framebuffer.buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[10] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x40_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[11] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x60_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-
-            // Translate framebuffer address to virtual
-            boot_data.framebuffer.buffer = cast(*u32) (virtual_base + 8*0x20_0000 + offset);
-
-
-            // Map load_buffer, which contains the kernel ELF file, to be loaded into high virtual memory later.
-            offset = cast(u64) load_buffer & 0x1fffff;
-
-            pd[12] = (cast(u64) load_buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[13] = (cast(u64) load_buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[14] = (cast(u64) load_buffer - offset + 0x40_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-
-            // Translate load buffer address to virtual. Todo: Could we just use the direct mapping for this.
-            load_buffer = cast(*void) (virtual_base + 12*0x20_0000 + offset);
-
-
-            // Map the page frame descriptors
-            page_directories_needed := (boot_data.large_pages.count * size_of(Large_Page)) / (0x20_0000) + 2;
-            offset = cast(u64) boot_data.large_pages.data & 0x1fffff;
-
-            for 0..page_directories_needed-1 {
-                base := cast(u64) boot_data.large_pages.data - offset + cast(u64) it * 0x20_0000;
-                pd[15 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            }
-
-            // Translate page frame descriptor array address to virtual
-            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 15*0x20_0000 + offset);
-            boot_data.page_directories_used = 15 + page_directories_needed;
+            // Translate page frame descriptor array address to virtual.
+            boot_data.large_pages.data = cast(*void)boot_data.large_pages.data + DIRECT_MAPPING_BASE;
         }
 
         mmap_key = 0;
@@ -370,7 +355,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         serial_out("Switching address space...\n");
 
         page_table  := cast(u64)   boot_data.page_tables.pml4.data;
-        stack_base  := cast(*void) 0xffffffff80000000 + KERNEL_EXE_LARGE_PAGES * 0x20_0000;
+        stack_base  := cast(*void) TOP_2_GB + KERNEL_EXE_LARGE_PAGES * 0x20_0000;
         entry_point := cast(*void) new_address_space_start;
 
         switch_address_space := cast((*void, u64, *void) #c_call) switch_address_space_code.data;

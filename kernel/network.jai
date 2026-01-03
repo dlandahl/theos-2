@@ -615,7 +615,7 @@ update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
     // Maybe it would be easier to write this simply, by doing a switch statement over the current handshake state, and responding to the flags in each case statement.
 
     if segment.flags == .SYN | .ACK {
-        // In theory SYN-ACK are allowed to be separate segments but it isn't done in practice.
+        // By the letter of the spec SYN-ACK are allowed to be separate segments but it isn't done in practice.
 
         if tcp.handshake_state != .SYN_SENT {
             log_error("Unexpected SYN-ACK.");

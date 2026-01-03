@@ -44,7 +44,7 @@ find_all_pci_devices :: () {
                     reported_bus_issue = true;
                 }
 
-                new_device := array_add(*pci_devices);
+                new_device := array_add(*global.pci_devices);
                 new_device.configuration_space = header;
                 new_device.bus_address = .{bus, device.(u8), 0};
 
@@ -57,7 +57,7 @@ find_all_pci_devices :: () {
                     header = read_configuration_space(it.base_address, bus, device, function);
                     if !header continue;
 
-                    new_device := array_add(*pci_devices);
+                    new_device := array_add(*global.pci_devices);
                     new_device.configuration_space = header;
                     new_device.bus_address = .{bus, device.(u8), function.(u8)};
                 }
@@ -65,8 +65,6 @@ find_all_pci_devices :: () {
         }
     }
 }
-
-pci_devices: [..] Pci_Device;
 
 Pci_Device :: struct {
     using configuration_space: *Pci_Configuration_Space;
@@ -834,7 +832,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         nic.RDTR__receive_delay_timer_register = 0;
 
         nic.RCTL__receive_control =
-             .BAM__broadcast_accept_mode
+              .BAM__broadcast_accept_mode
         // Clear all three size bits means 2048.
         //  | .BSIZE0__buffer_size_bit_0
         //  | .BSIZE1__buffer_size_bit_1
@@ -1099,9 +1097,9 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     parse_pci_capability_list(device);
 
-    // enabled := enable_msi_or_msi_x(device, isr__nvme_interrupt);
-    // assert(enabled == .MSI_X);
-    register_legacy_pci_interrupt(device, isr__nvme_interrupt);
+    enabled := enable_msi_or_msi_x(device, isr__nvme_interrupt);
+    assert(enabled == .MSI_X);
+    // register_legacy_pci_interrupt(device, isr__nvme_interrupt);
 
     // Mask out the admin queue interrupt. Just spin on the phase bit for now
     // device.msi_x_table[0].vector_control |= .MASK;
