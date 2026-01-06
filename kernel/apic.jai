@@ -531,7 +531,7 @@ initialize_uacpi :: () {
 // Implement the uACPI kernel API callbacks
 //
 
-Uacpi_State :: struct {
+uACPI_State :: struct {
     first_irq_handler_gate_index: int;
 
     irq_contexts: [8] struct {
@@ -615,6 +615,7 @@ uacpi_kernel_io_unmap :: () #c_call {
 uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
     push_context {
         memory := alloc_block(*global.virtual_block_allocator, cast(u64) len);
+ 
         pages_needed := len / 4096;
         if len % 4096 pages_needed += 1;
 

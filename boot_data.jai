@@ -62,7 +62,8 @@ Boot_Data :: struct {
 }
 
 Large_Page :: struct {
-    freelist: s32;
+    // Used for the free-list of unused physical pages, and the clear-list, index of the next page the be filled with zeros before it can be reused.
+    list_next: s32;
 
     state: enum u8 {
         FREE;
@@ -72,7 +73,6 @@ Large_Page :: struct {
     };
 
     // ------- Disk cache entry -------
-    // Todo: When we add swapping we can reuse the same members, since disk cache pages don't need to be swapped.
     more_recently_used: s32;
     less_recently_used: s32;
 

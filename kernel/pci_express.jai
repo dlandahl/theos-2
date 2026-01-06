@@ -347,7 +347,9 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
         log("Mapping BAR % to address %", bar, cast(*void)virtual);
     }
 
-    for 0..(bar.limit+4095) / 4096 {
+    pages_needed := (bar.limit + 4095) / 4096;
+
+    for 0..pages_needed-1 {
         offset := it * 4096;
         map_page(virtual + offset, bar.base + offset, uncacheable_flags);
     }

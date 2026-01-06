@@ -62,7 +62,7 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
 }
 
 get_current_task :: () -> *Task_Info #no_context {
-    offset :: #run offset_of(X64_Core, "scheduler.current_task");
+    offset := offset_of(X64_Core, "scheduler.current_task");
     return cast(*Task_Info)gs_relative_read(offset);
 }
 
@@ -135,7 +135,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL, name := "", user_data: *void = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, name := "", user_data: *void = null) -> *Task_Info {
 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
@@ -165,7 +165,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     stack.flags = 0;
 
     new_task.rsp = stack;
-    new_task.xsave.mxcsr = mxcsr;
+    new_task.xsave.mxcsr = .MASK_ALL;
     new_task.entry_point = entry_point;
     new_task.name = name;
     new_task.user_data = user_data;
@@ -552,7 +552,7 @@ notify_all :: (using var: *Condition_Variable) {
     release(*lock);
 }
 
-wait_for :: (using var: *Condition_Variable, user_lock: *$T, timeout := INFINITE_TIMEOUT) -> bool {
+wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, timeout := INFINITE_TIMEOUT) -> bool {
     acquire(*lock);
 
     waiter: waiters.Node;
@@ -561,7 +561,7 @@ wait_for :: (using var: *Condition_Variable, user_lock: *$T, timeout := INFINITE
 
     release(*lock);
 
-    if user_lock release(user_lock);
+    release(user_lock);
 
     signalled := wait_for(*waiter.item, timeout);
     if !signalled {
@@ -569,14 +569,40 @@ wait_for :: (using var: *Condition_Variable, user_lock: *$T, timeout := INFINITE
         return false;
     }
 
-    if user_lock acquire(user_lock);
+    acquire(user_lock);
     return true;
 }
 
-wait_for :: (using var: *Condition_Variable, user_lock: *$T, $predicate: Code, timeout := INFINITE_TIMEOUT) -> bool {
+wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, $predicate: Code, timeout := INFINITE_TIMEOUT) -> bool #expand {
     while !(#insert predicate) {
         return wait_for(var, user_lock, timeout=timeout);
     }
+}
+
+
+
+Implicit_Lock_Condition_Variable :: struct (Lock: Type = Spinlock) {
+    // If you only need one cvar, and you supply both the state change and predicate as #code, the mutex doesn't need to be provided by the user code.
+    cvar: Condition_Variable;
+    user_lock: Lock;
+}
+
+wait_for_condition :: (var: *Implicit_Lock_Condition_Variable, $predicate: Code, timeout := INFINITE_TIMEOUT) -> bool #expand {
+    acquire(*var.user_lock);
+
+    result := wait_for(*var.cvar, *var.user_lock, predicate, timeout);
+
+    release(*var.user_lock);
+    return result;
+}
+
+fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Code) #expand {
+    acquire(*var.user_lock);
+
+    #insert state_change;
+    notify_all(*var.cvar);
+
+    release(*var.user_lock);
 }
 
 

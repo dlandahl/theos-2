@@ -81,7 +81,7 @@ Kernel_Globals :: struct {
     small_objects: Small_Objects_Allocator;
 
     fadt: *acpi_fadt;
-    uacpi_state: Uacpi_State;
+    uacpi_state: uACPI_State;
 
     // Hardware requires 16 byte alignment on IDT
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
@@ -146,7 +146,7 @@ Assembly :: #library,no_dll "../.build/assembly";
 kernel_entry :: () #no_context {
 
     write_string_callback = kernel_write_string;
-    set_global_context_callbacks();
+    set_default_context_callbacks();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     global.boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
@@ -184,7 +184,8 @@ kernel_entry :: () #no_context {
     }
 
 
-    global.large_page_allocator.freelist = FREELIST_TAIL;
+    global.large_page_allocator.freelist  = FREELIST_TAIL;
+    global.large_page_allocator.clearlist = FREELIST_TAIL;
     global.large_page_allocator.lru_least = LRU_TAIL;
     global.large_page_allocator.lru_most  = LRU_TAIL;
 
@@ -288,9 +289,8 @@ kernel_entry :: () #no_context {
             while !core.online pause();
         }
 
-        for* global.pci_devices {
-
-            if false if it.class_code == .MASS_STORAGE {
+        for *global.pci_devices {
+            if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
                     case 0x8; init_nvme_controller(it);
                     case 0x6; init_ahci_controller(it);
@@ -310,7 +310,6 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
-        for 1..200 get_4k_page();
         // user_mode_stress_test();
         // semaphore_test();
         network_test();
@@ -402,8 +401,8 @@ network_test :: () {
     task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
     put_task_on_core(task, *global.processor_cores[1]);
 
-    log("Waiting for DHCP handshake.");
-    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
+    log("Establishing DHCP connection.");
+    wait_until_connected_to_network(net);
 
     ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
     port: u16 = 4443;
@@ -418,6 +417,11 @@ network_test :: () {
 
             if Timeout(dns_query.complete, 1000) {
                 continue;
+            }
+
+            if dns_query.response != .NOERROR {
+                log("DNS Query failed with code %", dns_query.response);
+                return;
             }
 
             ip_address = dns_query.answer;
@@ -479,38 +483,44 @@ floating_point_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
     }
 } @InterruptRoutine
 
-set_global_context_callbacks :: () #no_context {
+set_default_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
 
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+        builder: String_Builder;
 
-        write_string("Assertion failure");
+        append(*builder, "Assertion failure");
         if message.count {
-            write_strings(": ", message);
+            append(*builder, ": ");
+            append(*builder, message);
         }
-        write_string("\n");
+        append(*builder, "\n");
 
+        write_builder(*builder);
         bluescreen(location);
         return true;
     };
 
     kernel_default_logger = (message: string, data: *void, info: Log_Info) {
+        builder: String_Builder;
 
         if context.log_category {
-            write_string("[");
-            write_string(context.log_category);
-            write_string("] ");
+            append(*builder, "[");
+            append(*builder, context.log_category);
+            append(*builder, "] ");
         }
 
         if info.common_flags & .ERROR {
-            write_string("ERROR: ");
+            append(*builder, "ERROR: ");
         }
 
-        write_string(message);
+        append(*builder, message);
 
         if message[message.count-1] != #char "\n" {
-            write_string("\n");
+            append(*builder, "\n");
         }
+
+        write_builder(*builder);
     }
 
     kernel_default_allocator_proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
@@ -724,6 +734,7 @@ Large_Page_Allocator :: struct {
     max_large_page_used: int;
 
     freelist: int;
+    clearlist: int;
 
     lru_least: s32;
     lru_most:  s32;
@@ -737,11 +748,12 @@ allocate_large_page :: () -> u64 #no_context {
     Scoped_Acquire(*spinlock);
 
     if freelist != FREELIST_TAIL {
+        // Todo: This memory needs to be zeroed, as there may be firmware/bootloader stuff there.
         address := freelist * 0x20_0000;
 
         desc := *global.large_pages[freelist];
         desc.state = .ALLOCATED;
-        freelist = desc.freelist;
+        freelist = desc.list_next;
 
         return cast(u64) address;
     }
@@ -779,11 +791,46 @@ allocate_large_page :: () -> u64 #no_context {
 release_large_page :: (address: u64) {
     using global;
 
-    Scoped_Acquire(*large_page_allocator.spinlock);
+    acquire(*large_page_allocator.spinlock);
 
     index := cast(s32)(address / 0x20_0000);
-    large_pages[index].freelist = cast(s32)large_page_allocator.freelist;
-    large_page_allocator.freelist = index;
+    large_pages[index].list_next = cast(s32)large_page_allocator.clearlist;
+    large_page_allocator.clearlist = index;
+
+    release(*large_page_allocator.spinlock);
+}
+
+clear_large_page :: () -> queue_empty: bool {
+    using global;
+
+    // De-queue large page from the clear list.
+    acquire(*large_page_allocator.spinlock);
+
+    page := large_page_allocator.clearlist;
+
+    if page == FREELIST_TAIL {
+        release(*large_page_allocator.spinlock);
+        return true;
+    }
+
+    large_page_allocator.clearlist = large_pages[page].list_next;
+
+    release(*large_page_allocator.spinlock);
+
+    // Clear the page.
+    address := cast(u64)page * 0x20_0000;
+    address += DIRECT_MAPPING_BASE;
+
+    memset(cast(*void)address, 0, 0x20_0000);
+
+    // En-queue to the free list.
+    acquire(*large_page_allocator.spinlock);
+
+    large_pages[page].list_next = cast(s32)large_page_allocator.freelist;
+    large_page_allocator.freelist = page;
+
+    release(*large_page_allocator.spinlock);
+    return false;
 }
 
 // These procs do a lot of hardcoded linked-list manipulation. It would be good to
@@ -1110,7 +1157,9 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
                 blocks[it_index+1].used = false;
             }
 
-            return cast(u64, base_address + it.base);
+            allocated_address := cast(u64) (base_address + it.base);
+
+            return allocated_address;
         }
     }
 
@@ -1179,6 +1228,8 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
         bluescreen();
         return;
     }
+
+    assert(block.base == address - allocator.base_address);
 
     block.used = false;
 
@@ -1448,7 +1499,7 @@ irq_restore :: (was_enabled: bool) #no_context {
 
 
 // Things that have 'acquire' and 'release' procedures defined. For use with polymorphic type restrictions.
-Any_Lock :: Type.[MCS_Spinlock, Spinlock, Mutex];
+Any_Lock :: Type.[MCS_Spinlock, Spinlock(.RAW), Spinlock(.PREEMPT), Spinlock(.IRQ), Mutex];
 
 
 

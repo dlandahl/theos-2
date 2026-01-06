@@ -219,7 +219,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 // Map the framebuffer after where the kernel executable will be loaded. 32MB should support a 4k framebuffer. Todo: enable write combining for this memory.
                 for 0..16 {
-                    pd[KERNEL_EXE_LARGE_PAGES + it] = (cast(u64) boot_data.framebuffer.buffer - offset + cast(u64)it*0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                    address := cast(u64) boot_data.framebuffer.buffer - offset + cast(u64)it * 0x20_0000;
+                    pd[KERNEL_EXE_LARGE_PAGES + it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 }
 
                 // Translate framebuffer address to virtual.

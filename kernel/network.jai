@@ -431,7 +431,7 @@ blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIME
     return .{bytes, buffer};
 }
 
-blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool {
+blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool, written: int {
     cursor: int;
 
     while true {
@@ -442,11 +442,11 @@ blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TI
         if cursor == bytes.count break;
 
         if !wait_for(*tcp.out_data, timeout) {
-            return false;
+            return false, cursor;
         }
     }
 
-    return true;
+    return true, cursor;
 }
 
 tcp_flush :: (tcp: *Tcp_Connection) {
@@ -1163,20 +1163,22 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         cr := cast(string)client_random.bytes;
         sr := cast(string)server_random.bytes;
 
-        seed := join("master secret", cr, sr,, temp);
+        push_allocator(temp);
+
+        seed := join("master secret", cr, sr);
 
         a0 := seed;
         a1 := cast(string)hmac_sha256(premaster_secret, a0);
         a2 := cast(string)hmac_sha256(premaster_secret, a1);
-        p1 := cast(string)hmac_sha256(premaster_secret, join(a1, seed,, temp));
-        p2 := cast(string)hmac_sha256(premaster_secret, join(a2, seed,, temp));
+        p1 := cast(string)hmac_sha256(premaster_secret, join(a1, seed));
+        p2 := cast(string)hmac_sha256(premaster_secret, join(a2, seed));
 
         memcpy(Master_Secret.data,      p1.data, 32);
         memcpy(Master_Secret.data + 32, p2.data, 16);
 
         ms := cast(string)Master_Secret;
 
-        seed = join("key expansion", sr, cr,, temp);
+        seed = join("key expansion", sr, cr);
 
         a0  = seed;
         a1  = cast(string)hmac_sha256(ms, a0);
@@ -1184,12 +1186,12 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         a3 := cast(string)hmac_sha256(ms, a2);
         a4 := cast(string)hmac_sha256(ms, a3);
 
-        p1  = cast(string)hmac_sha256(ms, join(a1, seed,, temp));
-        p2  = cast(string)hmac_sha256(ms, join(a2, seed,, temp));
-        p3 := cast(string)hmac_sha256(ms, join(a3, seed,, temp));
-        p4 := cast(string)hmac_sha256(ms, join(a4, seed,, temp));
+        p1  = cast(string)hmac_sha256(ms, join(a1, seed));
+        p2  = cast(string)hmac_sha256(ms, join(a2, seed));
+        p3 := cast(string)hmac_sha256(ms, join(a3, seed));
+        p4 := cast(string)hmac_sha256(ms, join(a4, seed));
 
-        buffer := join(p1, p2, p3, p4,, temp);
+        buffer := join(p1, p2, p3, p4);
 
         memcpy(*tls.encryption_keys, buffer.data, size_of(type_of(tls.encryption_keys)));
     }
@@ -1581,7 +1583,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
             return;
         }
 
-        dhcp_handshake_state = .COMPLETED;
+        fulfill_condition(*dhcp_completed, #code dhcp_handshake_state = .COMPLETED);
 
       case .NAK;
         dhcp_handshake_state = .NOT_STARTED;
@@ -1962,6 +1964,7 @@ Dns_Query :: struct {
     sent_at: Apollo_Time;
     complete: bool;
     answer: u32;
+    response: Dns_Response_Code;
 }
 
 Dns_Packet :: struct {
@@ -2007,15 +2010,9 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             continue;
         }
 
-        result_code := cast(Dns_Response_Code)(dns.flags & 0xf);
+        query.response = cast(Dns_Response_Code)(dns.flags & 0xf);
 
-        if result_code {
-            if result_code == {
-                case .NXDOMAIN; log("DNS query regarding domain name \"%\" returned \"No such name\".", query.url);
-                case .FORMERR;  log("DNS query regarding domain name \"%\" returned \"Format error\".", query.url);
-                case;           log("DNS query regarding domain name \"%\" returned result code %.", query.url, result_code);
-            }
-
+        if query.response != .NOERROR {
             query.complete = true;
             return;
         }
@@ -2158,6 +2155,8 @@ Network_Connection :: struct {
 
     SKIP_ARP_PROBES :: true;
 
+    dhcp_completed: Implicit_Lock_Condition_Variable;
+
     arp_table: Table(u32, [6]u8);
 
     pings_in_flight: Bucket_Array(Icmp_Request, 64);
@@ -2169,6 +2168,10 @@ Network_Connection :: struct {
     next_port: u16;
 
     work_to_do: Semaphore;
+}
+
+wait_until_connected_to_network :: (net: *Network_Connection, timeout := INFINITE_TIMEOUT) {
+    wait_for_condition(*net.dhcp_completed, #code net.dhcp_handshake_state != .COMPLETED, timeout);
 }
 
 allocate_port :: (net: *Network_Connection) -> u16 {

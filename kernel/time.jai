@@ -1,5 +1,6 @@
 
 get_kernel_timestamp :: () -> Apollo_Time {
+    // It's less optimal to eagerly convert timer ticks to real (apollo) time since the caller might only want to store and compare the value. But this keeps the user code simpler for now.
 
     // This method of converting TSC to Apollo Time is not precise for low TSC frequencies, like those you get from QEMU when virtualization is not enabled.
     // Use the higher-latency, more complicated HPET timer.
@@ -500,7 +501,7 @@ configure_apic_timer_interrupt :: (period_in_ticks: u32, gate: int) {
 
     lapic_timer: Apic_Lvt_Timer;
 
-    set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
+    set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC); // Todo: This should be ONE_SHOT to make the scheduling code work the same for either hardware scheduling clock source.
     set(*lapic_timer, .gate_index, gate);
     set(*lapic_timer, .mask,       0);
 
