@@ -219,6 +219,12 @@ kernel_entry :: () #no_context {
     push_context {
         global.first_context = *context;
 
+        {
+            ts: Temporary_Storage;
+            set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
+            context.temporary_storage = *ts;
+        }
+
         using global.framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -281,6 +287,7 @@ kernel_entry :: () #no_context {
         random_seed(cast(S128)time);
 
         find_all_pci_devices();
+
         initialize_uacpi();
 
         startup_application_processors();
@@ -310,9 +317,15 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
-        // user_mode_stress_test();
+        user_mode_stress_test();
         // semaphore_test();
-        network_test();
+        // network_test();
+
+        sleep(10, .seconds);
+
+        log("=== Writing trace buffers. ===");
+        write_trace_buffers();
+        log("=== Wrote % trace entries. ===", global.trace_state.current_index);
 
         while true {
             schedule_tasks();

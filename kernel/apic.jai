@@ -267,6 +267,8 @@ ap_entry_point :: () #c_call {
     release(*ap_startup_spinlock);
 
     push_context {
+        // This thread doesn't have temporary storage, but it barely needs it so we let it go to the default allocator (physical_block_allocator).
+
         init_processor_core();
 
         core_begin_multitasking();
@@ -297,6 +299,21 @@ get_core_id :: () -> int #no_context {
 
     offset := offset_of(X64_Core, "id");
     return cast(int)gs_relative_read(offset);
+}
+
+get_task_id :: () -> int {
+    if !global.multiprocessing_initialized {
+        return 0;
+    }
+
+    core := get_current_core();
+
+    if !core.online {
+        return 0;
+    }
+
+    task := get_current_task();
+    return task.id;
 }
 
 gs_relative_read  :: (offset: int) -> u64 #foreign Assembly;
@@ -637,9 +654,15 @@ uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
 
 #program_export
 uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
+    // Todo: uACPI allocates a large number of tiny, equally sized blocks separately using a general purpose allocator, which is always going to be wasteful. No easy way to fix this without modifying uACPI.
+
     push_context {
-        return alloc(cast(s64)size);
+        return uacpi_alloc_forwarder(cast(s64)size);
     }
+}
+
+uacpi_alloc_forwarder :: (size: s64) -> *void {
+    return alloc(size);
 }
 
 #program_export

@@ -69,11 +69,13 @@ get_current_task :: () -> *Task_Info #no_context {
 allocate_task_info :: () -> *Task_Info {
     using global;
 
-    Scoped_Acquire(*task_info_storage_spinlock);
+    acquire(*task_info_storage_spinlock);
 
     locator, task := bucket_array_add(*tasks, .{});
     task.id = next_task_id;
     next_task_id += 1;
+
+    release(*task_info_storage_spinlock);
 
     return task;
 }
@@ -86,7 +88,7 @@ core_begin_multitasking :: () {
     current_task = allocate_task_info();
     current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
     current_task._context = *context;
-    current_task.name = "Idle";
+    current_task.name = sprint("Idle (Core %)", core.id);
     current_task.on_core = core;
     current_task.queue_node.item = current_task;
 
@@ -102,13 +104,13 @@ core_begin_multitasking :: () {
             }
         }
 
-        idle_task = create_task(idle, 0x2000, name = "Idle");
+        idle_task = create_task(idle, 0x8000, name = "Idle (Core 0)");
         idle_task.on_core = core;
         current_task.name = "Kernel Main";
     }
 
-    waiting_to_run.name = sprint("Run Queue (%)", core.id);
-    sleeping.name       = sprint("Sleep Queue (%)", core.id);
+    waiting_to_run.name = sprint("Run Queue (Core %)", core.id);
+    sleeping.name       = sprint("Sleep Queue (Core %)", core.id);
 
     core.online = true;
 
@@ -135,24 +137,25 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, name := "", user_data: *void = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, name: string, user_data: *void = null) -> *Task_Info {
 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    new_task.kernel_stack = alloc(kernel_stack_size);
-    new_task.kernel_stack += kernel_stack_size;
+    stack_space := alloc(kernel_stack_size + user_stack_size);
+
+    // Todo: Guard pages.
+    new_task.kernel_stack = stack_space + kernel_stack_size;
     new_task.kernel_stack &= ~0xf;
 
     if user_stack_size != 0 {
-        new_task.user_stack = alloc(user_stack_size);
-        new_task.user_stack += user_stack_size;
+        new_task.user_stack = stack_space + kernel_stack_size + user_stack_size;
         new_task.user_stack &= ~0xf;
     }
 
     Context_Switch_Stack :: struct {
         // This makes it so the stack doesn't become misaligned by the pointer arithmetic below.
-        aligner: void #align 16;
+        _: void #align 16;
 
         // Represents the stack layout used by the context_switch routine written in assembly.
         registers: General_Registers;
@@ -231,6 +234,8 @@ schedule_tasks :: () {
     scheduler.last_task_switch_timestamp = time_now;
     scheduler.current_task = next;
 
+    trace(.context_switch, current.id, next.id);
+
     context_switch(current, next);
 
     release(*scheduler.spinlock);
@@ -244,8 +249,14 @@ new_task_start :: () #no_context {
 
     push_context {
         core := get_current_core();
-
         release(*core.scheduler.spinlock);
+
+        // ts_data := alloc(TEMPORARY_STORAGE_SIZE);
+        // defer free(ts_data);
+        // 
+        // ts: Temporary_Storage;
+        // set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, ts_data);
+        // context.temporary_storage = *ts;
 
         task := get_current_task();
         task._context = *context;
@@ -648,7 +659,7 @@ print_from_user_mode :: (format: string, args: .. Any) {
 
     builder: String_Builder;
     print(*builder, format, ..args);
-    result := builder_to_string(*builder, do_reset=true);
+    result := builder_to_string(*builder, do_reset=true,, temp);
 
     data  := result.data;
     count := result.count;
@@ -794,6 +805,11 @@ ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory:
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {
+
+        ts: Temporary_Storage;
+        set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
+
+        context.temporary_storage = *ts;
         context.allocator.proc = ring_3_allocator;
 
         core := get_current_core_from_user_mode();
