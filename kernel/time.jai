@@ -444,15 +444,14 @@ hpet_timer1_interrupt :: (data: *Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 hpet_get_monotonic_time :: () -> Apollo_Time {
-    using global;
+    using global.high_precision_timer;
 
     counter, ticks: u64;
 
-    sequence_read(*high_precision_timer.seq_lock, #code {
+    sequence_read(*seq_lock, #code {
         // This could also just use 16-byte compare exchange instead of a seqlock
-
-        counter = high_precision_timer.timers[0].counter;
-        ticks   = high_precision_timer.timers[0].ticks_at_last_interrupt;
+        counter = timers[0].counter;
+        ticks   = timers[0].ticks_at_last_interrupt;
     });
 
     // Apparently reading this register can have high latency
@@ -460,7 +459,7 @@ hpet_get_monotonic_time :: () -> Apollo_Time {
 
     if ticks_now < ticks {
         counter_max: u64 = 0xffff_ffff;
-        if high_precision_timer.timers[0].counter_is_64_bit {
+        if timers[0].counter_is_64_bit {
             counter_max = 0xffff_ffff_ffff_ffff;
         }
 
@@ -471,7 +470,7 @@ hpet_get_monotonic_time :: () -> Apollo_Time {
 
     time_represented_by_ticks: Apollo_Time;
     time_represented_by_ticks.low = cast(u64) ticks;
-    time_represented_by_ticks *= cast(s64) high_precision_timer.tick_period_femtoseconds;
+    time_represented_by_ticks *= cast(s64) tick_period_femtoseconds;
 
     FEMTOSECONDS_PER_MILLISECOND :: 1_000_000_000_000;
     time_represented_by_counter: Apollo_Time;
@@ -643,7 +642,7 @@ calibrate_tsc :: () -> hz: u64 {
 
         delta[2] = delta[1];
         delta[1] = delta[0];
-        delta[0] = cast(int, tsc1 - tsc0);
+        delta[0] = cast(int) (tsc1 - tsc0);
 
         if verbose log("Run % delta %", it, delta[0]);
 

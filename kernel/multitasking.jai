@@ -592,7 +592,7 @@ wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, $predicate
 
 
 
-Implicit_Lock_Condition_Variable :: struct (Lock: Type = Spinlock) {
+Implicit_Lock_Condition_Variable :: struct (Lock := Spinlock) {
     // If you only need one cvar, and you supply both the state change and predicate as #code, the mutex doesn't need to be provided by the user code.
     cvar: Condition_Variable;
     user_lock: Lock;

@@ -3,6 +3,7 @@ TRACE_INCLUDE_RUNTIME_CODE :: false;
 #load "../kernel/trace.jai";
 
 #import "GetRect";
+#import "File_Utilities";
 
 current_time: float64;
 last\  _time: float64;
@@ -26,13 +27,13 @@ Trace_Data :: struct {
     entries: [..] Trace_Entry;
 }
 
-parse_trace_data :: () {
-    trace_file := read_entire_file("../logs/vbox_trace.bin");
+parse_trace_data :: (_trace_file: string) {
+    trace_file := _trace_file;
+    trace_data = .{};
 
     start := find_index_from_left(trace_file, KERNEL_TRACE_MAGIC_STRING);
     if start == -1 {
-        // Todo.
-        assert(false);
+        return;
     }
 
     start += KERNEL_TRACE_MAGIC_STRING.count;
@@ -45,9 +46,8 @@ parse_trace_data :: () {
     trace_data.num_cores     = header.num_cpu_cores;
     trace_data.tsc_frequency = header.tsc_frequency;
 
-    string_table := *header.string_table;
-
     array_resize(*trace_data.threads, header.num_threads);
+    string_table := *header.string_table;
 
     for 0..header.num_threads-1 {
         entry := cast(*Trace_Header.String_Table_Entry)string_table;
@@ -97,7 +97,13 @@ main :: () {
     my_init_fonts();
     ui_init();
 
-    parse_trace_data();
+    file_name = "../logs/vbox_trace.bin";
+    exists = file_exists(file_name);
+
+    if exists {
+        trace_file := read_entire_file(file_name);
+        parse_trace_data(trace_file);
+    }
 
     quit := false;
     while !quit {
@@ -141,36 +147,132 @@ main :: () {
     }
 }
 
+scroll_position: float;
+file_name: string;
+exists: bool;
+
 draw_one_frame :: (dt: float) {
     proc := default_theme_procs[current_theme];
     my_theme = proc();
     set_default_theme(my_theme);  // Just in case we don't explicitly pass themes sometimes...!
+    my_theme.button_theme.font = button_font;
 
-    bg_col := my_theme.background_color;
-    Simp.clear_render_target(bg_col.x, bg_col.y, bg_col.z, 1);
+    // bg_col := my_theme.background_color;
+    Simp.clear_render_target(.15, .11, .11, 1);
 
     x, y, width, height := get_dimensions(my_window, true);
     ui_per_frame_update(my_window, width, height, current_time);
 
+    r := get_rect(0, 0, xx width, xx height);
+    r = shrink(r, 25);
 
-    button_theme := my_theme.button_theme;
-    button_theme.font = button_font;
-    button_theme.enable_variable_frame_thickness = true;
-    // 'k' is some resolution-adjusting unit of distance. Right now it is
-    // 1/10 of the screen height, so, 108 pixels at 1920x1080.
-    k := window_height * .1;
-    r := get_rect(k, window_height - .5*k, 22*k, k);
+    file_load_rect, slidable_rect := cut_top(r, 50);
+    {
+        // File loading section.
 
-    for trace_data.entries {
-        r.y -= window_height / 28;
-        label_theme: Label_Theme;
-        label_theme.alignment = .Left;
-        label_theme.text_color = .{.5, .5, .5, 1};
-        label_theme.font = button_font;
+        file_load_rect.h -= 20;
+        file_load_rect.y += 20;
 
-        text := tprint("%", it);
-        label(r, text, *label_theme);
+        button_rect:, file_load_rect = cut_left(file_load_rect, 250);
+        button_rect.w -= 10;
+
+        ti := my_theme.text_input_theme;
+        ti.text_color = ifx exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
+        ti.text_color_pressed = ti.text_color;
+        ti.font = button_font;
+        action, new_text, state := text_input(file_load_rect, file_name, *ti);
+
+        if action == .TEXT_MODIFIED {
+            exists = file_exists(state.text);
+            file_name = state.text;
+        }
+
+        if button(button_rect, "Load File", *my_theme.button_theme) && exists {
+            trace_file := read_entire_file(file_name);
+            parse_trace_data(trace_file);
+        }
     }
+
+    st := my_theme.slidable_region_theme;
+    st.divider_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
+    st.divider_thickness = 10;
+    st.first_background.shape.rounding_flags = 0;
+    st.second_background.shape.rounding_flags = 0;
+
+    slide_state, left_rect, right_rect := slidable_region(slidable_rect, *st);
+
+    {
+        // Vertical trace events view (left slide region).
+
+        st := my_theme.scrollable_region_theme;
+        st.region_background.shape.rounding_flags = 0;
+        stn := *st.scrollbar_nib_theme;
+        // stn.enable_variable_frame_thickness = false;
+        // stn.rectangle_shape.frame_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
+        // stn.rectangle_shape.frame_thickness = 3;
+        // stn.rectangle_shape.roundedness_type = .ABSOLUTE_FROM_THEME_FIELD;
+        // stn.rectangle_shape.roundedness = 8;
+        // stn.frame_thickness_flash = .01;
+
+        state, scroll_rect := begin_scrollable_region(left_rect, *st);
+
+        state.bar_rect.w = 25; // Scroll bar width is hardcoded to be relative to render target height, in GetRect. This means we can't easily make it fit into the parent area correctly.
+
+        row_height := 18.0;
+        row_rect := scroll_rect;
+        row_rect.h = row_height - 2;
+        row_rect.y += scroll_position;
+        row_rect.y += scroll_rect.h;
+        // row_rect.x += 5;
+        // row_rect.w -= 5;
+
+        for trace_data.entries {
+            row_rect.y -= row_height;
+
+            row_theme: = my_theme.button_theme;
+            row_theme.alignment = .Left;
+            row_theme.text_color = .{.75, .75, .75, 1};
+            row_theme.font = button_font;
+            row_theme.surface_color = .{};
+            row_theme.frame_color = .{};
+
+            button(row_rect, "", *row_theme, it_index);
+            label_rect := row_rect;
+
+            time_seconds := cast(float)it.tsc / cast(float)trace_data.tsc_frequency;
+
+            text := tprint("%", formatFloat(time_seconds, trailing_width=3, zero_removal=.NO));
+            label(label_rect, text, *row_theme.label_theme);
+
+            label_rect.x += 75;
+
+            text = tprint("%", it.tag, );
+            label(label_rect, text, *row_theme.label_theme);
+
+            label_rect.x += 200;
+
+            text = tprint("%", trace_data.threads[it.user[0]-1]);
+            label(label_rect, text, *row_theme.label_theme);
+
+            label_rect.x += 125;
+
+            text = tprint("->   %", trace_data.threads[it.user[1]-1]);
+            label(label_rect, text, *row_theme.label_theme);
+        }
+
+        end_scrollable_region(state, row_rect.x, row_rect.y, *scroll_position);
+    }
+
+    switch_to_right_rect(slide_state);
+
+    {
+        // Draw CPU core tracks.
+        for 0..trace_data.num_cores-1 {
+            
+        }
+    }
+
+    finish(slide_state);
 
     draw_popups();
 
@@ -190,19 +292,15 @@ my_init_fonts :: () {
         working_directory_set = true;
     }
 
-    pixel_height := window_height / 24;
-    my_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
+    my_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", 64);
     assert(my_font != null);
 
-    pixel_height /= 2;
-    button_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
+    button_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", 14);
     assert(button_font != null);
 
-    pixel_height = window_height / 7;
-    title_font = Simp.get_font_at_size("data", "Miama.otf", pixel_height);
+    title_font = Simp.get_font_at_size("data", "Miama.otf", 128);
 
-    pixel_height = window_height / 30;
-    story_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
+    story_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", 16);
 //    title_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
 }
 

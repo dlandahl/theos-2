@@ -147,7 +147,7 @@ file_table :: string.[
         using global.trace_state;
 
         // Because this procedure is to be called after completing a kernel test workload, we don't care about extra latency and it's more important to have as controlled an environment as possible.
-        irq_disable();
+        irq_state := irq_disable();
 
         serial_out(KERNEL_TRACE_MAGIC_STRING, *global.COM2);
 
@@ -215,6 +215,6 @@ file_table :: string.[
             serial_out(s, *global.COM2);
         }
 
-        irq_restore();
+        irq_restore(irq_state);
     }
 }
