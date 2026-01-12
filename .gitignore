@@ -6,21 +6,12 @@
 *.nvram
 *.vbox-prev
 virtualbox_vm/new_os/Logs/
+*.vbox
 
 logs/
 
-cert.pem
-
 client.py
 
-key.pem
-
-server.py
-
-*.vbox
-
 kernel/modules/new_uACPI/
-
 kernel/modules/old_uACPI/
-
 tools/tracer
