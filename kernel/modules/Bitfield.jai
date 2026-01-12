@@ -23,10 +23,6 @@ Usage example:
         print("Flags is %\n", formatInt(cast(u16) gate_flags, base=2));
     }
 
-Todo: would like to have this syntax:
-
-    Set(gate_flags.protection_level, 3);
-
 */
 
 #module_parameters(ENABLE_RUNTIME_ERROR_CHECKS := true);
@@ -67,6 +63,22 @@ bitfield_get :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #ca
     return cast(R) value;
 }
 
+
+
+/*
+ * Manipulate single bits using bools.
+ */
+
+bitfield_set_bit :: inline (bitfield: *$B, flag: $F, value: bool, $loc := #caller_location, $call := #caller_code) #modify {
+    return handle_as(*B, *F);
+} {
+    if value {
+        bitfield_\ set_bit(bitfield, flag, loc, call);
+    } else {
+        bitfield_clear_bit(bitfield, flag, loc, call);
+    }
+}
+
 bitfield_set_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
@@ -90,6 +102,48 @@ bitfield_get_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $
 
     return bitfield.* & bit_mask > 0;
 }
+
+
+
+/*
+ * Set and get bitfield values without normalizing the value (apply the mask but don't shift.) Useful for aligned pointers with other information in the low bits.
+ * Todo: Really, this is a property of the specific member. So maybe we can do it with a note, if notes are allowed on enum members in the future.
+ */
+
+bitfield_set_in_place :: inline (bitfield: *$B, flag: $F, value: s64, $loc := #caller_location, $call := #caller_code) #modify {
+    return handle_as(*B, *F);
+} {
+    bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
+
+    mask := cast,no_check(B) ~bit_mask;
+
+    #if ENABLE_RUNTIME_ERROR_CHECKS {
+        assert(value & mask == 0, "Bitfield value to be written in-place contains bits that don't overlap with the target bitfield member. These bits would not get written. Maybe you are writing an address that's misaligned.");
+    }
+
+    temp := bitfield.*;
+    temp &= cast,no_check(B) mask;
+    temp |= cast,no_check(B) value;
+    bitfield.* = temp;
+}
+
+bitfield_get_in_place :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #caller_location, $call := #caller_code) -> R #modify {
+    result := handle_as(*B, *F);
+
+    tie := cast(*Type_Info_Enum)F;
+    R = get_type(tie.internal_type);
+
+    return result;
+} {
+
+    bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
+
+    value := bitfield;
+    value &= cast,no_check(B) bit_mask;
+    return cast(R) value;
+}
+
+
 
 print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct = null, $loc := #caller_location) {
     ti :: type_info(B);

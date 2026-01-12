@@ -301,7 +301,7 @@ get_core_id :: () -> int #no_context {
     return cast(int)gs_relative_read(offset);
 }
 
-get_task_id :: () -> int {
+get_task_id :: () -> int #no_context {
     if !global.multiprocessing_initialized {
         return 0;
     }

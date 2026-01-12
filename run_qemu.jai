@@ -18,6 +18,8 @@
             -device nvme,serial=cafebabe,drive=nvm
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
+            -chardev file,id=char1,path=logs/qemu_trace.bin
+            -serial chardev:char1
             -m 256M
             -smp 4 
     QEMU_CMD);

@@ -18,10 +18,12 @@ array_add :: (array: *Bucket_Array) -> *array.type {
 
 #import "Bitfield"(true);
 
-set :: bitfield_set;
-get :: bitfield_get;
-set_bit :: bitfield_set_bit;
-get_bit :: bitfield_get_bit;
+set          :: bitfield_set;
+get          :: bitfield_get;
+set_bit      :: bitfield_set_bit;
+get_bit      :: bitfield_get_bit;
+set_in_place :: bitfield_set_in_place;
+get_in_place :: bitfield_get_in_place;
 
 #import "Ring_Buffer";
 #import "ASN1";
@@ -191,6 +193,7 @@ kernel_entry :: () #no_context {
 
     // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
     init_tracing();
+    // global.trace_state.tracing_enabled = false;
 
     // Todo: hardcoded.
 
@@ -317,11 +320,11 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
-        user_mode_stress_test();
-        // semaphore_test();
-        // network_test();
+        user_mode_stress_test(2);
+        semaphore_test();
+        network_test();
 
-        sleep(10, .seconds);
+        sleep(20, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -334,7 +337,7 @@ kernel_entry :: () #no_context {
     }
 }
 
-semaphore_test :: () {
+semaphore_test :: (threads_per_core := 2) {
 
     User_Data :: struct {
         sem: Semaphore;
@@ -344,22 +347,26 @@ semaphore_test :: () {
     user_data := New(User_Data);
     user_data.sem.counter = 2;
 
+    time_scale :: 5;
+
     proc :: () {
         task := get_current_task();
         data := cast(*User_Data) task.user_data;
 
         while true {
-            us := cast(s64)rdtsc() % 1_000_000;
+            yield_execution();
+
+            us := cast(s64)rdtsc() % (1_000_000 * time_scale);
             busy_wait(us);
 
             log("[%] Trying to take the semaphore.", task.name);
 
-            us = cast(s64)rdtsc() % 200_000;
+            us = cast(s64)rdtsc() % (200_000 * time_scale);
             if wait_for(*data.sem, microseconds_to_apollo(us)) {
                 data.holders += 1;
                 log("[%] Got the semaphore. Holders: %", task.name, data.holders);
 
-                us := cast(s64)rdtsc() % 500_000;
+                us := cast(s64)rdtsc() % (800_000 * time_scale);
                 busy_wait(us);
 
                 data.holders -= 1;
@@ -375,7 +382,7 @@ semaphore_test :: () {
     #asm { sti; }
 
     for *core: global.processor_cores {
-        for 1..2 {
+        for 1..threads_per_core {
             name := tprint("Sem test %:%", core.id, thread_index);
             task := create_task(proc, kernel_stack_size = 0x4_0000, name = name, user_data = user_data);
             put_task_on_core(task, core);
@@ -385,13 +392,13 @@ semaphore_test :: () {
     }
 }
 
-user_mode_stress_test :: () {
+user_mode_stress_test :: (threads_per_core := 4) {
     thread_index := 1;
 
     for *core: global.processor_cores {
         // if core.id != 0 continue;
 
-        for 1..4 {
+        for 1..threads_per_core {
             name := tprint("Do Work %:%", core.id, thread_index);
             task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
             put_task_on_core(task, core);
@@ -402,7 +409,7 @@ user_mode_stress_test :: () {
 }
 
 network_test :: () {
-    USE_DNS :: true;
+    USE_DNS :: false;
 
     log_category("Test");
 
@@ -414,8 +421,8 @@ network_test :: () {
     task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
     put_task_on_core(task, *global.processor_cores[1]);
 
-    log("Establishing DHCP connection.");
-    wait_until_connected_to_network(net);
+    log("Waiting for DHCP handshake.");
+    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
     ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
     port: u16 = 4443;
@@ -452,11 +459,11 @@ network_test :: () {
     tls := establish_tls_connection(connection);
 
     request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+    request = "GET /server.py HTTP/1.1\r\nHost: DESKTOP-FPIMHUG\r\nAccept: text/x-python\r\n\r\n";
 
     tls_transmit_application_data(*tls, request);
 
-    for 1..3 {
+    for 1..2 {
         response := tls_receive_application_data(*tls);
         log("Got HTTPS response: %", response);
     }
@@ -961,7 +968,7 @@ free_4k_page :: (address: u64) {
 get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     using Page_Flags;
 
-    is_page := cast(u64, table) & xx PAGE_SIZE;
+    is_page := cast(u64) table & xx PAGE_SIZE;
     if is_page {
         // The page table to which we're trying to add a lower level child table is actually a large or huge page.
         assert(false);
@@ -969,7 +976,7 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
 
     if table[entry] & xx PRESENT {
         physical := table[entry] & (~0xfff);
-        return cast(*u64, physical + DIRECT_MAPPING_BASE);
+        return cast(*u64) (physical + DIRECT_MAPPING_BASE);
     }
 
     address := get_4k_page();
@@ -977,7 +984,7 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
 
     table[entry] = address | xx PRESENT | READ_WRITE;
 
-    virtual_address := cast(*u64, address + DIRECT_MAPPING_BASE);
+    virtual_address := cast(*u64) (address + DIRECT_MAPPING_BASE);
     memset(virtual_address, 0, 4096);
 
     return virtual_address;
@@ -1001,8 +1008,8 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
     pt   := get_or_create_page_table(pd,   pd_offset);
 
-    if pt[pt_offset].(Page_Flags) & .PRESENT {
-        log("%", hex(pt.(u64) - DIRECT_MAPPING_BASE));
+    if (cast(Page_Flags)pt[pt_offset]) & .PRESENT {
+        log("%", hex(cast(u64)pt - DIRECT_MAPPING_BASE));
         bluescreen(loc);
     }
 
@@ -1038,28 +1045,28 @@ get_physical_address :: (virtual: *void) -> u64, present: bool {
     page_offset := x & 0xfff;
 
     ReadTableEntry :: (index: u64, table_address: u64) -> entry: u64 #expand {
-        present := table_address.(Page_Flags) & .PRESENT;
+        present := (cast(Page_Flags)table_address) & .PRESENT;
 
         if !present `return 0, false;
 
-        table := cast(*u64, table_address & ~0xfff + DIRECT_MAPPING_BASE);
+        table := cast(*u64) (table_address & ~0xfff + DIRECT_MAPPING_BASE);
         return table[index];
     }
 
     cr3: u64;
     #asm { get_cr3 cr3; }
-    pml4 := cast(*u64, cr3 + DIRECT_MAPPING_BASE);
+    pml4 := cast(*u64) (cr3 + DIRECT_MAPPING_BASE);
 
     pml4e := pml4[pml4_offset];
 
     pdpte := ReadTableEntry(pdpt_offset, pml4e);
-    if pdpte.(Page_Flags) & .PAGE_SIZE {
+    if (cast(Page_Flags)pdpte) & .PAGE_SIZE {
         page_offset := x & 0x3fff_ffff;
         return (pdpte & ~0xfff) + page_offset, true;
     }
 
     pde := ReadTableEntry(pd_offset, pdpte);
-    if pde.(Page_Flags) & .PAGE_SIZE {
+    if (cast(Page_Flags)pde) & .PAGE_SIZE {
         page_offset := x & 0x1f_ffff;
         return (pde & ~0xfff) + page_offset, true;
     }
@@ -1165,12 +1172,17 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
                     blocks[it] = blocks[it-1];
                 }
 
-                blocks[it_index+1].base = it.base + bytes_wanted;
-                blocks[it_index+1].size = remaining_bytes;
-                blocks[it_index+1].used = false;
+                remaining_block := *blocks[it_index+1];
+                remaining_block.base = it.base + bytes_wanted;
+                remaining_block.size = remaining_bytes;
+                remaining_block.used = false;
             }
 
             allocated_address := cast(u64) (base_address + it.base);
+
+            if bytes_wanted > 128 {
+                trace(.block_alloc, allocated_address, bytes_wanted);
+            }
 
             return allocated_address;
         }
@@ -1212,6 +1224,8 @@ resize_block :: (using allocator: *Block_Allocator, address: u64, new_size: u64)
         return false;
     }
 
+    trace(.block_resize, address, new_size);
+
     // There's a free block trailing the block we're trying to grow, and it's big enough to allow the resize operation.
 
     block.size += additional_bytes_needed;
@@ -1243,6 +1257,10 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
     }
 
     assert(block.base == address - allocator.base_address);
+
+    if block.size > 128 {
+        trace(.block_free, address, block.size);
+    }
 
     block.used = false;
 
@@ -1318,6 +1336,8 @@ allocate_small_object :: (size: int) -> *void {
 
     objects_size := cast(s16)(32 << bucket_index);
 
+    assert(bucket_index < bucket_freelists.count, "Trying to allocate an object of size % with the small objects allocator.", size);
+
     // Find or allocate a page to use.
     page_freelist := *bucket_freelists[bucket_index];
 
@@ -1361,6 +1381,7 @@ allocate_small_object :: (size: int) -> *void {
         header.page_freelist = null;
     }
 
+    trace(.small_object_alloc, slot, size);
     return slot;
 }
 
@@ -1371,11 +1392,13 @@ free_small_object :: (address: *void) {
     Scoped_Acquire(*lock);
 
     header := cast(*Page_Metadata)address & ~(PAGE_SIZE-1);
+    trace(.small_object_free, address, header.objects_size);
 
     bucket_index := bit_scan_reverse(header.objects_size-1);
     bucket_index  = max(bucket_index - 5, 0);
 
     max_objects  := (PAGE_SIZE - header.objects_size) / header.objects_size;
+
 
     if header.total_objects == max_objects {
         // Add the page to the page freelist if it is full before removing this object.
@@ -1415,6 +1438,163 @@ free_small_object :: (address: *void) {
 }
 
 
+
+/*
+Maple_Tree_Node :: struct {
+    // Maybe having so many nested types makes it harder to read.
+    Entry_Content :: enum {
+        FREE       :: 0;
+        CHILD_NODE :: 1;
+        VALUE      :: 2;
+    }
+
+    Entry :: enum u64 {
+        content :: 2;
+        unused  :: 5; // Could put search marks here.
+
+        // We could save a lot of bits by storing nodes in an array that can be accessed by index, and then only storing the index in nonleaf nodes. But just making it work for now.
+        // It would have to be a specially implemented array that just uses large pages, because I don't want this tree to have to go to the physical block allocator to get more memory,
+        // because that would prevent us from:
+        //   A) Using this as part of a memory debug mode where all block-allocator allocations are guarded with virtual memory guard pages by default.
+        //   B) Using this when block allocator physical memory runs out / is too fragmented to support a large allocation. Don't really care about this case that much.
+        address :: 57;
+    }
+
+    Meta :: enum u64 {
+        entry_count    :: 3;
+        unused         :: 4;
+        parent_address :: 57;
+    }
+
+    meta: Meta;
+
+    pivots:  [7] s64;
+    entries: [8] Entry;
+}
+
+#assert size_of(Maple_Tree_Node) == 128; // Two cache lines for now.
+
+Maple_Tree_Node_Expanded :: struct {
+    #as using node: *Maple_Tree_Node;
+
+    // This struct keeps track of this information which comes from the parent node, as you walk the tree.
+    implicit_min: s64;
+    implicit_max: s64;
+}
+
+each_range :: (node: *Maple_Tree_Node_Expanded, body: Code, flags: For_Flags) #expand {
+    #assert !(flags & .REVERSE);
+    #assert !(flags & .POINTER);
+
+    `it_index := -1;
+
+    `it_min: s64;
+    `it_max: s64;
+
+    `it: *Maple_Tree_Node.Entry;
+
+    entry_count := get(node.meta, .entry_count);
+
+    while true {
+        if it_index == entry_count-1 {
+            break;
+        }
+
+        it_index += 1;
+        it = *node.entries[it_index];
+
+        if it_index == 0 {
+            it_min = node.implicit_min;
+        } else {
+            it_min = node.pivots[it_index-1];
+        }
+
+        if it_index == entry_count-1 {
+            it_max = node.implicit_max;
+        } else {
+            it_max = node.pivots[it_index] - 1;
+        }
+
+        #insert body;
+    }
+}
+
+maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, value: *void) {
+    assert(range_min <= range_max);
+
+    for :each_range node {
+        // Find the child node or entry that currently contains this range.
+
+        if it_max < range_min {
+            // The wanted range is entirely to the right of this entry.
+            continue;
+        }
+
+        // If we get here we know that at least the left half of the range we want overlaps with this entry.
+        // But it might overlap multiple entries, which in my version of the tree is not allowed. e.g.
+        //
+        // Wanted:  |        |xxx|           |
+        // Entries: |  |  | it |   |     |   |
+        // it_max:             ^
+        //
+        assert(it_max >= range_max);
+
+        // This entry should be free or a child node.
+        content := cast(Maple_Tree_Node.Entry_Content) get(it, .content);
+        assert(content != .VALUE);
+
+        if content == .CHILD_NODE {
+            // If it's a child node, recurse into it.
+            child_address := get_in_place(it, .address);
+
+            child: Maple_Tree_Node_Expanded;
+            child.node = cast(*Maple_Tree_Node) child_address;
+            child.implicit_min = it_min;
+            child.implicit_max = it_max;
+
+            maple_add(*child, range_min, range_max, value);
+            return;
+        }
+
+        if it_min == range_min && it_max == range_max {
+            // If it matches exactly, we can just use this range without splitting it.
+
+            set_in_place(it, .address, cast(s64)value);
+            set(it, .content, Maple_Tree_Node.Entry_Content.VALUE);
+
+            return;
+        }
+
+        // If we get here we need to move the entries and pivots, to make room for either one or two new entries, depending.
+        new_entries_needed: int;
+
+        if it_min != range_min new_entries_needed += 1;
+        if it_max != range_max new_entries_needed += 1;
+
+        entry_count := get(node.meta, .entry_count);
+        new_entry_count := entry_count + new_entries_needed;
+
+        // This would split the node. Todo.
+        assert(new_entry_count <= 8);
+
+        // Move the entries after this one over.
+        start := it_index + new_entries_needed + 1; // The lowest entry that we move other entries to.
+
+        for< start..new_entry_count-1 {
+            node.entries[it] = node.entries[it - new_entries_needed];
+        }
+
+        entry_to_fill := it_index;
+
+        if it_min != range_min {
+            // We need a free entry before the one we want to add.
+        }
+    }
+
+    // If we get here, the range is not represented in the tree at all. This is a bug in the tree code.
+    assert(false);
+}
+*/
 
 
 Serial_Port :: struct (base_address: u16) {
@@ -1516,7 +1696,7 @@ Any_Lock :: Type.[MCS_Spinlock, Spinlock(.RAW), Spinlock(.PREEMPT), Spinlock(.IR
 
 
 
-// Lock type (like "irqsave") is a property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better.
+// Lock type (like "irqsave") is a static property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better.
 Lock_Type :: enum {
     RAW     :: 1;
     PREEMPT :: 2;

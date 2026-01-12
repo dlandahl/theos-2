@@ -563,7 +563,9 @@ initialize_tsc :: () {
 }
 
 calibrate_tsc :: () -> hz: u64 {
-    verbose := false;
+    verbose := true;
+
+#if 0 { // Disabling this because QEMU thinks it's getting the frequency this way but it comes out way too low.
 
     // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, in which case we fall back to manual timing using HPET.
     eax, ebx, ecx, edx: u64;
@@ -578,8 +580,8 @@ calibrate_tsc :: () -> hz: u64 {
         cpuid eax, ebx, ecx, edx;
     }
 
-    if eax != 0 {
-        frequency := ecx * (ebx / eax);
+    if eax != 0 && ecx != 0 {
+        frequency := (ecx * ebx) / eax;
         if verbose log("TSC Frequency is % (CPUID eax=0x15)", frequency);
         return frequency;
     }
@@ -598,7 +600,7 @@ calibrate_tsc :: () -> hz: u64 {
         if verbose log("TSC Frequency is % (CPUID eax=0x16)", frequency);
         return frequency;
     }
-
+}
 
 
     if verbose log("Calibrating TSC...");

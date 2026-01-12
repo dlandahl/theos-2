@@ -1,9 +1,22 @@
 
-TRACE_INCLUDE_RUNTIME_CODE :: false;
-#load "../kernel/trace.jai";
+Simp  :: #import "Simp";
+Input :: #import "Input";
 
+#import "Window_Creation";
+
+#import "Basic";
 #import "GetRect";
 #import "File_Utilities";
+#import "File";
+#import "Math";
+#import "System";
+#import "String";
+
+#import "debug_info";
+#import "executable_formats";
+
+TRACE_INCLUDE_RUNTIME_CODE :: false;
+#load "../kernel/trace.jai";
 
 current_time: float64;
 last\  _time: float64;
@@ -24,7 +37,7 @@ Trace_Data :: struct {
     tsc_frequency: u64;
 
     threads: [..] string;
-    entries: [..] Trace_Entry;
+    entries: [] Trace_Entry;
 }
 
 parse_trace_data :: (_trace_file: string) {
@@ -46,7 +59,9 @@ parse_trace_data :: (_trace_file: string) {
     trace_data.num_cores     = header.num_cpu_cores;
     trace_data.tsc_frequency = header.tsc_frequency;
 
-    array_resize(*trace_data.threads, header.num_threads);
+    array_resize(*trace_data.threads, header.num_threads+1);
+    trace_data.threads[0] = "Early Boot";
+
     string_table := *header.string_table;
 
     for 0..header.num_threads-1 {
@@ -56,18 +71,69 @@ parse_trace_data :: (_trace_file: string) {
         s.data = *entry.data;
         s.count = entry.name_length;
 
-        trace_data.threads[it] = s;
-        log("Found thread %.", s);
+        trace_data.threads[entry.thread_id] = s;
+        assert(entry.thread_id != 0);
+        log("Found thread %. (id %)", s, entry.thread_id);
 
         string_table = *entry.data + entry.name_length;
     }
 
     array_resize(*trace_data.entries, header.num_trace_entries);
 
-    dest  := trace_data.entries.data;
-    src   := string_table;
-    bytes := header.num_trace_entries * size_of(Trace_Entry);
-    memcpy(dest, src, bytes);
+    // dest  := trace_data.entries.data;
+    // src   := string_table;
+    // bytes := header.num_trace_entries * size_of(Trace_Entry);
+    // memcpy(dest, src, bytes);
+    trace_data.entries.data = string_table;
+    trace_data.entries.count = header.num_trace_entries;
+
+    array_resize(*show_hide_settings.cores,   trace_data.num_cores);
+    array_resize(*show_hide_settings.threads, trace_data.threads.count);
+
+    for* show_hide_settings.cores   it.* = true;
+    for* show_hide_settings.threads it.* = true;
+    for* show_hide_settings.tags    it.* = true;
+}
+
+read_debug_info :: (kernel_file_name: string) {
+    binary_file := read_entire_file(kernel_file_name);
+    success, elf := parse_elf(binary_file, kernel_file_name);
+
+    assert(success);
+
+    debug_info: Debug_Info;
+    if elf.debug_info_section && elf.debug_abbrev_section && elf.debug_line_section {
+        info   := get_section_data(elf, elf.debug_info_section);
+        abbrev := get_section_data(elf, elf.debug_abbrev_section);
+        line   := get_section_data(elf, elf.debug_line_section);
+        str    := get_section_data(elf, elf.debug_str_section);
+
+        success &= apply_relocations(elf, elf.debug_line_section_index, line);
+        success &= apply_relocations(elf, elf.debug_info_section_index, info);
+        if !success {
+            print("Failed to apply relocations.");
+            return;
+        }
+
+        debug_info, success = parse_dwarf_debug_info(info, abbrev, line, str);
+        if !success {
+            print("Failed to parse debug info.");
+            return;
+        }
+    }
+
+    for cu: debug_info.compilation_units {
+        mapping, success := get_line_mapping_for_address(cu.line_info, 0xffffffff800ca110);
+
+        context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 0;
+
+        if success {
+            file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
+            log("Success. Mapping: %\nFilename: %", mapping, file_name);
+        } else {
+            log("Failure.");
+        }
+    }
 }
 
 main :: () {
@@ -77,7 +143,7 @@ main :: () {
         Windows.timeBeginPeriod(1);
     }
 
-    my_window = create_window(window_width, window_height, "A Window");
+    my_window = create_window(window_width, window_height, "Kernel Event Viewer");
     #if OS == .WINDOWS {
         // @Feature: Add user-specific typelist support.
         Windows.DragAcceptFiles(my_window, cast(Windows.BOOL) true);
@@ -97,13 +163,18 @@ main :: () {
     my_init_fonts();
     ui_init();
 
-    file_name = "../logs/vbox_trace.bin";
-    exists = file_exists(file_name);
+    trace_file_name = "../logs/vbox_trace.bin";
+    trace_file_exists = file_exists(trace_file_name);
 
-    if exists {
-        trace_file := read_entire_file(file_name);
+    if trace_file_exists {
+        trace_file := read_entire_file(trace_file_name);
         parse_trace_data(trace_file);
     }
+
+    kernel_file_name := "../.build/kernel";
+    read_debug_info(kernel_file_name);
+
+    // do_dwarf_lines(debug_info);
 
     quit := false;
     while !quit {
@@ -122,8 +193,6 @@ main :: () {
 
                 window_width  = it.width;
                 window_height = it.height;
-
-                if should_reinit my_init_fonts();
             }
         }
 
@@ -134,8 +203,37 @@ main :: () {
 
             if event.type == {
               case .KEYBOARD;
-                if event.key_pressed && event.key_code == .ESCAPE {
-                    active_widget_deactivate_all();
+                if event.key_pressed {
+                    if event.key_code == .ESCAPE {
+                        active_widget_deactivate_all();
+                    }
+
+                    if event.key_code == .ARROW_UP {
+                        while true {
+                            selected_entry = max(selected_entry - 1, 0);
+
+                            entry := trace_data.entries[selected_entry];
+                            if !show_hide_settings.cores  [entry.core_id] continue;
+                            if !show_hide_settings.threads[entry.task_id] continue;
+                            if !show_hide_settings.tags   [entry.tag]     continue;
+
+                            update_highlighted_trace_entries();
+                            break;
+                        }
+                    }
+                    if event.key_code == .ARROW_DOWN {
+                        while true {
+                            selected_entry = min(selected_entry + 1, trace_data.entries.count-1);
+
+                            entry := trace_data.entries[selected_entry];
+                            if !show_hide_settings.cores  [entry.core_id] continue;
+                            if !show_hide_settings.threads[entry.task_id] continue;
+                            if !show_hide_settings.tags   [entry.tag]     continue;
+
+                            update_highlighted_trace_entries();
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -148,14 +246,25 @@ main :: () {
 }
 
 scroll_position: float;
-file_name: string;
-exists: bool;
+
+trace_file_name: string;
+trace_file_exists: bool;
+
+selected_entry: int;
+highlighted_trace_entries: [..] int;
+
+
+show_hide_settings: struct {
+    cores:   [..]bool;
+    threads: [..]bool;
+    tags:    [9]bool;
+};
 
 draw_one_frame :: (dt: float) {
     proc := default_theme_procs[current_theme];
     my_theme = proc();
     set_default_theme(my_theme);  // Just in case we don't explicitly pass themes sometimes...!
-    my_theme.button_theme.font = button_font;
+    my_theme.button_theme.font = mono_font;
 
     // bg_col := my_theme.background_color;
     Simp.clear_render_target(.15, .11, .11, 1);
@@ -166,30 +275,146 @@ draw_one_frame :: (dt: float) {
     r := get_rect(0, 0, xx width, xx height);
     r = shrink(r, 25);
 
-    file_load_rect, slidable_rect := cut_top(r, 50);
+    file_load_rect, main_region_rect := cut_top(r, 50);
     {
         // File loading section.
 
         file_load_rect.h -= 20;
         file_load_rect.y += 20;
 
-        button_rect:, file_load_rect = cut_left(file_load_rect, 250);
-        button_rect.w -= 10;
-
         ti := my_theme.text_input_theme;
-        ti.text_color = ifx exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
+        ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
         ti.text_color_pressed = ti.text_color;
-        ti.font = button_font;
-        action, new_text, state := text_input(file_load_rect, file_name, *ti);
+        ti.font = mono_font;
+        action, new_text, state := text_input(file_load_rect, trace_file_name, *ti);
 
-        if action == .TEXT_MODIFIED {
-            exists = file_exists(state.text);
-            file_name = state.text;
+        if action & .TEXT_MODIFIED {
+            trace_file_exists = file_exists(state.text);
+            trace_file_name = state.text;
         }
 
-        if button(button_rect, "Load File", *my_theme.button_theme) && exists {
-            trace_file := read_entire_file(file_name);
+        if action & .ENTERED {
+            trace_file := read_entire_file(trace_file_name);
             parse_trace_data(trace_file);
+        }
+    }
+
+    visibility_options_rect, slidable_rect := cut_top(main_region_rect, 200);
+
+    {
+        row_width  :: 225;
+        row_height :: 27;
+
+        // Visibility options view.
+        t := my_theme.label_theme;
+        t.font = bigger_mono_font;
+        t.alignment = .Left;
+
+        ct := my_theme.checkbox_theme;
+        ct.button_theme.label_theme = t;
+        ct.text_color_selected = .{1, 0.9, 0.8, 1};
+        ct.text_color          = .{.55, .55, .55, 1.0};
+        ct.text_color_pressed  = .{1, 0.9, 0.8, 1};
+        ct.surface_color_flash = .{1, 0.9, 0.8, 1};
+        ct.surface_color_down  = .{1, 0.9, 0.8, 1};
+        ct.button_color_selected   = .{1, 0.9, 0.8, 1};
+
+        b := my_theme.text_input_theme.button_theme;
+        b.surface_color = .{.08*.7, .208*.7, .236*.7, 1.0};
+        b.label_theme.alignment = .Center;
+
+        row_rect := visibility_options_rect;
+
+        row_rect.y += row_rect.h - row_height;
+        row_rect.h = row_height;
+        row_rect.w = row_width;
+
+        label(row_rect, "Show/Hide by Core", *t);
+
+        {
+            row_rect.y -= row_height;
+            button_rect := shrink(row_rect, 2);
+            button_rect.w -= 30;
+            if button(button_rect, "All/None", *b) && show_hide_settings.cores.count {
+                set := !show_hide_settings.cores[0];
+                for* show_hide_settings.cores it.* = set;
+            }
+        }
+
+        for 0..trace_data.num_cores-1 {
+            row_rect.y -= row_height;
+
+            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 200 {
+                row_rect.y = visibility_options_rect.y;
+                row_rect.y += visibility_options_rect.h - row_height * 2;
+                row_rect.x += row_width;
+            }
+
+            if base_checkbox(row_rect, tprint("Core %", it), show_hide_settings.cores[it], *ct, it) {
+                show_hide_settings.cores[it] = !show_hide_settings.cores[it];
+            }
+        }
+
+        row_rect.y = visibility_options_rect.y;
+        row_rect.y += visibility_options_rect.h - row_height;
+        row_rect.x += row_width;
+
+        label(row_rect, "Show/Hide by Thread", *t);
+
+        {
+            row_rect.y -= row_height;
+            button_rect := shrink(row_rect, 2);
+            button_rect.w -= 30;
+            if button(button_rect, "All/None", *b) && show_hide_settings.threads.count {
+                set := !show_hide_settings.threads[0];
+                for* show_hide_settings.threads it.* = set;
+            }
+        }
+        
+        for 0..trace_data.threads.count-1 {
+            row_rect.y -= row_height;
+
+            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 175 {
+                row_rect.y = visibility_options_rect.y;
+                row_rect.y += visibility_options_rect.h - row_height * 2;
+                row_rect.x += row_width;
+            }
+
+            if base_checkbox(row_rect, trace_data.threads[it], show_hide_settings.threads[it], *ct, it) {
+                show_hide_settings.threads[it] = !show_hide_settings.threads[it];
+            }
+        }
+
+        row_rect.y = visibility_options_rect.y;
+        row_rect.y += visibility_options_rect.h - row_height;
+        row_rect.x += row_width;
+
+        label(row_rect, "Show/Hide by Tag", *t);
+
+        {
+            row_rect.y -= row_height;
+            button_rect := shrink(row_rect, 2);
+            button_rect.w -= 30;
+            if button(button_rect, "All/None", *b) && show_hide_settings.tags.count {
+                set := !show_hide_settings.tags[0];
+                for* show_hide_settings.tags it.* = set;
+            }
+        }
+
+        tag_info := type_info(Trace_Tag);
+
+        for tag_info.names {
+            row_rect.y -= row_height;
+
+            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 175 {
+                row_rect.y = visibility_options_rect.y;
+                row_rect.y += visibility_options_rect.h - row_height * 2;
+                row_rect.x += row_width;
+            }
+
+            if base_checkbox(row_rect, it, show_hide_settings.tags[it_index], *ct, it_index) {
+                show_hide_settings.tags[it_index] = !show_hide_settings.tags[it_index];
+            }
         }
     }
 
@@ -206,13 +431,6 @@ draw_one_frame :: (dt: float) {
 
         st := my_theme.scrollable_region_theme;
         st.region_background.shape.rounding_flags = 0;
-        stn := *st.scrollbar_nib_theme;
-        // stn.enable_variable_frame_thickness = false;
-        // stn.rectangle_shape.frame_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
-        // stn.rectangle_shape.frame_thickness = 3;
-        // stn.rectangle_shape.roundedness_type = .ABSOLUTE_FROM_THEME_FIELD;
-        // stn.rectangle_shape.roundedness = 8;
-        // stn.frame_thickness_flash = .01;
 
         state, scroll_rect := begin_scrollable_region(left_rect, *st);
 
@@ -220,44 +438,92 @@ draw_one_frame :: (dt: float) {
 
         row_height := 18.0;
         row_rect := scroll_rect;
-        row_rect.h = row_height - 2;
+        row_rect.h = row_height;
         row_rect.y += scroll_position;
         row_rect.y += scroll_rect.h;
-        // row_rect.x += 5;
-        // row_rect.w -= 5;
 
         for trace_data.entries {
+            if !show_hide_settings.cores  [it.core_id] continue;
+            if !show_hide_settings.threads[it.task_id] continue;
+            if !show_hide_settings.tags   [it.tag]     continue;
+
             row_rect.y -= row_height;
 
-            row_theme: = my_theme.button_theme;
+            if row_rect.y < 0 || row_rect.y > cast(float)height continue;
+
+            row_theme := my_theme.button_theme;
             row_theme.alignment = .Left;
             row_theme.text_color = .{.75, .75, .75, 1};
-            row_theme.font = button_font;
-            row_theme.surface_color = .{};
-            row_theme.frame_color = .{};
+            row_theme.font = mono_font;
 
-            button(row_rect, "", *row_theme, it_index);
+            if selected_entry != it_index {
+                row_theme.surface_color = .{};
+                row_theme.frame_color = .{};
+            }
+
+            if array_find(highlighted_trace_entries, it_index) {
+                row_theme.surface_color = .{0.5, 0.3, 0.3, 0.6};
+                row_theme.frame_color = .{0.5, 0.3, 0.3, 0.8};
+            }
+
+            if button(row_rect, "", *row_theme, it_index) {
+                selected_entry = it_index;
+                update_highlighted_trace_entries();
+            }
+
             label_rect := row_rect;
+            lt := *row_theme.label_theme;
 
             time_seconds := cast(float)it.tsc / cast(float)trace_data.tsc_frequency;
-
             text := tprint("%", formatFloat(time_seconds, trailing_width=3, zero_removal=.NO));
-            label(label_rect, text, *row_theme.label_theme);
+            label(label_rect, text, lt);
 
             label_rect.x += 75;
 
-            text = tprint("%", it.tag, );
-            label(label_rect, text, *row_theme.label_theme);
+            text = tprint("%", it.tag);
+            label(label_rect, text, lt);
 
             label_rect.x += 200;
 
-            text = tprint("%", trace_data.threads[it.user[0]-1]);
-            label(label_rect, text, *row_theme.label_theme);
+            {
+                // Say what the thread name was.
+                if it.task_id > cast(u64)trace_data.threads.count-1 {
+                    text = "(Error in data)";
+                } else {
+                    text = tprint("%", trace_data.threads[it.task_id]);
+                }
 
-            label_rect.x += 125;
+                label(label_rect, text, lt);
 
-            text = tprint("->   %", trace_data.threads[it.user[1]-1]);
-            label(label_rect, text, *row_theme.label_theme);
+                label_rect.x += 125;
+            }
+
+            if it.tag == {
+              case .scheduling_timer;
+                text = tprint("Preempt disable count %", it.user[0]);
+                label(label_rect, text, lt);
+
+              case .syscall;
+                syscall_names := string.["Zero (Invalid)", "Yield", "Get Cpu Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex"];
+                label(label_rect, syscall_names[it.user[0]], lt);
+
+              case .context_switch;
+                if it.user[1] > cast(u64)trace_data.threads.count-1 {
+                    text = "(Error in data)";
+                } else {
+                    text = tprint("Switch to %", trace_data.threads[it.user[1]]);
+                }
+
+                label(label_rect, text, lt);
+
+              case .small_object_alloc;  #through;
+              case .small_object_free;   #through;
+              case .block_alloc;         #through;
+              case .block_resize;        #through;
+              case .block_free;
+                text = tprint("% bytes at 0x%", it.user[1], cast(*void)it.user[0]);
+                label(label_rect, text, lt);
+            }
         }
 
         end_scrollable_region(state, row_rect.x, row_rect.y, *scroll_position);
@@ -283,6 +549,72 @@ draw_one_frame :: (dt: float) {
     Simp.swap_buffers(my_window);
 }
 
+update_highlighted_trace_entries :: () {
+    array_reset(*highlighted_trace_entries);
+
+    sel := *trace_data.entries[selected_entry];
+
+    for selected_entry+1..trace_data.entries.count-1 {
+        // Scan forward to find related trace entries.
+        other := *trace_data.entries[it];
+
+        if sel.tag == {
+          case .block_resize; #through;
+          case .block_alloc;
+            if other.tag == .block_free || other.tag == .block_resize {
+                if sel.user[0] == other.user[0] {
+                    array_add(*highlighted_trace_entries, it);
+                    if other.tag == .block_free break;
+                }
+            }
+
+          case .small_object_alloc;
+            if other.tag == .small_object_free {
+                if sel.user[0] == other.user[0] {
+                    array_add(*highlighted_trace_entries, it);
+                    break;
+                }
+            }
+
+          case .context_switch;
+            if other.tag == .context_switch && sel.user[1] == other.task_id {
+                array_add(*highlighted_trace_entries, it);
+                break;
+            }
+        }
+    }
+
+    for< 0..selected_entry-1 {
+        // Scan backwards.
+        other := *trace_data.entries[it];
+
+        if sel.tag == {
+          case .block_resize; #through;
+          case .block_free;
+            if other.tag == .block_alloc || other.tag == .block_resize {
+                if sel.user[0] == other.user[0] {
+                    array_add(*highlighted_trace_entries, it);
+                    if other.tag == .block_alloc break;
+                }
+            }
+
+          case .small_object_free;
+            if other.tag == .small_object_alloc {
+                if sel.user[0] == other.user[0] {
+                    array_add(*highlighted_trace_entries, it);
+                    break;
+                }
+            }
+
+          case .context_switch;
+            if other.tag == .context_switch && other.user[1] == sel.task_id {
+                array_add(*highlighted_trace_entries, it);
+                break;
+            }
+        }
+    }
+}
+
 my_init_fonts :: () {
     if !working_directory_set {
         // So that we can load our font, set to path of running executable.
@@ -295,10 +627,9 @@ my_init_fonts :: () {
     my_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", 64);
     assert(my_font != null);
 
-    button_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", 14);
-    assert(button_font != null);
-
-    title_font = Simp.get_font_at_size("data", "Miama.otf", 128);
+    mono_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", 14);
+    bigger_mono_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", 16);
+    assert(mono_font != null);
 
     story_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", 16);
 //    title_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
@@ -307,22 +638,11 @@ my_init_fonts :: () {
 Font :: Simp.Dynamic_Font;
 
 my_font:     *Font;
-button_font: *Font;
-title_font:  *Font;
+mono_font:   *Font;
+bigger_mono_font:   *Font;
 story_font:  *Font;
 
 working_directory_set := false;
-
-Simp  :: #import "Simp";
-Input :: #import "Input";
-
-#import "Window_Creation";
-
-#import "File";
-#import "Basic";
-#import "Math";
-#import "System";
-#import "String";
 
 modify_string :: (ps: *string, new_value: string) {
     free(ps.*);

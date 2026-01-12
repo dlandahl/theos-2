@@ -12,6 +12,14 @@ TRACE_ENTRIES_PER_BUFFER :: 0x20_0000 / size_of(Trace_Entry);
 
 Trace_Tag :: enum u16 {
     context_switch;
+    start_task;
+    scheduling_timer;
+    syscall;
+    small_object_alloc;
+    small_object_free;
+    block_alloc;
+    block_free;
+    block_resize;
 }
 
 Trace_Header :: struct {
@@ -89,7 +97,7 @@ file_table :: string.[
         tracing_enabled = true;
     }
 
-    trace :: inline (tag: Trace_Tag, user_data: ..Any, $loc := #caller_location) {
+    trace :: inline (tag: Trace_Tag, user_data: ..Any, $loc := #caller_location) #no_context {
         // Forwarding through this inline procedure so we don't generate the big procedure below for every caller location just to get the file_id.
         using global.trace_state;
 
@@ -111,7 +119,7 @@ file_table :: string.[
         trace_internal(tag, file_id, cast(u16)loc.line_number, .. user_data);
     }
 
-    trace_internal :: (tag: Trace_Tag, file: u8, line: u16, user_data: ..Any) {
+    trace_internal :: (tag: Trace_Tag, file: u8, line: u16, user_data: ..Any) #no_context {
         using global.trace_state;
 
         index := fetch_add(*current_index, 1);
@@ -124,10 +132,10 @@ file_table :: string.[
         entry.line = line;
         entry.tag  = tag;
 
-        assert(user_data.count <= entry.user.count); // Todo: Would like to compile-time check this.
+        if (user_data.count > entry.user.count) bluescreen(); // Todo: Would like to compile-time check this.
 
         for user_data {
-            assert(it.type.runtime_size <= size_of(u64));
+            if (it.type.runtime_size > size_of(u64)) bluescreen();
             memcpy(*entry.user[it_index], it.value_pointer, it.type.runtime_size);
         }
 

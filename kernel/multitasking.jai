@@ -231,10 +231,10 @@ schedule_tasks :: () {
     current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
     current.on_core.task_state_segment.rsp[0] = next.kernel_stack;
 
+    trace(.context_switch, current.id, next.id);
+
     scheduler.last_task_switch_timestamp = time_now;
     scheduler.current_task = next;
-
-    trace(.context_switch, current.id, next.id);
 
     context_switch(current, next);
 
@@ -251,12 +251,14 @@ new_task_start :: () #no_context {
         core := get_current_core();
         release(*core.scheduler.spinlock);
 
-        // ts_data := alloc(TEMPORARY_STORAGE_SIZE);
-        // defer free(ts_data);
-        // 
-        // ts: Temporary_Storage;
-        // set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, ts_data);
-        // context.temporary_storage = *ts;
+        trace(.start_task);
+
+        ts_data := alloc(TEMPORARY_STORAGE_SIZE);
+        defer free(ts_data);
+
+        ts: Temporary_Storage;
+        set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, ts_data);
+        context.temporary_storage = *ts;
 
         task := get_current_task();
         task._context = *context;
@@ -276,10 +278,12 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
     defer if global.tsc_deadline_support {
-        schedule_tsc_deadline_interrupt(5);
+        schedule_tsc_deadline_interrupt(delay_ms = 40);
     }
 
     core := get_current_core();
+    // trace(.scheduling_timer, core.preempt_disable_count);
+
     if core.preempt_disable_count > 0 {
         return;
     }
@@ -725,6 +729,8 @@ unlock_from_user_mode :: (mutex: *Mutex) {
 #program_export
 syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
+
+    trace(.syscall, data.rax);
 
     if data.rax == {
       case 1;
