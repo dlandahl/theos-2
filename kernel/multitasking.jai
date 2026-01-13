@@ -119,7 +119,7 @@ core_begin_multitasking :: () {
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x400000, global.scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(0x8000000, global.scheduling_interrupt_gate);
     }
 }
 
@@ -164,8 +164,9 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     }
 
     stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
-    stack.return_address = cast(*void) new_task_start;
+    stack.registers.rbp = 0; // Stack trace sentinel.
     stack.flags = 0;
+    stack.return_address = cast(*void) new_task_start;
 
     new_task.rsp = stack;
     new_task.xsave.mxcsr = .MASK_ALL;
@@ -244,6 +245,8 @@ schedule_tasks :: () {
 context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
 
 new_task_start :: () #no_context {
+    set_stack_trace_sentinel();
+
     // When booting a new kernel thread, we could go straight to its entry point, but we always
     // forward through this procedure to conveniently set up the Context and release the scheduler spinlock.
 
@@ -282,7 +285,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     }
 
     core := get_current_core();
-    // trace(.scheduling_timer, core.preempt_disable_count);
+    trace(.scheduling_timer, core.preempt_disable_count);
 
     if core.preempt_disable_count > 0 {
         return;

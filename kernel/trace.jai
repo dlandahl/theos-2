@@ -50,7 +50,8 @@ Trace_Entry :: struct {
     tag:     Trace_Tag;
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
-    user:    [4] u64;
+    user:        [2] u64;
+    stack_trace: [8] u32;
 }
 
 // Index in this table will determine the file ID of a trace entry coming from that file.
@@ -66,7 +67,7 @@ file_table :: string.[
     "x64.jai",
 ];
 
-#assert size_of(Trace_Entry) == 48;
+#assert size_of(Trace_Entry) == 64;
 
 // This file will also be #load-ed by any trace analyser software we create, in which case we only need the above descriptions of the format.
 #if TRACE_INCLUDE_RUNTIME_CODE {
@@ -138,6 +139,8 @@ file_table :: string.[
             if (it.type.runtime_size > size_of(u64)) bluescreen();
             memcpy(*entry.user[it_index], it.value_pointer, it.type.runtime_size);
         }
+
+        do_stack_trace(entry.stack_trace);
 
         buffer_index    := index / TRACE_ENTRIES_PER_BUFFER;
         index_in_buffer := index % TRACE_ENTRIES_PER_BUFFER;

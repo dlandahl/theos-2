@@ -11,6 +11,7 @@ Input :: #import "Input";
 #import "Math";
 #import "System";
 #import "String";
+#import "Bucket_Array";
 
 #import "debug_info";
 #import "executable_formats";
@@ -21,11 +22,11 @@ TRACE_INCLUDE_RUNTIME_CODE :: false;
 current_time: float64;
 last\  _time: float64;
 
-SCALE :: 1;
+UI_SCALE := 2.0;
 
 my_window: Window_Type;
-window_width  : s32 = 1920*SCALE;
-window_height : s32 = 1080*SCALE;
+window_width  : s32 = 1920;
+window_height : s32 = 1080;
 
 current_theme: s32 = xx Default_Themes.Default;
 my_theme: Overall_Theme;
@@ -78,12 +79,6 @@ parse_trace_data :: (_trace_file: string) {
         string_table = *entry.data + entry.name_length;
     }
 
-    array_resize(*trace_data.entries, header.num_trace_entries);
-
-    // dest  := trace_data.entries.data;
-    // src   := string_table;
-    // bytes := header.num_trace_entries * size_of(Trace_Entry);
-    // memcpy(dest, src, bytes);
     trace_data.entries.data = string_table;
     trace_data.entries.count = header.num_trace_entries;
 
@@ -95,13 +90,14 @@ parse_trace_data :: (_trace_file: string) {
     for* show_hide_settings.tags    it.* = true;
 }
 
+debug_info: Debug_Info;
+
 read_debug_info :: (kernel_file_name: string) {
     binary_file := read_entire_file(kernel_file_name);
     success, elf := parse_elf(binary_file, kernel_file_name);
 
     assert(success);
 
-    debug_info: Debug_Info;
     if elf.debug_info_section && elf.debug_abbrev_section && elf.debug_line_section {
         info   := get_section_data(elf, elf.debug_info_section);
         abbrev := get_section_data(elf, elf.debug_abbrev_section);
@@ -111,28 +107,17 @@ read_debug_info :: (kernel_file_name: string) {
         success &= apply_relocations(elf, elf.debug_line_section_index, line);
         success &= apply_relocations(elf, elf.debug_info_section_index, info);
         if !success {
-            print("Failed to apply relocations.");
+            log("Failed to apply relocations.");
             return;
         }
 
         debug_info, success = parse_dwarf_debug_info(info, abbrev, line, str);
         if !success {
-            print("Failed to parse debug info.");
+            log("Failed to parse debug info.");
             return;
         }
-    }
-
-    for cu: debug_info.compilation_units {
-        mapping, success := get_line_mapping_for_address(cu.line_info, 0xffffffff800ca110);
-
-        context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 0;
-
-        if success {
-            file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
-            log("Success. Mapping: %\nFilename: %", mapping, file_name);
-        } else {
-            log("Failure.");
-        }
+    } else {
+        log("Failed to find debug sections in elf.");
     }
 }
 
@@ -163,7 +148,7 @@ main :: () {
     my_init_fonts();
     ui_init();
 
-    trace_file_name = "../logs/vbox_trace.bin";
+    trace_file_name = "../logs/qemu_trace.bin";
     trace_file_exists = file_exists(trace_file_name);
 
     if trace_file_exists {
@@ -208,9 +193,15 @@ main :: () {
                         active_widget_deactivate_all();
                     }
 
+                    originally_selected_entry := selected_entry;
+
                     if event.key_code == .ARROW_UP {
                         while true {
-                            selected_entry = max(selected_entry - 1, 0);
+                            if selected_entry == 0 {
+                                selected_entry = originally_selected_entry;
+                                break;
+                            }
+                            selected_entry -= 1;
 
                             entry := trace_data.entries[selected_entry];
                             if !show_hide_settings.cores  [entry.core_id] continue;
@@ -223,7 +214,12 @@ main :: () {
                     }
                     if event.key_code == .ARROW_DOWN {
                         while true {
-                            selected_entry = min(selected_entry + 1, trace_data.entries.count-1);
+                            if selected_entry == trace_data.entries.count-1 {
+                                selected_entry = originally_selected_entry;
+                                break;
+                            }
+
+                            selected_entry += 1;
 
                             entry := trace_data.entries[selected_entry];
                             if !show_hide_settings.cores  [entry.core_id] continue;
@@ -233,6 +229,15 @@ main :: () {
                             update_highlighted_trace_entries();
                             break;
                         }
+                    }
+
+                    if event.key_code == #char "=" && event.ctrl_pressed {
+                        UI_SCALE += 0.1;
+                        my_init_fonts();
+                    }
+                    if event.key_code == #char "-" && event.ctrl_pressed {
+                        UI_SCALE -= 0.1;
+                        my_init_fonts();
                     }
                 }
             }
@@ -273,14 +278,14 @@ draw_one_frame :: (dt: float) {
     ui_per_frame_update(my_window, width, height, current_time);
 
     r := get_rect(0, 0, xx width, xx height);
-    r = shrink(r, 25);
+    r = shrink(r, 25*UI_SCALE);
 
-    file_load_rect, main_region_rect := cut_top(r, 50);
+    file_load_rect, main_region_rect := cut_top(r, 50*UI_SCALE);
     {
         // File loading section.
 
-        file_load_rect.h -= 20;
-        file_load_rect.y += 20;
+        file_load_rect.h -= 20*UI_SCALE;
+        file_load_rect.y += 20*UI_SCALE;
 
         ti := my_theme.text_input_theme;
         ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
@@ -299,17 +304,17 @@ draw_one_frame :: (dt: float) {
         }
     }
 
-    visibility_options_rect, slidable_rect := cut_top(main_region_rect, 200);
+    visibility_options_rect, slidable_rect := cut_top(main_region_rect, 200*UI_SCALE);
 
     {
-        row_width  :: 225;
-        row_height :: 27;
+        row_width  := 225*UI_SCALE;
+        row_height := 25*UI_SCALE;
 
         // Visibility options view.
         t := my_theme.label_theme;
-        t.font = bigger_mono_font;
+        t.font = mono_font;
         t.alignment = .Left;
-
+        
         ct := my_theme.checkbox_theme;
         ct.button_theme.label_theme = t;
         ct.text_color_selected = .{1, 0.9, 0.8, 1};
@@ -333,8 +338,8 @@ draw_one_frame :: (dt: float) {
 
         {
             row_rect.y -= row_height;
-            button_rect := shrink(row_rect, 2);
-            button_rect.w -= 30;
+            button_rect := shrink(row_rect, 2*UI_SCALE);
+            button_rect.w -= 30*UI_SCALE;
             if button(button_rect, "All/None", *b) && show_hide_settings.cores.count {
                 set := !show_hide_settings.cores[0];
                 for* show_hide_settings.cores it.* = set;
@@ -344,7 +349,7 @@ draw_one_frame :: (dt: float) {
         for 0..trace_data.num_cores-1 {
             row_rect.y -= row_height;
 
-            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 200 {
+            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 200*UI_SCALE {
                 row_rect.y = visibility_options_rect.y;
                 row_rect.y += visibility_options_rect.h - row_height * 2;
                 row_rect.x += row_width;
@@ -363,8 +368,8 @@ draw_one_frame :: (dt: float) {
 
         {
             row_rect.y -= row_height;
-            button_rect := shrink(row_rect, 2);
-            button_rect.w -= 30;
+            button_rect := shrink(row_rect, 2*UI_SCALE);
+            button_rect.w -= 30*UI_SCALE;
             if button(button_rect, "All/None", *b) && show_hide_settings.threads.count {
                 set := !show_hide_settings.threads[0];
                 for* show_hide_settings.threads it.* = set;
@@ -374,7 +379,7 @@ draw_one_frame :: (dt: float) {
         for 0..trace_data.threads.count-1 {
             row_rect.y -= row_height;
 
-            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 175 {
+            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 175*UI_SCALE {
                 row_rect.y = visibility_options_rect.y;
                 row_rect.y += visibility_options_rect.h - row_height * 2;
                 row_rect.x += row_width;
@@ -393,8 +398,8 @@ draw_one_frame :: (dt: float) {
 
         {
             row_rect.y -= row_height;
-            button_rect := shrink(row_rect, 2);
-            button_rect.w -= 30;
+            button_rect := shrink(row_rect, 2*UI_SCALE);
+            button_rect.w -= 30*UI_SCALE;
             if button(button_rect, "All/None", *b) && show_hide_settings.tags.count {
                 set := !show_hide_settings.tags[0];
                 for* show_hide_settings.tags it.* = set;
@@ -406,7 +411,7 @@ draw_one_frame :: (dt: float) {
         for tag_info.names {
             row_rect.y -= row_height;
 
-            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 175 {
+            if row_rect.y <= visibility_options_rect.y - visibility_options_rect.h + row_rect.h + 175*UI_SCALE {
                 row_rect.y = visibility_options_rect.y;
                 row_rect.y += visibility_options_rect.h - row_height * 2;
                 row_rect.x += row_width;
@@ -420,9 +425,11 @@ draw_one_frame :: (dt: float) {
 
     st := my_theme.slidable_region_theme;
     st.divider_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
-    st.divider_thickness = 10;
+    st.divider_thickness = 10*UI_SCALE;
     st.first_background.shape.rounding_flags = 0;
     st.second_background.shape.rounding_flags = 0;
+    st.initial_divider_position_type = .ABSOLUTE_FROM_THEME_FIELD;
+    st.initial_divider_position = 500*UI_SCALE;
 
     slide_state, left_rect, right_rect := slidable_region(slidable_rect, *st);
 
@@ -434,9 +441,9 @@ draw_one_frame :: (dt: float) {
 
         state, scroll_rect := begin_scrollable_region(left_rect, *st);
 
-        state.bar_rect.w = 25; // Scroll bar width is hardcoded to be relative to render target height, in GetRect. This means we can't easily make it fit into the parent area correctly.
+        state.bar_rect.w = 25*UI_SCALE; // Scroll bar width is hardcoded to be relative to render target height, in GetRect. This means we can't easily make it fit into the parent area correctly.
 
-        row_height := 18.0;
+        row_height := 18.0*UI_SCALE;
         row_rect := scroll_rect;
         row_rect.h = row_height;
         row_rect.y += scroll_position;
@@ -478,12 +485,12 @@ draw_one_frame :: (dt: float) {
             text := tprint("%", formatFloat(time_seconds, trailing_width=3, zero_removal=.NO));
             label(label_rect, text, lt);
 
-            label_rect.x += 75;
+            label_rect.x += 75*UI_SCALE;
 
             text = tprint("%", it.tag);
             label(label_rect, text, lt);
 
-            label_rect.x += 200;
+            label_rect.x += 200*UI_SCALE;
 
             {
                 // Say what the thread name was.
@@ -495,7 +502,7 @@ draw_one_frame :: (dt: float) {
 
                 label(label_rect, text, lt);
 
-                label_rect.x += 125;
+                label_rect.x += 150*UI_SCALE;
             }
 
             if it.tag == {
@@ -532,9 +539,55 @@ draw_one_frame :: (dt: float) {
     switch_to_right_rect(slide_state);
 
     {
-        // Draw CPU core tracks.
-        for 0..trace_data.num_cores-1 {
-            
+        // Right slide region (currently stack trace.)
+        entry := trace_data.entries[selected_entry];
+
+        row_height := 20*UI_SCALE;
+
+        stack_trace_rect := shrink(right_rect, 5*UI_SCALE);
+
+        row_theme := my_theme.label_theme;
+        row_theme.alignment = .Left;
+        row_theme.text_color = .{.75, .75, .75, 1};
+        row_theme.font = mono_font;
+
+        row_rect := stack_trace_rect;
+        row_rect.h = row_height;
+        row_rect.y += stack_trace_rect.h;
+        row_rect.y -= row_height + 5*UI_SCALE;
+
+        for entry.stack_trace {
+            if it == 0xffff_ffff || it == 0xffff_fffe || it == 0 {
+                break;
+            }
+
+            address := cast(u64)it + 0xffff_ffff_0000_0000;
+
+            proc_name, file, line := get_debug_info_for_address(address);
+
+            remove_prefix :: (s: string) #expand {
+                if starts_with(file, s) {
+                    file.data  += s.count;
+                    file.count -= s.count;
+                }
+            }
+
+            remove_prefix("/home/dlandahl/");
+            remove_prefix("new_os/");
+
+            text := tprint("%. [%] %", it_index, formatInt(it, base=16), proc_name);
+            label(row_rect, text, *row_theme);
+
+            row_rect.y -= row_height;
+
+            if file {
+                text = tprint("   at %:%", file, line);
+                label(row_rect, text, *row_theme);
+
+                row_rect.y -= row_height;
+            }
+
+            row_rect.y -= 5*UI_SCALE;
         }
     }
 
@@ -547,6 +600,40 @@ draw_one_frame :: (dt: float) {
     //
 
     Simp.swap_buffers(my_window);
+}
+
+get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string, line: int {
+    // Todo: This is currently called every frame. Might be worth it to cache the result.
+    for cu: debug_info.compilation_units {
+        if address < cu.low_pc || address >= cu.high_pc continue;
+
+        proc_name: string;
+
+        for sp: cu.subprograms {
+            if address < sp.low_pc || address >= sp.high_pc continue;
+
+            proc_name = sp.name;
+            break;
+        }
+
+        for seq: cu.line_info.sequences {
+            first := seq.addresses[0];
+            last  := seq.addresses[seq.addresses.count-1];
+
+            if address < first || address >= last continue;
+
+            for< seq_addr: seq.addresses {
+                if seq_addr > address continue;
+
+                mapping   := seq.mappings[it_index];
+                file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
+
+                return proc_name, file_name, mapping.line;
+            }
+        }
+    }
+
+    return "(no debug info)", "", 0;
 }
 
 update_highlighted_trace_entries :: () {
@@ -624,23 +711,17 @@ my_init_fonts :: () {
         working_directory_set = true;
     }
 
-    my_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", 64);
-    assert(my_font != null);
+    Simp.release_font(mono_font);
+    Simp.release_font(bigger_mono_font);
 
-    mono_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", 14);
-    bigger_mono_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", 16);
-    assert(mono_font != null);
-
-    story_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", 16);
-//    title_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
+    mono_font        = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", cast(int)(14*UI_SCALE));
+    bigger_mono_font = Simp.get_font_at_size("data", "FiraMono-Medium.ttf", cast(int)(16*UI_SCALE));
 }
 
 Font :: Simp.Dynamic_Font;
 
-my_font:     *Font;
-mono_font:   *Font;
-bigger_mono_font:   *Font;
-story_font:  *Font;
+mono_font:        *Font;
+bigger_mono_font: *Font;
 
 working_directory_set := false;
 

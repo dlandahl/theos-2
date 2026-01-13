@@ -366,12 +366,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
     return 0;
 }
 
-// Code to swap out the address space and the stack pointer that were given by UEFI, with the ones we want to use for the kernel. EFI/Microsoft calling convention. Represented in machine code because it's only four instructions.
+// Code to swap out the address space and the stack pointer that were given by UEFI, with the ones we want to use for the kernel. EFI/Microsoft calling convention. Represented in machine code because it's only three instructions.
 
 switch_address_space_code := u8.[
     0x0f, 0x22, 0xda,   // mov cr3, rdx
     0x48, 0x89, 0xcc,   // mov rsp, rcx
-    0x48, 0x89, 0xe5,   // mov rbp, rsp
     0x41, 0xff, 0xd0,   // call r8 
 ] #align 16;
 

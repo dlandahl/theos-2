@@ -264,6 +264,7 @@ ap_startup_spinlock: Spinlock(lock_type = .RAW);
 
 ap_entry_point :: () #c_call {
 
+    set_stack_trace_sentinel();
     release(*ap_startup_spinlock);
 
     push_context {
@@ -487,11 +488,6 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
 
 initialize_uacpi :: () {
 
-    // uACPI uses thread local storage.
-    tls := get_4k_page() + DIRECT_MAPPING_BASE;
-    #asm FSGSBASE { wrfsbase tls; }
-
-
     init_uacpi_interrupt_handlers();
 
     if uacpi_initialize(0) != .OK bluescreen();
@@ -657,12 +653,8 @@ uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     // Todo: uACPI allocates a large number of tiny, equally sized blocks separately using a general purpose allocator, which is always going to be wasteful. No easy way to fix this without modifying uACPI.
 
     push_context {
-        return uacpi_alloc_forwarder(cast(s64)size);
+        return alloc(cast(s64)size);
     }
-}
-
-uacpi_alloc_forwarder :: (size: s64) -> *void {
-    return alloc(size);
 }
 
 #program_export

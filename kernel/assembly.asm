@@ -78,8 +78,6 @@ context_switch:
 
     ret
 
-
-
 extern get_kernel_stack
 extern syscall_handler
 global syscall_entry
@@ -118,6 +116,13 @@ align 16
 get_rflags:
     pushfq
     pop rax
+    ret
+
+
+global get_rbp
+align 16
+get_rbp:
+    mov rax, rbp
     ret
 
 

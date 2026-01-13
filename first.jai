@@ -313,8 +313,8 @@ format_disk :: () -> success: bool {
     log("Formatting disk image\n\n");
 
     script :: string.[
-        "dd if=/dev/zero of=fat.img bs=1k count=2880",
-        "mformat -i fat.img -f 2880 ::",
+        "dd if=/dev/zero of=fat.img bs=1k count=49152",
+        "mformat -i fat.img -F ::",
         "mmd -i fat.img ::/EFI",
         "mmd -i fat.img ::/EFI/BOOT",
         "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",

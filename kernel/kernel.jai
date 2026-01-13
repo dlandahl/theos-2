@@ -147,6 +147,8 @@ Assembly :: #library,no_dll "../.build/assembly";
 #program_export
 kernel_entry :: () #no_context {
 
+    set_stack_trace_sentinel();
+
     write_string_callback = kernel_write_string;
     set_default_context_callbacks();
 
@@ -222,12 +224,6 @@ kernel_entry :: () #no_context {
     push_context {
         global.first_context = *context;
 
-        {
-            ts: Temporary_Storage;
-            set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
-            context.temporary_storage = *ts;
-        }
-
         using global.framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -260,6 +256,12 @@ kernel_entry :: () #no_context {
 
         global.text_drawing_state.font = parse_netpbm(font_file);
         global.text_drawing_state.font_loaded = true;
+
+        {
+            ts: Temporary_Storage;
+            set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
+            context.temporary_storage = *ts;
+        }
 
         {
             temporary_buffer := talloc(0x8000);
@@ -321,10 +323,10 @@ kernel_entry :: () #no_context {
         #asm { sti; }
 
         user_mode_stress_test(2);
-        semaphore_test();
+        // semaphore_test();
         network_test();
 
-        sleep(20, .seconds);
+        sleep(5, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -336,6 +338,47 @@ kernel_entry :: () #no_context {
         }
     }
 }
+
+
+
+get_rbp :: () -> u64 #foreign Assembly;
+
+Call_Stack_Frame :: struct {
+    rbp: *Call_Stack_Frame;
+    return_address: u64;
+}
+
+set_stack_trace_sentinel :: inline () #no_context {
+    // We rely on this being inlined so it sees the correct rbp.
+    stack_frame := cast(*Call_Stack_Frame) get_rbp();
+    stack_frame.rbp = null;
+}
+
+do_stack_trace :: (output: [] u32) #no_context {
+    stack_frame := cast(*Call_Stack_Frame) get_rbp();
+
+    for 0..output.count-1 {
+        if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
+            // The stack frame is not in the kernel address space. We can't read it.
+            break;
+        }
+
+        if !stack_frame.rbp {
+            // Found the stack trace sentinel.
+            break;
+        }
+
+        if stack_frame.return_address >> 20 != 0xffff_ffff_800 {
+            // The return address doesn't point into kernel code, unless the kernel executable got really big.
+            break;
+        }
+
+        output[it] = cast,trunc(u32) stack_frame.return_address;
+        stack_frame = stack_frame.rbp;
+    }
+}
+
+
 
 semaphore_test :: (threads_per_core := 2) {
 
@@ -459,7 +502,7 @@ network_test :: () {
     tls := establish_tls_connection(connection);
 
     request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-    request = "GET /server.py HTTP/1.1\r\nHost: DESKTOP-FPIMHUG\r\nAccept: text/x-python\r\n\r\n";
+    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
 
     tls_transmit_application_data(*tls, request);
 
