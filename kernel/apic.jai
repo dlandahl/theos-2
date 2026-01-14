@@ -559,7 +559,7 @@ uACPI_State :: struct {
         ctx: uacpi_handle;
     }
 
-    work_queue: Queue(Work_Item);
+    work_queue: List_Queue(Work_Item);
     work_queue_lock: Spinlock(.IRQ);
     work_thread: *Task_Info;
     work_in_progress: bool;
@@ -592,6 +592,8 @@ uACPI_State :: struct {
 
             acquire(*work_queue_lock);
 
+            free_small_object(item);
+
             work_in_progress = false;
             if queue_is_empty(work_queue) {
                 notify_all(*work_completed);
@@ -600,8 +602,11 @@ uACPI_State :: struct {
             release(*work_queue_lock);
         }
     }
+
+    memory_pool: Pool;
 }
 
+#import "Pool";
 #import "uACPI";
 
 #program_export
@@ -650,20 +655,16 @@ uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
 
 #program_export
 uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
-    // Todo: uACPI allocates a large number of tiny, equally sized blocks separately using a general purpose allocator, which is always going to be wasteful. No easy way to fix this without modifying uACPI.
+    // Todo: uACPI wants to allocate a large number of tiny, equally sized blocks separately using a general purpose allocator, which is always going to be wasteful. For now it just gets a pool/arena to avoid spamming the block allocator.
 
     push_context {
-        return alloc(cast(s64)size);
+        return get(*global.uacpi_state.memory_pool, cast(s64)size);
     }
 }
 
 #program_export
 uacpi_kernel_free :: (mem: *void) #c_call {
-    if mem == null return;
-
-    push_context {
-        free(mem);
-    }
+    // Do nothing, uACPI memory is pooled for now.
 }
 
 #program_export
@@ -887,12 +888,12 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
 uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handler, ctx: uacpi_handle) -> uacpi_status #c_call {
     using global.uacpi_state;
 
-    item: Work_Item;
-    item.type = type;
-    item.handler = handler;
-    item.ctx = ctx;
-
     push_context {
+        item := New(work_queue.Node,, global.small_objects);
+        item.type = type;
+        item.handler = handler;
+        item.ctx = ctx;
+
         acquire(*work_queue_lock);
         queue_push(*work_queue, item);
         release(*work_queue_lock);

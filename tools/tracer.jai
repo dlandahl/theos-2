@@ -22,7 +22,7 @@ TRACE_INCLUDE_RUNTIME_CODE :: false;
 current_time: float64;
 last\  _time: float64;
 
-UI_SCALE := 2.0;
+UI_SCALE := 1.0;
 
 my_window: Window_Type;
 window_width  : s32 = 1920;
@@ -156,8 +156,12 @@ main :: () {
         parse_trace_data(trace_file);
     }
 
-    kernel_file_name := "../.build/kernel";
-    read_debug_info(kernel_file_name);
+    kernel_file_name = "../.build/kernel";
+    kernel_file_exists = file_exists(kernel_file_name);
+
+    if kernel_file_exists {
+        read_debug_info(kernel_file_name);
+    }
 
     // do_dwarf_lines(debug_info);
 
@@ -225,7 +229,7 @@ main :: () {
                         }
                     }
 
-                    if event.key_code == #char "=" && event.ctrl_pressed {
+                    if event.key_code == #char "+" && event.ctrl_pressed {
                         UI_SCALE += 0.1;
                         my_init_fonts();
                     }
@@ -248,6 +252,9 @@ scroll_position: float;
 
 trace_file_name: string;
 trace_file_exists: bool;
+
+kernel_file_name: string;
+kernel_file_exists: bool;
 
 selected_entry: int;
 highlighted_trace_entries: [..] int;
@@ -282,19 +289,55 @@ draw_one_frame :: (dt: float) {
         file_load_rect.y += 20*UI_SCALE;
 
         ti := my_theme.text_input_theme;
-        ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
-        ti.text_color_pressed = ti.text_color;
         ti.font = mono_font;
-        action, new_text, state := text_input(file_load_rect, trace_file_name, *ti);
 
-        if action & .TEXT_MODIFIED {
-            trace_file_exists = file_exists(state.text);
-            trace_file_name = state.text;
+        tl := my_theme.label_theme;
+        tl.font = mono_font;
+        tl.alignment = .Left;
+
+        left, right := cut_left(file_load_rect, file_load_rect.w/2);
+
+        left_label,  left_box  := cut_left(left,  110*UI_SCALE);
+        right_label, right_box := cut_left(right, 110*UI_SCALE);
+
+        left\_box.w -= 50*UI_SCALE;
+        right_box.w -= 50*UI_SCALE;
+
+        {
+            label(left_label, "Trace File:", *tl);
+
+            ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
+            ti.text_color_pressed = ti.text_color;
+
+            action, new_text, state := text_input(left_box, trace_file_name, *ti);
+
+            if action & .TEXT_MODIFIED {
+                trace_file_exists = file_exists(state.text);
+                trace_file_name = state.text;
+            }
+
+            if action & .ENTERED {
+                trace_file := read_entire_file(trace_file_name);
+                parse_trace_data(trace_file);
+            }
         }
 
-        if action & .ENTERED {
-            trace_file := read_entire_file(trace_file_name);
-            parse_trace_data(trace_file);
+        {
+            label(right_label, "Debug Info:", *tl);
+
+            ti.text_color = ifx kernel_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
+            ti.text_color_pressed = ti.text_color;
+
+            action, new_text, state := text_input(right_box, kernel_file_name, *ti);
+
+            if action & .TEXT_MODIFIED {
+                kernel_file_exists = file_exists(state.text);
+                kernel_file_name = state.text;
+            }
+
+            if action & .ENTERED {
+                read_debug_info(kernel_file_name);
+            }
         }
     }
 
@@ -306,9 +349,9 @@ draw_one_frame :: (dt: float) {
 
         // Visibility options view.
         t := my_theme.label_theme;
-        t.font = mono_font;
+        t.font = bigger_mono_font;
         t.alignment = .Left;
-        
+
         ct := my_theme.checkbox_theme;
         ct.button_theme.label_theme = t;
         ct.text_color_selected = .{1, 0.9, 0.8, 1};
@@ -530,7 +573,7 @@ draw_one_frame :: (dt: float) {
 
     switch_to_right_rect(slide_state);
 
-    {
+    if trace_data.entries.count {
         // Right slide region (currently stack trace.)
         entry := trace_data.entries[selected_entry];
 
@@ -565,9 +608,11 @@ draw_one_frame :: (dt: float) {
             }
 
             remove_prefix("/home/dlandahl/");
+            remove_prefix("/mnt/c/");
             remove_prefix("new_os/");
+            remove_prefix("new os/");
 
-            text := tprint("%. [%] %", it_index, formatInt(it, base=16), proc_name);
+            text := tprint("%. [%] %", it_index, formatInt(address, base=16), proc_name);
             label(row_rect, text, *row_theme);
 
             row_rect.y -= row_height;

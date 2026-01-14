@@ -51,7 +51,7 @@ Trace_Entry :: struct {
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
     user:        [2] u64;
-    stack_trace: [8] u32;
+    stack_trace: [16] u32;
 }
 
 // Index in this table will determine the file ID of a trace entry coming from that file.
@@ -67,7 +67,7 @@ file_table :: string.[
     "x64.jai",
 ];
 
-#assert size_of(Trace_Entry) == 64;
+#assert size_of(Trace_Entry) == 96;
 
 // This file will also be #load-ed by any trace analyser software we create, in which case we only need the above descriptions of the format.
 #if TRACE_INCLUDE_RUNTIME_CODE {
@@ -99,8 +99,9 @@ file_table :: string.[
     }
 
     trace :: inline (tag: Trace_Tag, user_data: ..Any, $loc := #caller_location) #no_context {
-        // Forwarding through this inline procedure so we don't generate the big procedure below for every caller location just to get the file_id.
         using global.trace_state;
+
+        // Forwarding through this inline procedure so we don't generate the big procedure below for every caller location just to get the file_id.
 
         if !tracing_enabled {
             return;
@@ -117,7 +118,7 @@ file_table :: string.[
             return 255;
         }
 
-        trace_internal(tag, file_id, cast(u16)loc.line_number, .. user_data);
+        trace_internal(tag, file_id, cast(u16)loc.line_number, ..user_data);
     }
 
     trace_internal :: (tag: Trace_Tag, file: u8, line: u16, user_data: ..Any) #no_context {

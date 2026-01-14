@@ -1223,9 +1223,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
 
             allocated_address := cast(u64) (base_address + it.base);
 
-            if bytes_wanted > 128 {
-                trace(.block_alloc, allocated_address, bytes_wanted);
-            }
+            trace(.block_alloc, allocated_address, bytes_wanted);
 
             return allocated_address;
         }
@@ -1262,7 +1260,6 @@ resize_block :: (using allocator: *Block_Allocator, address: u64, new_size: u64)
     additional_bytes_needed := new_size - block.size;
 
     // We only need to check one following block, because free blocks always get coalesced.
-
     if following_block.size < additional_bytes_needed {
         return false;
     }
@@ -1277,12 +1274,7 @@ resize_block :: (using allocator: *Block_Allocator, address: u64, new_size: u64)
 
     if following_block.size == 0 {
         // Remove the descriptor if the whole following block was used up by the realloc.
-
-        for m+2 .. blocks.count-1 {
-            blocks[it-1] = blocks[it];
-        }
-
-        blocks.count -= 1;
+        array_ordered_remove_by_index(*blocks, m+1);
     }
 
     return true;
@@ -1301,30 +1293,24 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
 
     assert(block.base == address - allocator.base_address);
 
-    if block.size > 128 {
-        trace(.block_free, address, block.size);
-    }
+    trace(.block_free, address, block.size);
 
     block.used = false;
 
-    // Coalesce following block
-    if blocks.count > m+1 && !blocks[m+1].used {
-        block.size += blocks[m+1].size;
+    // Coalesce adjacent blocks.
+    following_block_is_free := blocks.count > m+1 && !blocks[m+1].used;
+    preceding_block_is_free := m            > 0   && !blocks[m-1].used;
 
-        for m+2 .. blocks.count-1 {
-            blocks[it-1] = blocks[it];
-        }
-        blocks.count -= 1;
+    // Todo: The two 'ordered_remove' calls each copy the rest of the blocks one position to erase a block. So we could erase them in one pass when we need to coalesce both ways.
+
+    if following_block_is_free {
+        block.size += blocks[m+1].size;
+        array_ordered_remove_by_index(*blocks, m+1);
     }
 
-    // Coalesce preceding block
-    if m > 0 && !blocks[m-1].used {
+    if preceding_block_is_free {
         blocks[m-1].size += block.size;
-
-        for m+1 .. blocks.count-1 {
-            blocks[it-1] = blocks[it];
-        }
-        blocks.count -= 1;
+        array_ordered_remove_by_index(*blocks, m);
     }
 }
 
@@ -1482,7 +1468,7 @@ free_small_object :: (address: *void) {
 
 
 
-/*
+
 Maple_Tree_Node :: struct {
     // Maybe having so many nested types makes it harder to read.
     Entry_Content :: enum {
@@ -1491,7 +1477,7 @@ Maple_Tree_Node :: struct {
         VALUE      :: 2;
     }
 
-    Entry :: enum u64 {
+    Entry :: enum s64 {
         content :: 2;
         unused  :: 5; // Could put search marks here.
 
@@ -1503,7 +1489,7 @@ Maple_Tree_Node :: struct {
         address :: 57;
     }
 
-    Meta :: enum u64 {
+    Meta :: enum s64 {
         entry_count    :: 3;
         unused         :: 4;
         parent_address :: 57;
@@ -1583,12 +1569,12 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
         assert(it_max >= range_max);
 
         // This entry should be free or a child node.
-        content := cast(Maple_Tree_Node.Entry_Content) get(it, .content);
+        content := cast(Maple_Tree_Node.Entry_Content) get(it.*, .content);
         assert(content != .VALUE);
 
         if content == .CHILD_NODE {
             // If it's a child node, recurse into it.
-            child_address := get_in_place(it, .address);
+            child_address := get_in_place(it.*, .address);
 
             child: Maple_Tree_Node_Expanded;
             child.node = cast(*Maple_Tree_Node) child_address;
@@ -1603,7 +1589,7 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
             // If it matches exactly, we can just use this range without splitting it.
 
             set_in_place(it, .address, cast(s64)value);
-            set(it, .content, Maple_Tree_Node.Entry_Content.VALUE);
+            set(it, .content, cast(s64)Maple_Tree_Node.Entry_Content.VALUE);
 
             return;
         }
@@ -1637,7 +1623,7 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
     // If we get here, the range is not represented in the tree at all. This is a bug in the tree code.
     assert(false);
 }
-*/
+
 
 
 Serial_Port :: struct (base_address: u16) {

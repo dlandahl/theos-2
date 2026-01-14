@@ -274,7 +274,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     log("Assembling interrupt routines");
 
                     write_entire_file(".build/assembly.asm", builder_to_string(*interrupt_assembly));
-                    command := break_command_into_strings("nasm .build/assembly.asm -o .build/assembly.so -f elf64");
+                    command := break_command_into_strings("nasm .build/assembly.asm -o .build/assembly.so -f elf64 -g -F dwarf -v 4");
 
                     result := run_command(.. command);
                     if result.exit_code != 0 {
@@ -313,8 +313,8 @@ format_disk :: () -> success: bool {
     log("Formatting disk image\n\n");
 
     script :: string.[
-        "dd if=/dev/zero of=fat.img bs=1k count=49152",
-        "mformat -i fat.img -F ::",
+        "dd if=/dev/zero of=fat.img bs=1M count=10",
+        "mkfs.vfat -F 16 fat.img",
         "mmd -i fat.img ::/EFI",
         "mmd -i fat.img ::/EFI/BOOT",
         "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",
