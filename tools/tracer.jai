@@ -204,10 +204,7 @@ main :: () {
                             selected_entry -= 1;
 
                             entry := trace_data.entries[selected_entry];
-                            if !show_hide_settings.cores  [entry.core_id] continue;
-                            if !show_hide_settings.threads[entry.task_id] continue;
-                            if !show_hide_settings.tags   [entry.tag]     continue;
-
+                            if trace_entry_should_be_hidden(entry) continue;
                             update_highlighted_trace_entries();
                             break;
                         }
@@ -222,10 +219,7 @@ main :: () {
                             selected_entry += 1;
 
                             entry := trace_data.entries[selected_entry];
-                            if !show_hide_settings.cores  [entry.core_id] continue;
-                            if !show_hide_settings.threads[entry.task_id] continue;
-                            if !show_hide_settings.tags   [entry.tag]     continue;
-
+                            if trace_entry_should_be_hidden(entry) continue;
                             update_highlighted_trace_entries();
                             break;
                         }
@@ -450,9 +444,7 @@ draw_one_frame :: (dt: float) {
         row_rect.y += scroll_rect.h;
 
         for trace_data.entries {
-            if !show_hide_settings.cores  [it.core_id] continue;
-            if !show_hide_settings.threads[it.task_id] continue;
-            if !show_hide_settings.tags   [it.tag]     continue;
+            if trace_entry_should_be_hidden(it) continue;
 
             row_rect.y -= row_height;
 
@@ -634,6 +626,22 @@ get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string,
     }
 
     return "(no debug info)", "", 0;
+}
+
+trace_entry_should_be_hidden :: (entry: Trace_Entry) -> bool {
+    // If this trace entry's core, thread, or tag is hidden, AND ALSO it's not a context switch to a non-hidden thread, then it is hidden.
+
+    if !show_hide_settings.cores  [entry.core_id] return true;
+    if !show_hide_settings.tags   [entry.tag]     return true;
+    if !show_hide_settings.threads[entry.task_id] {
+        if entry.tag != .context_switch {
+            return true;
+        }
+
+        if !show_hide_settings.threads[entry.user[1]] return true;
+    }
+
+    return false;
 }
 
 update_highlighted_trace_entries :: () {
