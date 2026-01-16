@@ -9,6 +9,7 @@ Input :: #import "Input";
 #import "File_Utilities";
 #import "File";
 #import "Math";
+#import "Process";
 #import "System";
 #import "String";
 #import "Bucket_Array";
@@ -17,7 +18,7 @@ Input :: #import "Input";
 #import "executable_formats";
 
 TRACE_INCLUDE_RUNTIME_CODE :: false;
-#load "../kernel/trace.jai";
+#load "../../kernel/trace.jai";
 
 current_time: float64;
 last\  _time: float64;
@@ -148,7 +149,7 @@ main :: () {
     my_init_fonts();
     ui_init();
 
-    trace_file_name = "../logs/qemu_trace.bin";
+    trace_file_name = "../../logs/qemu_trace.bin";
     trace_file_exists = file_exists(trace_file_name);
 
     if trace_file_exists {
@@ -156,14 +157,12 @@ main :: () {
         parse_trace_data(trace_file);
     }
 
-    kernel_file_name = "../.build/kernel";
+    kernel_file_name = "../../.build/kernel";
     kernel_file_exists = file_exists(kernel_file_name);
 
     if kernel_file_exists {
         read_debug_info(kernel_file_name);
     }
-
-    // do_dwarf_lines(debug_info);
 
     quit := false;
     while !quit {
@@ -256,6 +255,8 @@ trace_file_exists: bool;
 kernel_file_name: string;
 kernel_file_exists: bool;
 
+editor_command_format_string: string = "C:\\Program Files\\Notepad++\\notepad++.exe -n%2 %1";
+
 selected_entry: int;
 highlighted_trace_entries: [..] int;
 
@@ -263,17 +264,17 @@ highlighted_trace_entries: [..] int;
 show_hide_settings: struct {
     cores:   [..]bool;
     threads: [..]bool;
-    tags:    [9]bool;
+    tags:    [#run enum_highest_value(Trace_Tag)+1]bool;
 };
 
 draw_one_frame :: (dt: float) {
     proc := default_theme_procs[current_theme];
-    my_theme = proc();
+    my_theme = theme_proc_mash();
     set_default_theme(my_theme);  // Just in case we don't explicitly pass themes sometimes...!
     my_theme.button_theme.font = mono_font;
 
     // bg_col := my_theme.background_color;
-    Simp.clear_render_target(.15, .11, .11, 1);
+    Simp.clear_render_target(.14, .11, .10, 1);
 
     x, y, width, height := get_dimensions(my_window, true);
     ui_per_frame_update(my_window, width, height, current_time);
@@ -292,13 +293,13 @@ draw_one_frame :: (dt: float) {
         ti.font = mono_font;
 
         tl := my_theme.label_theme;
-        tl.font = mono_font;
+        tl.font = bigger_mono_font;
         tl.alignment = .Left;
 
         left, right := cut_left(file_load_rect, file_load_rect.w/2);
 
-        left_label,  left_box  := cut_left(left,  110*UI_SCALE);
-        right_label, right_box := cut_left(right, 110*UI_SCALE);
+        left_label,  left_box  := cut_left(left,  130*UI_SCALE);
+        right_label, right_box := cut_left(right, 130*UI_SCALE);
 
         left\_box.w -= 50*UI_SCALE;
         right_box.w -= 50*UI_SCALE;
@@ -353,16 +354,17 @@ draw_one_frame :: (dt: float) {
         t.alignment = .Left;
 
         ct := my_theme.checkbox_theme;
-        ct.button_theme.label_theme = t;
-        ct.text_color_selected = .{1, 0.9, 0.8, 1};
-        ct.text_color          = .{.55, .55, .55, 1.0};
-        ct.text_color_pressed  = .{1, 0.9, 0.8, 1};
-        ct.surface_color_flash = .{1, 0.9, 0.8, 1};
-        ct.surface_color_down  = .{1, 0.9, 0.8, 1};
-        ct.button_color_selected   = .{1, 0.9, 0.8, 1};
+        ct.font = bigger_mono_font;
+        // ct.button_theme.label_theme = t;
+        // ct.text_color_selected = .{1, 0.9, 0.8, 1};
+        // ct.text_color          = .{.55, .55, .55, 1.0};
+        // ct.text_color_pressed  = .{1, 0.9, 0.8, 1};
+        // ct.surface_color_flash = .{1, 0.9, 0.8, 1};
+        // ct.surface_color_down  = .{1, 0.9, 0.8, 1};
+        // ct.button_color_selected   = .{1, 0.9, 0.8, 1};
 
         b := my_theme.text_input_theme.button_theme;
-        b.surface_color = .{.08*.7, .208*.7, .236*.7, 1.0};
+        // b.surface_color = .{.08*.7, .208*.7, .236*.7, 1.0};
         b.label_theme.alignment = .Center;
 
         row_rect := visibility_options_rect;
@@ -475,10 +477,9 @@ draw_one_frame :: (dt: float) {
 
         st := my_theme.scrollable_region_theme;
         st.region_background.shape.rounding_flags = 0;
+        st.scrollbar_size = 25*UI_SCALE / window_height;  // Scroll bar width is hardcoded to be relative to render target height, in GetRect. Divide to make it absolute width.
 
         state, scroll_rect := begin_scrollable_region(left_rect, *st);
-
-        state.bar_rect.w = 25*UI_SCALE; // Scroll bar width is hardcoded to be relative to render target height, in GetRect. This means we can't easily make it fit into the parent area correctly.
 
         row_height := 18.0*UI_SCALE;
         row_rect := scroll_rect;
@@ -495,7 +496,9 @@ draw_one_frame :: (dt: float) {
 
             row_theme := my_theme.button_theme;
             row_theme.alignment = .Left;
-            row_theme.text_color = .{.75, .75, .75, 1};
+            // row_theme.text_color = .{.75, .75, .75, 1};
+            // row_theme.surface_color = .{};
+            row_theme.frame_color_over = row_theme.frame_color;
             row_theme.font = mono_font;
 
             if selected_entry != it_index {
@@ -505,7 +508,7 @@ draw_one_frame :: (dt: float) {
 
             if array_find(highlighted_trace_entries, it_index) {
                 row_theme.surface_color = .{0.5, 0.3, 0.3, 0.6};
-                row_theme.frame_color = .{0.5, 0.3, 0.3, 0.8};
+                row_theme.frame_color = .{0.24, 0.12, 0.12, 0.8};
             }
 
             if button(row_rect, "", *row_theme, it_index) {
@@ -542,12 +545,12 @@ draw_one_frame :: (dt: float) {
 
             if it.tag == {
               case .scheduling_timer;
-                text = tprint("Preempt disable count %", it.user[0]);
+                text = tprint("Preempt disable count: %", it.user[0]);
                 label(label_rect, text, lt);
 
               case .syscall;
-                syscall_names := string.["Zero (Invalid)", "Yield", "Get Cpu Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex"];
-                label(label_rect, syscall_names[it.user[0]], lt);
+                syscall_names := string.["Zero (Invalid)", "Yield", "CPU Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex", "Free Memory"];
+                label(label_rect, tprint("Syscall '%'", syscall_names[it.user[0]]), lt);
 
               case .context_switch;
                 if it.user[1] > cast(u64)trace_data.threads.count-1 {
@@ -565,6 +568,10 @@ draw_one_frame :: (dt: float) {
               case .block_free;
                 text = tprint("% bytes at 0x%", it.user[1], cast(*void)it.user[0]);
                 label(label_rect, text, lt);
+
+              case .contended_spinlock;
+                text = tprint("Contention level: %", it.user[0]);
+                label(label_rect, text, lt);
             }
         }
 
@@ -581,10 +588,19 @@ draw_one_frame :: (dt: float) {
 
         stack_trace_rect := shrink(right_rect, 5*UI_SCALE);
 
-        row_theme := my_theme.label_theme;
-        row_theme.alignment = .Left;
-        row_theme.text_color = .{.75, .75, .75, 1};
-        row_theme.font = mono_font;
+        row_label_theme := my_theme.label_theme;
+        row_label_theme.alignment = .Left;
+        // row_label_theme.text_color = .{.75, .75, .75, 1};
+        row_label_theme.font = mono_font;
+
+        row_button_theme := my_theme.button_theme;
+        row_button_theme.alignment = .Left;
+        row_button_theme.text_color = row_label_theme.text_color;
+        row_button_theme.font = mono_font;
+        row_button_theme.surface_color = .{};
+        row_button_theme.surface_color_over = .{};
+        row_button_theme.frame_color = .{};
+        row_button_theme.frame_color_over = .{};
 
         row_rect := stack_trace_rect;
         row_rect.h = row_height;
@@ -607,19 +623,38 @@ draw_one_frame :: (dt: float) {
                 }
             }
 
-            remove_prefix("/home/dlandahl/");
+            cwd := get_working_directory();
+            project_root := split(cwd, "tools")[0];
+
             remove_prefix("/mnt/c/");
-            remove_prefix("new_os/");
             remove_prefix("new os/");
+            remove_prefix(project_root);
+
+            if file {
+                button_rect := row_rect;
+                button_rect.h *= 2;
+                button_rect.y -= row_height - 2*UI_SCALE;
+
+                if button(button_rect, "", *row_button_theme, it_index) {
+                    full_filepath := tprint("\"%1%2\"", project_root, file); // Todo: The file path might be a Jai module or uACPI source code.
+
+                    command_line := tprint(editor_command_format_string, full_filepath, line);
+                    command := break_command_into_strings(command_line);
+
+                    process: Process;
+                    create_process(*process, ..command, kill_process_if_parent_exits=false);
+                }
+            }
 
             text := tprint("%. [%] %", it_index, formatInt(address, base=16), proc_name);
-            label(row_rect, text, *row_theme);
+
+            label(row_rect, text, *row_label_theme);
 
             row_rect.y -= row_height;
 
             if file {
                 text = tprint("   at %:%", file, line);
-                label(row_rect, text, *row_theme);
+                label(row_rect, text, *row_label_theme);
 
                 row_rect.y -= row_height;
             }
@@ -631,10 +666,6 @@ draw_one_frame :: (dt: float) {
     finish(slide_state);
 
     draw_popups();
-
-    //
-    // Swap buffers!
-    //
 
     Simp.swap_buffers(my_window);
 }
@@ -781,4 +812,155 @@ working_directory_set := false;
 modify_string :: (ps: *string, new_value: string) {
     free(ps.*);
     ps.* = copy_string(new_value);
+}
+
+
+
+
+
+copy_text_input_colors :: (src : Text_Input_Theme, dest : *Text_Input_Theme) {
+    // We want to be able to copy the color fields of a Text_Input_Theme without
+    // necessarily copying every field (such as alignment), which would happen
+    // when using regular assignment.
+
+    dest.surface_color       = src.surface_color;
+    dest.surface_color_over  = src.surface_color_over;
+    dest.surface_color_flash = src.surface_color_flash;
+    dest.surface_color_down  = src.surface_color_down;
+
+    dest.frame_color       = src.frame_color;
+    dest.frame_color_over  = src.frame_color_over;
+    dest.frame_color_flash = src.frame_color_flash;
+    dest.frame_color_down  = src.frame_color_down;    
+
+    dest.text_color          = src.text_color;
+    dest.text_color_over     = src.text_color_over;
+    dest.text_color_pressed  = src.text_color_pressed;
+    dest.text_color_autocomplete        = src.text_color_autocomplete;
+    dest.text_color_autocomplete_failed = src.text_color_autocomplete_failed;
+
+    dest.selection_color = src.selection_color;
+    dest.cursor_color    = src.cursor_color;
+}
+
+theme_proc_mash :: () -> Overall_Theme {
+    result: Overall_Theme;
+
+    background  := Vector4.{0.157, 0.212, 0.094, 1.0};
+    foreground  := Vector4.{0.996, 0.980, 0.878, 1.0};
+    primary     := Vector4.{0.667, 0.431, 0.369, 1.0};
+    highlight   := Vector4.{0.537, 0.324, 0.245, 1.0};
+    accent      := Vector4.{0.537, 0.224, 0.145, 1.0};
+
+    surface_color     := background;
+    border_color      := Vector4.{0.376, 0.447, 0.251, 1.0}; 
+    interact_color    := primary;
+    atop_surface_text := foreground;
+    atop_border_text  := Vector4.{1.0, 1.0, 1.0, 1.0};
+
+    set_theme_from_base_colors(*result, surface_color, border_color, interact_color,
+                               atop_surface_text, atop_border_text);
+
+    result.background_color = Vector4.{0.125, 0.169, 0.075, 1.0}; 
+
+    
+    {
+        using result.button_theme;
+        rectangle_shape.roundedness     = 0.20;
+        rectangle_shape.frame_thickness = 0.012;
+
+        surface_color      = Vector4.{0.235, 0.314, 0.141, 1.0}; 
+        surface_color_over = Vector4.{0.282, 0.376, 0.169, 1.0}; 
+        surface_color_down = Vector4.{0.188, 0.251, 0.114, 1.0}; 
+
+        frame_color        = primary;
+        frame_color_over   = highlight;
+        frame_color_down   = accent;
+
+        text_color         = foreground;
+        text_color_over    = Vector4.{1.0, 1.0, 1.0, 1.0};
+        text_color_pressed = primary;
+    }
+
+    {
+        using result.subwindow_theme;
+
+        title_bar.surface_color = Vector4.{0.20, 0.27, 0.12, 1.0};
+        title_bar.text_color    = primary;
+
+        close_button.surface_color      = Vector4.{0.40, 0.20, 0.15, 1.0}; 
+        close_button.surface_color_over = accent;
+        close_button.surface_color_down = primary;
+        close_button.text_color_over    = foreground;
+    }
+
+    {
+        using result.text_input_theme;
+
+        surface_color      = Vector4.{0.11, 0.14, 0.07, 1.0};
+        surface_color_over = Vector4.{0.13, 0.17, 0.08, 1.0};
+
+        frame_color        = border_color;
+        frame_color_over   = highlight;
+
+        selection_color = primary;
+        selection_color.w = 0.65;
+
+        text_color              = foreground;
+        text_color_autocomplete = highlight;
+    }
+
+    {
+        using result.scrollable_region_theme;
+
+        scrollbar_background.color       = Vector4.{0.09, 0.12, 0.06, 1.0};
+        scrollbar_background.frame_color = Vector4.{0.18, 0.24, 0.11, 1.0};
+
+        scrollbar_nib_theme.surface_color      = .{0.5, 0.3, 0.28, 1};
+        scrollbar_nib_theme.frame_color        = .{0.24, 0.12, 0.12, 1};
+        scrollbar_nib_theme.surface_color_over = scrollbar_nib_theme.surface_color;
+        scrollbar_nib_theme.surface_color_down = scrollbar_nib_theme.surface_color;
+        scrollbar_nib_theme.frame_color_over = scrollbar_nib_theme.frame_color;
+        scrollbar_nib_theme.frame_color_down = scrollbar_nib_theme.frame_color;
+
+        scrollbar_nib_theme.enable_variable_frame_thickness = false;
+
+        scrollbar_nib_theme.rectangle_shape.roundedness = 5;
+        scrollbar_nib_theme.rectangle_shape.roundedness_type = .ABSOLUTE_FROM_THEME_FIELD;
+        scrollbar_nib_theme.rectangle_shape.frame_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
+        scrollbar_nib_theme.rectangle_shape.frame_thickness = 2;
+        nib_margin = 0.15;
+    }
+
+    
+    {
+        using result.slidable_region_theme;
+        divider_theme.surface_color      = accent;
+        divider_theme.surface_color_over = highlight;
+        divider_theme.surface_color_down = primary;
+        divider_theme.frame_color        = background;
+
+        second_background.color       = Vector4.{.08, .08, .08, 1.0};
+        second_background.frame_color = Vector4.{.25, .25, .22, 1.0};
+        first_background = second_background;
+    }
+
+    {
+        using result.checkbox_theme;
+        label_theme = result.label_theme;
+        alignment = .Left;
+        text_color_selected = .{1, 0.9, 0.8, 1};
+        text_color          = .{.55, .55, .55, 1.0};
+        text_color_pressed  = .{1, 0.9, 0.8, 1};
+        surface_color_flash = .{1, 0.9, 0.8, 1};
+        surface_color_down  = .{1, 0.9, 0.8, 1};
+        surface_color       = .{.55, .55, .55, 1.0};
+        button_color_selected = .{1, 0.9, 0.8, 1};
+    }
+
+    
+    copy_text_input_colors(result.text_input_theme, *result.slider_theme.text_input_theme);
+    copy_text_input_colors(result.text_input_theme, *result.color_picker_theme.type_ins_input_theme.text_input_theme);
+
+    return result;
 }

@@ -1018,13 +1018,12 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     }
 
     if table[entry] & xx PRESENT {
-        physical := table[entry] & (~0xfff);
+        physical := table[entry] & ~0xfff;
         return cast(*u64) (physical + DIRECT_MAPPING_BASE);
     }
 
     address := get_4k_page();
     
-
     table[entry] = address | xx PRESENT | READ_WRITE;
 
     virtual_address := cast(*u64) (address + DIRECT_MAPPING_BASE);
@@ -1051,10 +1050,9 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
     pt   := get_or_create_page_table(pd,   pd_offset);
 
-    if (cast(Page_Flags)pt[pt_offset]) & .PRESENT {
-        log("%", hex(cast(u64)pt - DIRECT_MAPPING_BASE));
-        bluescreen(loc);
-    }
+    pt_flags := cast(Page_Flags) pt[pt_offset];
+
+    assert(pt_flags & .PRESENT == 0, "Trying to map a virtual page twice: %", hex(virtual_address));
 
     pt[pt_offset] = physical_address | cast(u64) flags;
 
@@ -1087,10 +1085,10 @@ get_physical_address :: (virtual: *void) -> u64, present: bool {
     pt\ _offset := (x >> 12) & mask;
     page_offset := x & 0xfff;
 
-    ReadTableEntry :: (index: u64, table_address: u64) -> entry: u64 #expand {
-        present := (cast(Page_Flags)table_address) & .PRESENT;
+    read_table_entry :: (index: u64, table_address: u64) -> entry: u64 #expand {
+        flags := cast(Page_Flags) table_address;
 
-        if !present `return 0, false;
+        if !(flags & .PRESENT) `return 0, false;
 
         table := cast(*u64) (table_address & ~0xfff + DIRECT_MAPPING_BASE);
         return table[index];
@@ -1098,25 +1096,26 @@ get_physical_address :: (virtual: *void) -> u64, present: bool {
 
     cr3: u64;
     #asm { get_cr3 cr3; }
-    pml4 := cast(*u64) (cr3 + DIRECT_MAPPING_BASE);
 
+    pml4 := cast(*u64) (cr3 + DIRECT_MAPPING_BASE);
     pml4e := pml4[pml4_offset];
 
-    pdpte := ReadTableEntry(pdpt_offset, pml4e);
-    if (cast(Page_Flags)pdpte) & .PAGE_SIZE {
+    pdpte := read_table_entry(pdpt_offset, pml4e);
+    if (cast(Page_Flags) pdpte) & .PAGE_SIZE {
         page_offset := x & 0x3fff_ffff;
         return (pdpte & ~0xfff) + page_offset, true;
     }
 
-    pde := ReadTableEntry(pd_offset, pdpte);
-    if (cast(Page_Flags)pde) & .PAGE_SIZE {
+    pde := read_table_entry(pd_offset, pdpte);
+    if (cast(Page_Flags) pde) & .PAGE_SIZE {
         page_offset := x & 0x1f_ffff;
         return (pde & ~0xfff) + page_offset, true;
     }
 
-    pte := ReadTableEntry(pt_offset, pde);
+    pte := read_table_entry(pt_offset, pde);
     return (pte & ~0xfff) + page_offset, true;
 }
+
 
 
 // A block allocator that just linearly scans to find a large enough free block. Does not do the job of finding a best fit region to prevent fragmentation.
@@ -1196,37 +1195,36 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
 
     for* blocks {
         if it.used continue;
+        if it.size < bytes_wanted continue;
 
-        if it.size >= bytes_wanted {
-            it.used = true;
+        it.used = true;
 
-            remaining_bytes := it.size - bytes_wanted;
-            it.size = bytes_wanted;
+        remaining_bytes := it.size - bytes_wanted;
+        it.size = bytes_wanted;
 
-            if remaining_bytes != 0 {
-                // We didn't use the whole block, make a new one and move the others over.
+        if remaining_bytes != 0 {
+            // We didn't use the whole block, make a new one and move the others over.
 
-                if blocks.count >= max_block_descriptors-1 {
-                    bluescreen();
-                }
-
-                blocks.count += 1;
-                for< it_index+2 .. blocks.count-1 {
-                    blocks[it] = blocks[it-1];
-                }
-
-                remaining_block := *blocks[it_index+1];
-                remaining_block.base = it.base + bytes_wanted;
-                remaining_block.size = remaining_bytes;
-                remaining_block.used = false;
+            if blocks.count >= max_block_descriptors-1 {
+                bluescreen();
             }
 
-            allocated_address := cast(u64) (base_address + it.base);
+            blocks.count += 1;
+            for< it_index+2 .. blocks.count-1 {
+                blocks[it] = blocks[it-1];
+            }
 
-            trace(.block_alloc, allocated_address, bytes_wanted);
-
-            return allocated_address;
+            remaining_block := *blocks[it_index+1];
+            remaining_block.base = it.base + bytes_wanted;
+            remaining_block.size = remaining_bytes;
+            remaining_block.used = false;
         }
+
+        allocated_address := cast(u64) (base_address + it.base);
+
+        trace(.block_alloc, allocated_address, bytes_wanted);
+
+        return allocated_address;
     }
 
     // If we get here there isn't a large enough free block.
@@ -1329,6 +1327,9 @@ Small_Objects_Allocator :: struct {
         total_objects: s16;
     }
 
+    // Make sure it fits into slot 0 of any bucket size.
+    #assert size_of(Page_Metadata) <= 32;
+
     // Bucket sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096
     bucket_freelists: [8] *Page_Metadata;
 
@@ -1337,13 +1338,13 @@ Small_Objects_Allocator :: struct {
 
 small_objects_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
     if mode == {
-        case .RESIZE;
+      case .RESIZE;
         assert(false, "Trying to resize a small object.");
 
-        case .ALLOCATE;
+      case .ALLOCATE;
         return allocate_small_object(size);
 
-        case .FREE;
+      case .FREE;
         free_small_object(old_memory);
     }
 
@@ -1752,6 +1753,11 @@ acquire :: (lock: *Spinlock) #no_context {
     }
 
     my_ticket := fetch_add(*lock.next_ticket, 1);
+
+    contention_level := my_ticket - lock.now_serving;
+    if contention_level > 0 {
+        trace(.contended_spinlock, contention_level);
+    }
 
     while lock.now_serving != my_ticket {
         #asm { pause; }

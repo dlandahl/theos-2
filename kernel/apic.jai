@@ -263,8 +263,8 @@ ap_startup_bin :: #run,host -> [] u8 {
 ap_startup_spinlock: Spinlock(lock_type = .RAW);
 
 ap_entry_point :: () #c_call {
-
     set_stack_trace_sentinel();
+
     release(*ap_startup_spinlock);
 
     push_context {

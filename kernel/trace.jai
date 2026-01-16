@@ -20,6 +20,7 @@ Trace_Tag :: enum u16 {
     block_alloc;
     block_free;
     block_resize;
+    contended_spinlock;
 }
 
 Trace_Header :: struct {
@@ -43,29 +44,14 @@ KERNEL_TRACE_MAGIC_STRING :: "kerneltrace";
 
 Trace_Entry :: struct {
     tsc:     u64;
-    task_id: u16;
-    core_id: u8;
-    file:    u8;
-    line:    u16;
+    task_id: u32;
+    core_id: u16;
     tag:     Trace_Tag;
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
     user:        [2] u64;
     stack_trace: [16] u32;
 }
-
-// Index in this table will determine the file ID of a trace entry coming from that file.
-file_table :: string.[
-    "apic.jai",
-    "file_system.jai",
-    "kernel.jai",
-    "multitasking.jai",
-    "network.jai",
-    "pci_express.jai",
-    "time.jai",
-    "trace.jai",
-    "x64.jai",
-];
 
 #assert size_of(Trace_Entry) == 96;
 
@@ -98,40 +84,19 @@ file_table :: string.[
         tracing_enabled = true;
     }
 
-    trace :: inline (tag: Trace_Tag, user_data: ..Any, $loc := #caller_location) #no_context {
+    trace :: (tag: Trace_Tag, user_data: ..Any) #no_context {
         using global.trace_state;
-
-        // Forwarding through this inline procedure so we don't generate the big procedure below for every caller location just to get the file_id.
 
         if !tracing_enabled {
             return;
         }
 
-        file_id :: #run -> u8 {
-            for file_table {
-                if it == path_filename(loc.fully_pathed_filename) {
-                    return cast(u8)it_index;
-                }
-            }
-
-            assert(false, loc.fully_pathed_filename);
-            return 255;
-        }
-
-        trace_internal(tag, file_id, cast(u16)loc.line_number, ..user_data);
-    }
-
-    trace_internal :: (tag: Trace_Tag, file: u8, line: u16, user_data: ..Any) #no_context {
-        using global.trace_state;
-
         index := fetch_add(*current_index, 1);
 
         entry: Trace_Entry;
         entry.tsc = rdtsc();
-        entry.task_id = cast(u16)get_task_id();
-        entry.core_id = cast(u8)get_core_id();
-        entry.file = file;
-        entry.line = line;
+        entry.task_id = cast(u32)get_task_id();
+        entry.core_id = cast(u16)get_core_id();
         entry.tag  = tag;
 
         if (user_data.count > entry.user.count) bluescreen(); // Todo: Would like to compile-time check this.

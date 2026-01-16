@@ -119,7 +119,7 @@ core_begin_multitasking :: () {
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x8000000, global.scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(0x18000000, global.scheduling_interrupt_gate);
     }
 }
 
@@ -164,7 +164,6 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     }
 
     stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
-    stack.registers.rbp = 0; // Stack trace sentinel.
     stack.flags = 0;
     stack.return_address = cast(*void) new_task_start;
 
@@ -437,7 +436,6 @@ trylock :: (using mutex: *Mutex) -> bool {
 
 
 Semaphore :: struct {
-    spinlock: Spinlock(Lock_Type.IRQ);
     counter: int;
     counter_max: int; // 0 means no max.
 
@@ -449,6 +447,8 @@ Semaphore :: struct {
     }
 
     queue: List_Queue(Waiter);
+
+    spinlock: Spinlock(Lock_Type.IRQ);
 }
 
 wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
@@ -729,6 +729,17 @@ unlock_from_user_mode :: (mutex: *Mutex) {
     }
 }
 
+free_from_user_mode :: (address: *void) {
+    syscall_number := 8;
+
+    #asm SYSCALL_SYSRET {
+        syscall_number === a;
+        address        === b;
+
+        syscall c:, _11:, syscall_number, address;
+    }
+}
+
 #program_export
 syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
@@ -756,17 +767,19 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
         write_string(s);
 
       case 5;
-        bytes := cast(s64) data.rbx;
-        buffer := alloc(bytes);
-        data.rax = cast(u64) buffer;
+        bytes    := cast(s64) data.rbx;
+        data.rax  = cast(u64) alloc(bytes);
 
       case 6;
-        mutex := cast(*Mutex) data.rbx;
-        data.rax = cast(u64) trylock(mutex);
+        mutex    := cast(*Mutex) data.rbx;
+        data.rax  = cast(u64) trylock(mutex);
 
       case 7;
         mutex := cast(*Mutex) data.rbx;
         release(mutex);
+
+      case 8;
+        free(cast(*void) data.rbx);
         
       case;
         write_string("Invalid syscall parameter.\n");
@@ -801,14 +814,18 @@ task_do_work :: () {
 ring_3_work_mutex: Mutex;
 
 ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-    if mode != .ALLOCATE && mode != .RESIZE return null;
+    if mode == {
+      case .RESIZE;
+        assert(false);
 
-    buffer := allocate_from_user_mode(size);
-    if mode == .RESIZE && old_memory != null {
-        memcpy(buffer, old_memory, old_size);
+      case .ALLOCATE;
+        return allocate_from_user_mode(size);
+
+      case .FREE;
+        free_from_user_mode(old_memory);
     }
 
-    return buffer;
+    return null;
 }
 
 task_do_work_in_ring_3 :: () #c_call {
@@ -824,6 +841,14 @@ task_do_work_in_ring_3 :: () #c_call {
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
 
+        random_seed(rdtsc());
+
+        memory_buffers: [4] struct {
+            used: bool;
+            size: int;
+            data: *void;
+        };
+
         while true {
             print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
 
@@ -838,14 +863,29 @@ task_do_work_in_ring_3 :: () #c_call {
                 unlock_from_user_mode(*ring_3_work_mutex);
             }
 
-            ms := rdtsc() % 10000;
+            ms := random_get() % 10000;
 
-            print_from_user_mode("Sleeping for % ms\n", ms);
+            print_from_user_mode("Sleeping for % ms.\n", ms);
             sleep_from_user_mode(milliseconds_to_apollo(xx ms));
+
+            {
+                print_from_user_mode("Managing memory.\n");
+
+                r := random_get() % memory_buffers.count;
+                buf := *memory_buffers[r];
+
+                if buf.used {
+                    free_from_user_mode(buf.data);
+                } else {
+                    buf.size = cast(s64) (random_get() % 0x10_0000);
+                    buf.data = allocate_from_user_mode(buf.size);
+                }
+
+                buf.used = !buf.used;
+            }
         }
     }
 }
-
 
 
 List_Queue :: struct (Item_Type: Type) {

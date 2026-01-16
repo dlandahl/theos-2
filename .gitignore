@@ -14,4 +14,6 @@ client.py
 
 kernel/modules/new_uACPI/
 kernel/modules/old_uACPI/
-tools/tracer
+
+tools/tracer.exe
+tools/tracer.pdb
