@@ -82,6 +82,18 @@ Kernel_Globals :: struct {
 
     small_objects: Small_Objects_Allocator;
 
+    guarded_memory: struct {
+        // Temporary to help debugging.
+
+        allocations: [..] Guarded_Allocation;
+        allocations.allocator.proc = runtime_support_default_allocator_proc; // So it doesn't get auto-set to the guarded allocator the first time we make a guarded allocation.
+
+        spinlock: Spinlock;
+
+        #as using allocator: Allocator;
+        allocator.proc = guarded_memory_allocator_proc;
+    }
+
     fadt: *acpi_fadt;
     uacpi_state: uACPI_State;
 
@@ -122,7 +134,7 @@ Kernel_Globals :: struct {
 
         font: Netpbm_Image;
 
-        spinlock: Spinlock;
+        spinlock: MCS_Spinlock;
 
         font_loaded: bool;
     }
@@ -153,7 +165,7 @@ kernel_entry :: () #no_context {
     set_default_context_callbacks();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
-    global.boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
+    global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
     // Used for AP bootstrap.
     global.large_pages[0].state = .RESERVED;
@@ -323,10 +335,10 @@ kernel_entry :: () #no_context {
         #asm { sti; }
 
         user_mode_stress_test(2);
-        // semaphore_test();
         network_test();
+        semaphore_test();
 
-        sleep(5, .seconds);
+        sleep(60, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -931,7 +943,7 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     }
 
     if lru_entry.state != .DISK_CACHE {
-        // The disk block is not in the cache
+        // The disk block is not in the cache.
         page := allocate_large_page();
         Cache_Page(page);
 
@@ -947,11 +959,11 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
         return page;
     }
 
-    // The disk block is already in the cache
+    // The disk block is already in the cache.
     page_index := hash_table_entry.lru_entry;
     page := cast(u64) page_index * 0x20_0000;
 
-    // Move the page to the front of the list
+    // Move the page to the front of the list.
     if lru_entry.more_recently_used != LRU_TAIL {
 
         more := *large_pages[lru_entry.more_recently_used];
@@ -1008,6 +1020,18 @@ free_4k_page :: (address: u64) {
 
 
 
+Page_Flags :: enum_flags u64 {
+    PRESENT         :: 1 << 0 | Page_Flags.USER_SUPERVISOR;
+    READ_WRITE      :: 1 << 1;
+    USER_SUPERVISOR :: 1 << 2;
+    WRITE_THROUGH   :: 1 << 3;
+    CACHE_DISABLE   :: 1 << 4;
+    ACCESSED        :: 1 << 5;
+    AVAILABLE       :: 1 << 6;
+    PAGE_SIZE       :: 1 << 7;
+    EXECUTE_DISABLE :: 1 << 63;
+}
+
 get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     using Page_Flags;
 
@@ -1032,12 +1056,12 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     return virtual_address;
 }
 
-map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
-    map_page(cast(u64) virtual_address, physical_address, flags, loc);
+map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
+    map_page(cast(u64) virtual_address, physical_address, flags);
 }
 
-map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
-    mask: u64 = 0b111111111;
+map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
+    mask : u64 : 0b111111111;
 
     pml4_offset := (virtual_address >> 39) & mask;
     pdpt_offset := (virtual_address >> 30) & mask;
@@ -1062,16 +1086,34 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     }
 }
 
-Page_Flags :: enum_flags u64 {
-    PRESENT         :: 1 << 0 | Page_Flags.USER_SUPERVISOR;
-    READ_WRITE      :: 1 << 1;
-    USER_SUPERVISOR :: 1 << 2;
-    WRITE_THROUGH   :: 1 << 3;
-    CACHE_DISABLE   :: 1 << 4;
-    ACCESSED        :: 1 << 5;
-    AVAILABLE       :: 1 << 6;
-    PAGE_SIZE       :: 1 << 7;
-    EXECUTE_DISABLE :: 1 << 63;
+unmap_page :: inline (virtual_address: *void) {
+    unmap_page(cast(u64) virtual_address);
+}
+
+unmap_page :: (virtual_address: u64) {
+    mask : u64 : 0b111111111;
+
+    pt_index: [4]u64;
+    pt_index[0] = (virtual_address >> 39) & mask;
+    pt_index[1] = (virtual_address >> 30) & mask;
+    pt_index[2] = (virtual_address >> 21) & mask;
+    pt_index[3] = (virtual_address >> 12) & mask;
+
+    table := global.page_tables.pml4.data;
+
+    for pt_index {
+        assert(table[it] & cast(u64) Page_Flags.PRESENT > 0);
+
+        if it_index == 3 {
+            // 'table' is now lowest level PT.
+            break;
+        }
+
+        next := table[it] & ~0xfff;
+        table = cast(*u64) (next + DIRECT_MAPPING_BASE);
+    }
+
+    table[pt_index[3]] &= ~cast(u64) Page_Flags.PRESENT;
 }
 
 get_physical_address :: (virtual: *void) -> u64, present: bool {
@@ -1429,7 +1471,6 @@ free_small_object :: (address: *void) {
 
     max_objects  := (PAGE_SIZE - header.objects_size) / header.objects_size;
 
-
     if header.total_objects == max_objects {
         // Add the page to the page freelist if it is full before removing this object.
         header.page_freelist = bucket_freelists[bucket_index];
@@ -1466,7 +1507,6 @@ free_small_object :: (address: *void) {
         header.freelist = object_index;
     }
 }
-
 
 
 
@@ -1627,12 +1667,143 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
 
 
 
+// A temporary system to help detect memory bugs.
+
+Guarded_Allocation :: struct {
+    client_address: *void; // The part of the allocation the caller can use normally.
+
+    physical_base: u64;    // So the allocator knows how to free the physical memory.
+    virtual_base: *void;   // So the allocator knows how to free the virtual memory.
+    physical_pages: int;
+
+    created_at: Source_Code_Location; // So the page fault handler can report who created the guard region when it's accessed.
+}
+
+allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location := #caller_location) -> *void {
+    using global.guarded_memory;
+
+    assert(size              % 4096 == 0, "Guarded allocation size must be a multiple of 4KB.");
+    assert(guard_region_size % 4096 == 0, "Guarded allocation size must be a multiple of 4KB.");
+
+    // Physical block allocator doesn't return page aligned memory, so worst case we have to offset by 4095 bytes to align the returned memory.
+    padded_size := size + 4095;
+    virtual_size := padded_size + 2 * guard_region_size; // Put guard regions on both sides because why not?
+
+    physical := alloc_block(*global.physical_block_allocator, cast(u64) padded_size);
+    virtual  := alloc_block(*global.virtual_block_allocator,  cast(u64) virtual_size);
+
+    physical_pages    := padded_size / 4096;
+    physical_aligned  := align(4096, physical);
+    client_address    := cast(*void) virtual + guard_region_size;
+
+    for 0..physical_pages-1 {
+        physical_page := physical_aligned + cast(u64)it*4096;
+        virtual_page  := client_address   + cast(u64)it*4096;
+
+        map_page(virtual_page, physical_page);
+    }
+
+    {
+        acquire(*spinlock);
+
+        result := array_add(*allocations);
+
+        result.created_at      = caller_location;
+        result.physical_base   = physical;
+        result.virtual_base    = cast(*void) virtual;
+        result.physical_pages  = physical_pages;
+        result.client_address  = client_address;
+
+        release(*spinlock);
+    }
+
+    return client_address;
+}
+
+free_guarded_memory :: (client_address: *void) {
+    using global.guarded_memory;
+
+    acquire(*spinlock);
+
+    guarded: *Guarded_Allocation;
+    for* allocations if it.client_address == client_address {
+        guarded = it;
+        break;
+    }
+
+    assert(guarded != null);
+
+    free_block(*global.physical_block_allocator, guarded.physical_base);
+
+    for 0..guarded.physical_pages-1 {
+        address := guarded.client_address + it * 4096;
+        unmap_page(cast(*void) address);
+    }
+
+    free_block(*global.virtual_block_allocator, cast(u64) guarded.virtual_base);
+
+    // Calculate the index in the array based on the address.
+    array_base  := cast(*void)allocations.data;
+    item_offset := cast(*void)guarded - array_base;
+
+    index := cast(int) (item_offset / size_of(Guarded_Allocation));                        
+    array_unordered_remove_by_index(*allocations, index);
+
+    release(*spinlock);
+}
+
+find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
+    using global.guarded_memory;
+
+    acquire(*spinlock);
+
+    for* allocations {
+        // Calculate the total number of pages by comparing the base address of the whole virtual memory region to the client address. We could also just store this number with the other alloction info.
+
+        guard_region_size  := cast(u64) (it.client_address - it.virtual_base);
+        guard_region_pages := cast(int) (guard_region_size * 2 / 4096);
+
+        total_pages := it.physical_pages + guard_region_pages;
+
+        base  := it.virtual_base;
+        limit := it.virtual_base + total_pages * 4096;
+
+        if base <= address && address < limit {
+            release(*spinlock);
+            return it;
+        }
+    }
+
+    release(*spinlock);
+    return null;
+}
+
+guarded_memory_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    if mode == {
+      case .RESIZE;
+        assert(false, "Todo.");
+
+      case .ALLOCATE;
+        DEFAULT_GUARD_REGION :: 0x1_0000;
+        return allocate_guarded_memory(size, DEFAULT_GUARD_REGION);
+
+      case .FREE;
+        free_guarded_memory(old_memory);
+    }
+
+    return null;
+}
+
+
+
 Serial_Port :: struct (base_address: u16) {
-    spinlock: Spinlock;
+    spinlock: MCS_Spinlock;
 }
 
 serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
-    acquire(*spinlock);
+    if global.multiprocessing_initialized {
+        acquire(*spinlock);
+    }
 
     for data {
         for 1..10_0000 {
@@ -1660,7 +1831,9 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
         }
     }
 
-    release(*spinlock);
+    if global.multiprocessing_initialized {
+        release(*spinlock);
+    }
 }
 
 
@@ -1785,20 +1958,25 @@ Scoped_Acquire :: (lock: *Spinlock) #expand {
 MCS_Node :: struct {
     next: *MCS_Node;
     blocked: bool;
+    irq_state: bool;
 }
 
 MCS_Spinlock :: *MCS_Node;
 
-acquire :: (lock: *MCS_Spinlock) -> bool #no_context {
+acquire :: (lock: *MCS_Spinlock) #no_context {
     irq_state := irq_disable();
 
     core := get_current_core();
     my_node := *core.mcs_node;
 
+    my_node.irq_state = irq_state;
     my_node.next = null;
+
     prev := fetch_store(lock, my_node);
 
     if prev {
+        trace(.contended_spinlock);
+
         my_node.blocked = true;
         prev.next = my_node;
 
@@ -1806,18 +1984,16 @@ acquire :: (lock: *MCS_Spinlock) -> bool #no_context {
             #asm { pause; }
         }
     }
-
-    return irq_state;
 }
 
-release :: (lock: *MCS_Spinlock, irq_state: bool) #no_context {
-    defer irq_restore(irq_state);
+release :: (lock: *MCS_Spinlock) #no_context {
 
     core := get_current_core();
     my_node := *core.mcs_node;
 
     if !my_node.next {
         if compare_and_swap(lock, my_node, null) {
+            irq_restore(my_node.irq_state);
             return;
         }
 
@@ -1827,6 +2003,7 @@ release :: (lock: *MCS_Spinlock, irq_state: bool) #no_context {
     }
 
     my_node.next.blocked = false;
+    irq_restore(my_node.irq_state);
 }
 
 
@@ -1925,24 +2102,6 @@ debug_print_physical_memory_map :: () {
 
 
 
-align :: (alignment: $T, value: $V) -> V #no_context {
-    #assert size_of(T) == 8;
-    #assert size_of(V) == 8;
-
-    return cast(V) align(cast(int) alignment, cast(int) value);
-}
-
-align :: (alignment: int, value: int) -> int #no_context {
-    if alignment == 0 return value;
-
-    // This only works for powers of two.
-    if popcount(alignment) != 1 {
-        bluescreen();
-    }
-
-    return (value + (alignment - 1)) & -alignment;
-}
-
 // These are mainly used by drivers when waiting for a response from the device. Maybe they should yield when the timeout is long.
 
 Timeout_Block :: (code: Code, time_ms := 1000) -> bool #expand {
@@ -2016,7 +2175,9 @@ draw_text :: (text: string) #no_context {
 
     if !font_loaded return;
 
-    Scoped_Acquire(*spinlock);
+    if global.multiprocessing_initialized {
+        acquire(*spinlock);
+    }
 
     line_spacing :: 5;   // Number of pixels between the bottom of one character cell, and the top of the next one down.
     char_width   :: 9;
@@ -2086,6 +2247,10 @@ draw_text :: (text: string) #no_context {
         }
 
         cursor_x += 1;
+    }
+
+    if global.multiprocessing_initialized {
+        release(*spinlock);
     }
 }
 
@@ -2171,6 +2336,24 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
 
 
 
+
+align :: (alignment: $T, value: $V) -> V #no_context {
+    #assert size_of(T) == 8;
+    #assert size_of(V) == 8;
+
+    return cast(V) align(cast(int) alignment, cast(int) value);
+}
+
+align :: (alignment: int, value: int) -> int #no_context {
+    if alignment == 0 return value;
+
+    // This only works for powers of two.
+    if popcount(alignment) != 1 {
+        bluescreen();
+    }
+
+    return (value + (alignment - 1)) & -alignment;
+}
 
 bit_cast :: (object: $T, $target_type: Type) -> target_type {
     return (.*) cast(*target_type) *object;

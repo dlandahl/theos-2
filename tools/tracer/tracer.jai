@@ -580,87 +580,95 @@ draw_one_frame :: (dt: float) {
 
     switch_to_right_rect(slide_state);
 
-    if trace_data.entries.count {
-        // Right slide region (currently stack trace.)
-        entry := trace_data.entries[selected_entry];
+    {
+        // st.orientation = .VERTICAL;
+        // slide_state, top_rect, bottom_rect := slidable_region(right_rect, *st);
+        // switch_to_bottom_rect(slide_state);
 
-        row_height := 20*UI_SCALE;
+        if trace_data.entries.count {
+            // Bottom slide region of the right slide region (stack trace.)
+            entry := trace_data.entries[selected_entry];
 
-        stack_trace_rect := shrink(right_rect, 5*UI_SCALE);
+            row_height := 20*UI_SCALE;
 
-        row_label_theme := my_theme.label_theme;
-        row_label_theme.alignment = .Left;
-        // row_label_theme.text_color = .{.75, .75, .75, 1};
-        row_label_theme.font = mono_font;
+            stack_trace_rect := shrink(right_rect, 5*UI_SCALE);
 
-        row_button_theme := my_theme.button_theme;
-        row_button_theme.alignment = .Left;
-        row_button_theme.text_color = row_label_theme.text_color;
-        row_button_theme.font = mono_font;
-        row_button_theme.surface_color = .{};
-        row_button_theme.surface_color_over = .{};
-        row_button_theme.frame_color = .{};
-        row_button_theme.frame_color_over = .{};
+            row_label_theme := my_theme.label_theme;
+            row_label_theme.alignment = .Left;
+            // row_label_theme.text_color = .{.75, .75, .75, 1};
+            row_label_theme.font = mono_font;
 
-        row_rect := stack_trace_rect;
-        row_rect.h = row_height;
-        row_rect.y += stack_trace_rect.h;
-        row_rect.y -= row_height + 5*UI_SCALE;
+            row_button_theme := my_theme.button_theme;
+            row_button_theme.alignment = .Left;
+            row_button_theme.text_color = row_label_theme.text_color;
+            row_button_theme.font = mono_font;
+            row_button_theme.surface_color = .{};
+            row_button_theme.surface_color_over = .{};
+            row_button_theme.frame_color = .{};
+            row_button_theme.frame_color_over = .{};
 
-        for entry.stack_trace {
-            if it == 0xffff_ffff || it == 0xffff_fffe || it == 0 {
-                break;
-            }
+            row_rect := stack_trace_rect;
+            row_rect.h = row_height;
+            row_rect.y += stack_trace_rect.h;
+            row_rect.y -= row_height + 5*UI_SCALE;
 
-            address := cast(u64)it + 0xffff_ffff_0000_0000;
-
-            proc_name, file, line := get_debug_info_for_address(address);
-
-            remove_prefix :: (s: string) #expand {
-                if starts_with(file, s) {
-                    file.data  += s.count;
-                    file.count -= s.count;
+            for entry.stack_trace {
+                if it == 0xffff_ffff || it == 0xffff_fffe || it == 0 {
+                    break;
                 }
-            }
 
-            cwd := get_working_directory();
-            project_root := split(cwd, "tools")[0];
+                address := cast(u64)it + 0xffff_ffff_0000_0000;
 
-            remove_prefix("/mnt/c/");
-            remove_prefix("new os/");
-            remove_prefix(project_root);
+                proc_name, file, line := get_debug_info_for_address(address);
 
-            if file {
-                button_rect := row_rect;
-                button_rect.h *= 2;
-                button_rect.y -= row_height - 2*UI_SCALE;
-
-                if button(button_rect, "", *row_button_theme, it_index) {
-                    full_filepath := tprint("\"%1%2\"", project_root, file); // Todo: The file path might be a Jai module or uACPI source code.
-
-                    command_line := tprint(editor_command_format_string, full_filepath, line);
-                    command := break_command_into_strings(command_line);
-
-                    process: Process;
-                    create_process(*process, ..command, kill_process_if_parent_exits=false);
+                remove_prefix :: (s: string) #expand {
+                    if starts_with(file, s) {
+                        file.data  += s.count;
+                        file.count -= s.count;
+                    }
                 }
-            }
 
-            text := tprint("%. [%] %", it_index, formatInt(address, base=16), proc_name);
+                cwd := get_working_directory();
+                project_root := split(cwd, "tools")[0];
 
-            label(row_rect, text, *row_label_theme);
+                remove_prefix("/mnt/c/");
+                remove_prefix("new os/");
+                remove_prefix(project_root);
 
-            row_rect.y -= row_height;
+                if file {
+                    button_rect := row_rect;
+                    button_rect.h *= 2;
+                    button_rect.y -= row_height - 2*UI_SCALE;
 
-            if file {
-                text = tprint("   at %:%", file, line);
+                    if button(button_rect, "", *row_button_theme, it_index) {
+                        full_filepath := tprint("\"%1%2\"", project_root, file); // Todo: The file path might be a Jai module or uACPI source code.
+
+                        command_line := tprint(editor_command_format_string, full_filepath, line);
+                        command := break_command_into_strings(command_line);
+
+                        process: Process;
+                        create_process(*process, ..command, kill_process_if_parent_exits=false);
+                    }
+                }
+
+                text := tprint("%. [%] %", it_index, formatInt(address, base=16), proc_name);
+
                 label(row_rect, text, *row_label_theme);
 
                 row_rect.y -= row_height;
-            }
 
-            row_rect.y -= 5*UI_SCALE;
+                if file {
+                    text = tprint("   at %:%", file, line);
+                    label(row_rect, text, *row_label_theme);
+
+                    row_rect.y -= row_height;
+                }
+
+                row_rect.y -= 5*UI_SCALE;
+            }
         }
+
+        // finish(slide_state);
     }
 
     finish(slide_state);
@@ -916,14 +924,16 @@ theme_proc_mash :: () -> Overall_Theme {
         scrollbar_background.color       = Vector4.{0.09, 0.12, 0.06, 1.0};
         scrollbar_background.frame_color = Vector4.{0.18, 0.24, 0.11, 1.0};
 
-        scrollbar_nib_theme.surface_color      = .{0.5, 0.3, 0.28, 1};
-        scrollbar_nib_theme.frame_color        = .{0.24, 0.12, 0.12, 1};
+        scrollbar_nib_theme.surface_color      = .{0.361, 0.263, 0.216, 1};
+        scrollbar_nib_theme.frame_color        = .{0.263, 0.149, 0.137, 1};
         scrollbar_nib_theme.surface_color_over = scrollbar_nib_theme.surface_color;
         scrollbar_nib_theme.surface_color_down = scrollbar_nib_theme.surface_color;
         scrollbar_nib_theme.frame_color_over = scrollbar_nib_theme.frame_color;
         scrollbar_nib_theme.frame_color_down = scrollbar_nib_theme.frame_color;
 
         scrollbar_nib_theme.enable_variable_frame_thickness = false;
+
+        // Todo: Trench boundary gets thicker with window width.
 
         scrollbar_nib_theme.rectangle_shape.roundedness = 5;
         scrollbar_nib_theme.rectangle_shape.roundedness_type = .ABSOLUTE_FROM_THEME_FIELD;
@@ -932,13 +942,18 @@ theme_proc_mash :: () -> Overall_Theme {
         nib_margin = 0.15;
     }
 
-    
     {
         using result.slidable_region_theme;
-        divider_theme.surface_color      = accent;
-        divider_theme.surface_color_over = highlight;
-        divider_theme.surface_color_down = primary;
-        divider_theme.frame_color        = background;
+        divider_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
+        divider_thickness = 20;
+
+        divider_theme.surface_color      = .{1, 0.9, 0.8, 1};;
+        divider_theme.frame_color        = highlight;
+        divider_theme.frame_color_over   = .{0.263, 0.149, 0.137, 1};
+        divider_theme.rectangle_shape.frame_thickness = 2;
+        divider_theme.rectangle_shape.roundedness = 5;
+        divider_theme.rectangle_shape.roundedness_type = .ABSOLUTE_FROM_THEME_FIELD;
+        divider_theme.rectangle_shape.frame_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
 
         second_background.color       = Vector4.{.08, .08, .08, 1.0};
         second_background.frame_color = Vector4.{.25, .25, .22, 1.0};

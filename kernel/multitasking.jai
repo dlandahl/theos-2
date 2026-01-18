@@ -127,7 +127,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     // A weird procedure because tasks are never not associated with a core unless they have never run yet. So we could just put tasks on the core they were created from, and let the caller move them before waking them. That way on_core is never null on any Task_Info we deal with outside of create_task.
 
     scheduler := *core.scheduler;
-    Scoped_Acquire(*scheduler.spinlock);
+    acquire(*scheduler.spinlock);
 
     if task.on_core != null {
         bluescreen();
@@ -135,6 +135,8 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
 
     task.on_core = core;
     queue_push(*scheduler.waiting_to_run, task);
+
+    release(*scheduler.spinlock);
 }
 
 create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, name: string, user_data: *void = null) -> *Task_Info {
@@ -142,15 +144,23 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    stack_space := alloc(kernel_stack_size + user_stack_size);
-
-    // Todo: Guard pages.
-    new_task.kernel_stack = stack_space + kernel_stack_size;
+    new_task.kernel_stack = allocate_guarded_memory(kernel_stack_size, 0x1_0000);
+    new_task.kernel_stack += kernel_stack_size;
     new_task.kernel_stack &= ~0xf;
 
     if user_stack_size != 0 {
-        new_task.user_stack = stack_space + kernel_stack_size + user_stack_size;
+        new_task.user_stack = allocate_guarded_memory(user_stack_size, 0x1_0000);
+        new_task.user_stack += user_stack_size;
         new_task.user_stack &= ~0xf;
+
+        // SYSRETQ does not push a return address to the stack, but the user mode entry point will push
+        // the stack frame pointer, which will be seen by the stack tracing code. The stack tracing code
+        // will read past the bottom of the stack trying to record the return address. We therefore need
+        // to pad the stack and put a valid-looking return address there to make stack tracing succeed
+        // when it meets an 'initial' sysret, that switches a thread to user mode the first time.
+
+        new_task.user_stack -= 8;
+        (.*) cast(*u64) new_task.user_stack = DIRECT_MAPPING_BASE;
     }
 
     Context_Switch_Stack :: struct {
@@ -418,7 +428,7 @@ release :: (using mutex: *Mutex) {
 }
 
 trylock :: (using mutex: *Mutex) -> bool {
-    Scoped_Acquire(*spinlock);
+    acquire(*spinlock);
 
     task := get_current_task();
 
@@ -427,9 +437,11 @@ trylock :: (using mutex: *Mutex) -> bool {
 
         held_by = get_current_task();
 
+        release(*spinlock);
         return true;
     }
 
+    release(*spinlock);
     return false;
 }
 
@@ -447,7 +459,6 @@ Semaphore :: struct {
     }
 
     queue: List_Queue(Waiter);
-
     spinlock: Spinlock(Lock_Type.IRQ);
 }
 
@@ -767,8 +778,8 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
         write_string(s);
 
       case 5;
-        bytes    := cast(s64) data.rbx;
-        data.rax  = cast(u64) alloc(bytes);
+        size     := cast(s64) data.rbx;
+        data.rax  = cast(u64) allocate_guarded_memory(size, 0x1_0000);
 
       case 6;
         mutex    := cast(*Mutex) data.rbx;
@@ -779,7 +790,9 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
         release(mutex);
 
       case 8;
-        free(cast(*void) data.rbx);
+        address := cast(*void) data.rbx;
+
+        free_guarded_memory(address);
         
       case;
         write_string("Invalid syscall parameter.\n");
@@ -841,12 +854,13 @@ task_do_work_in_ring_3 :: () #c_call {
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
 
-        random_seed(rdtsc());
+        random_seed(rdtsc() ^ (cast(u64)thread.id) ^ cast(u64)(thread & 0xffff_ffff));
 
         memory_buffers: [4] struct {
             used: bool;
             size: int;
             data: *void;
+            sentinel_value: u8;
         };
 
         while true {
@@ -875,10 +889,20 @@ task_do_work_in_ring_3 :: () #c_call {
                 buf := *memory_buffers[r];
 
                 if buf.used {
+                    for 0..buf.size-1 {
+                        assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
+                    }
+
                     free_from_user_mode(buf.data);
                 } else {
-                    buf.size = cast(s64) (random_get() % 0x10_0000);
+                    buf.size = cast(s64) (random_get() % 50) * 4096;
                     buf.data = allocate_from_user_mode(buf.size);
+
+                    buf.sentinel_value = cast,trunc(u8) random_get();
+
+                    for 0..buf.size-1 {
+                        (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
+                    }
                 }
 
                 buf.used = !buf.used;

@@ -444,8 +444,14 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     print("SS: %\n", stack.ss);
     print("CS: %\n", stack.cs);
 
-    bluescreen();
+    g := find_guarded_memory(cast(*void) cr2);
+    if g {
+        print("This was a guarded allocation requested at %:%\n", g.created_at.fully_pathed_filename, g.created_at.line_number);
+    }
 
+    while true {
+        #asm { cli; hlt; }
+    }
 } @InterruptRoutineWithErrorCode
 
 #program_export
@@ -554,9 +560,9 @@ uACPI_State :: struct {
     irq_contexts_used: int;
 
     Work_Item :: struct {
-        type: uacpi_work_type;
+        type:    uacpi_work_type;
         handler: uacpi_work_handler;
-        ctx: uacpi_handle;
+        ctx:     uacpi_handle;
     }
 
     work_queue: List_Queue(Work_Item);
