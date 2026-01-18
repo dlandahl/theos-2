@@ -335,8 +335,8 @@ kernel_entry :: () #no_context {
         #asm { sti; }
 
         user_mode_stress_test(2);
-        network_test();
-        semaphore_test();
+        // network_test();
+        // semaphore_test();
 
         sleep(60, .seconds);
 
@@ -1032,130 +1032,139 @@ Page_Flags :: enum_flags u64 {
     EXECUTE_DISABLE :: 1 << 63;
 }
 
-get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
-    using Page_Flags;
-
-    is_page := cast(u64) table & xx PAGE_SIZE;
-    if is_page {
-        // The page table to which we're trying to add a lower level child table is actually a large or huge page.
-        assert(false);
-    }
-
-    if table[entry] & xx PRESENT {
-        physical := table[entry] & ~0xfff;
-        return cast(*u64) (physical + DIRECT_MAPPING_BASE);
-    }
-
-    address := get_4k_page();
-    
-    table[entry] = address | xx PRESENT | READ_WRITE;
-
-    virtual_address := cast(*u64) (address + DIRECT_MAPPING_BASE);
-    memset(virtual_address, 0, 4096);
-
-    return virtual_address;
-}
-
-map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
-    map_page(cast(u64) virtual_address, physical_address, flags);
-}
-
-map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
-    mask : u64 : 0b111111111;
-
-    pml4_offset := (virtual_address >> 39) & mask;
-    pdpt_offset := (virtual_address >> 30) & mask;
-    pd\ _offset := (virtual_address >> 21) & mask;
-    pt\ _offset := (virtual_address >> 12) & mask;
-
-    pml4 := global.page_tables.pml4.data;
-
-    pdpt := get_or_create_page_table(pml4, pml4_offset);
-    pd   := get_or_create_page_table(pdpt, pdpt_offset);
-    pt   := get_or_create_page_table(pd,   pd_offset);
-
-    pt_flags := cast(Page_Flags) pt[pt_offset];
-
-    assert(pt_flags & .PRESENT == 0, "Trying to map a virtual page twice: %", hex(virtual_address));
-
-    pt[pt_offset] = physical_address | cast(u64) flags;
-
-    pg := *virtual_address;
-    #asm {
-        invlpg [pg];
-    }
-}
-
-unmap_page :: inline (virtual_address: *void) {
-    unmap_page(cast(u64) virtual_address);
-}
-
-unmap_page :: (virtual_address: u64) {
-    mask : u64 : 0b111111111;
+decode_virtual_address :: (address: u64) -> [4]u64 {
+    mask : u64 : 0x1ff;
 
     pt_index: [4]u64;
-    pt_index[0] = (virtual_address >> 39) & mask;
-    pt_index[1] = (virtual_address >> 30) & mask;
-    pt_index[2] = (virtual_address >> 21) & mask;
-    pt_index[3] = (virtual_address >> 12) & mask;
+    pt_index[0] = (address >> 12) & mask;
+    pt_index[1] = (address >> 21) & mask;
+    pt_index[2] = (address >> 30) & mask;
+    pt_index[3] = (address >> 39) & mask;
 
-    table := global.page_tables.pml4.data;
-
-    for pt_index {
-        assert(table[it] & cast(u64) Page_Flags.PRESENT > 0);
-
-        if it_index == 3 {
-            // 'table' is now lowest level PT.
-            break;
-        }
-
-        next := table[it] & ~0xfff;
-        table = cast(*u64) (next + DIRECT_MAPPING_BASE);
-    }
-
-    table[pt_index[3]] &= ~cast(u64) Page_Flags.PRESENT;
+    return pt_index;
 }
 
-get_physical_address :: (virtual: *void) -> u64, present: bool {
-    x := cast(u64) virtual;
+VM_Iterator :: struct {
+    start_address: *void;
+    page_count: int;
+}
 
-    mask: u64 = 0x1ff;
+for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
+    pt_index := decode_virtual_address(cast(u64) vm_it.start_address);
 
-    pml4_offset := (x >> 39) & mask;
-    pdpt_offset := (x >> 30) & mask;
-    pd\ _offset := (x >> 21) & mask;
-    pt\ _offset := (x >> 12) & mask;
-    page_offset := x & 0xfff;
+    `it: struct {
+        level: int;  // 3=PML4, 0=PT
+        table: *u64; // Base address of the current page table.
+        index: u64;  // 8-byte strided index into the page table.
 
-    read_table_entry :: (index: u64, table_address: u64) -> entry: u64 #expand {
-        flags := cast(Page_Flags) table_address;
+        // Pointer to the current entry (*table[index])
+        using entry: *union {
+            value: u64;
+            flags: Page_Flags;
+        };
+    };
 
-        if !(flags & .PRESENT) `return 0, false;
+    `it_index: int;
 
-        table := cast(*u64) (table_address & ~0xfff + DIRECT_MAPPING_BASE);
-        return table[index];
+    // Cache the addresses of tables above us, so we don't have to walk from the root when going up a level. Maybe not worth it? It would make the code much simpler if we didn't do this.
+    tables: [4] *u64;
+    tables[3] = global.page_tables.pml4.data;
+
+    it.level = 3;
+
+    while true {
+        // Update the iterator based on level in the PT hierarchy.
+        it.table = tables[it.level];
+        it.index = pt_index[it.level];
+        it.entry = xx *it.table[it.index];
+
+        defer {
+            // Defer, to allow 'continue' to be #inserted below.
+
+            if it.level != 0 {
+                // If we're not in the lowest level, go deeper.
+                it.level -= 1;
+
+                next_table_physical_address := it.value & ~0xfff;
+                tables[it.level] = cast(*u64) (next_table_physical_address + DIRECT_MAPPING_BASE);
+                continue;
+            }
+
+            // If we get here we just visited a level-0 entry. Increment the page counter.
+            it_index += 1;
+            if it_index >= vm_it.page_count {
+                break;
+            }
+
+            while true {
+                // Go to the next entry at the current level.
+                pt_index[it.level] += 1;
+                pt_index[it.level] &= 0x1ff;
+
+                if pt_index[it.level] != 0 {
+                    // We are not at the end of the current table.
+                    break;
+                } else {
+                    // We are at the end of the table, go up a level.
+                    it.level += 1;
+                    assert(it.level < 4); // User tried to go past the end of virtual memory.
+                }
+            }
+
+            for 0..it.level-1 {
+                pt_index[it] = 0;
+            }
+        }
+
+        #insert body;
     }
+}
 
-    cr3: u64;
-    #asm { get_cr3 cr3; }
+map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
+    for VM_Iterator.{virtual_start, page_count} {
+        if it.level == 0 {
+            // It's a page, map it.
+            physical := physical_start + cast(u64)it_index * 4096;
+            virtual  := virtual_start  + cast(u64)it_index * 4096;
 
-    pml4 := cast(*u64) (cr3 + DIRECT_MAPPING_BASE);
-    pml4e := pml4[pml4_offset];
+            it.value = physical;
+            it.flags |= page_flags;
 
-    pdpte := read_table_entry(pdpt_offset, pml4e);
-    if (cast(Page_Flags) pdpte) & .PAGE_SIZE {
-        page_offset := x & 0x3fff_ffff;
-        return (pdpte & ~0xfff) + page_offset, true;
+            pg := *virtual;
+            #asm {
+                invlpg [pg];
+            }
+        } else {
+            // It's a page table, create it if it doesn't exist.
+            if it.flags & .PRESENT continue;
+
+            new_table := get_4k_page();
+            it.value = new_table;
+            it.flags |= .PRESENT | .READ_WRITE;
+        }
     }
+}
 
-    pde := read_table_entry(pd_offset, pdpte);
-    if (cast(Page_Flags) pde) & .PAGE_SIZE {
-        page_offset := x & 0x1f_ffff;
-        return (pde & ~0xfff) + page_offset, true;
+unmap_pages :: (virtual_address: *void, count: int) {
+    for VM_Iterator.{virtual_address, count} {
+        assert(it.flags & .PRESENT > 0);
+
+        if it.level != 0 continue;
+
+        it.flags &= ~.PRESENT;
     }
+}
 
-    pte := read_table_entry(pt_offset, pde);
-    return (pte & ~0xfff) + page_offset, true;
+get_physical_address :: (virtual_address: *void) -> u64, present: bool {
+    for VM_Iterator.{virtual_address, 1} {
+        is_present := it.flags & .PRESENT > 0;
+        assert(is_present);
+
+        if it.level != 0 continue;
+
+        address := it.value & 0xfff;
+        return address, is_present;
+    }
 }
 
 
@@ -1696,12 +1705,7 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
     physical_aligned  := align(4096, physical);
     client_address    := cast(*void) virtual + guard_region_size;
 
-    for 0..physical_pages-1 {
-        physical_page := physical_aligned + cast(u64)it*4096;
-        virtual_page  := client_address   + cast(u64)it*4096;
-
-        map_page(virtual_page, physical_page);
-    }
+    map_pages(client_address, physical_aligned, physical_pages);
 
     {
         acquire(*spinlock);

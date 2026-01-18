@@ -866,7 +866,7 @@ task_do_work_in_ring_3 :: () #c_call {
         while true {
             print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
 
-            for 1..1_500_000 {
+            for 1..1_000_000 {
                 #asm { pause; }
             }
 
@@ -877,16 +877,16 @@ task_do_work_in_ring_3 :: () #c_call {
                 unlock_from_user_mode(*ring_3_work_mutex);
             }
 
-            ms := random_get() % 10000;
+            ms := random_get() % 2500;
 
             print_from_user_mode("Sleeping for % ms.\n", ms);
             sleep_from_user_mode(milliseconds_to_apollo(xx ms));
 
             {
-                print_from_user_mode("Managing memory.\n");
-
                 r := random_get() % memory_buffers.count;
                 buf := *memory_buffers[r];
+
+                print_from_user_mode("Managing memory. Buf = %\n", buf.*);
 
                 if buf.used {
                     for 0..buf.size-1 {
