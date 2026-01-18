@@ -89,6 +89,8 @@ parse_trace_data :: (_trace_file: string) {
     for* show_hide_settings.cores   it.* = true;
     for* show_hide_settings.threads it.* = true;
     for* show_hide_settings.tags    it.* = true;
+
+    selected_entry = min(selected_entry, trace_data.entries.count-1);
 }
 
 debug_info: Debug_Info;

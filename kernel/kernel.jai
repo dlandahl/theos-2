@@ -334,11 +334,11 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
-        user_mode_stress_test(2);
-        // network_test();
+        // user_mode_stress_test(2);
+        network_test();
         // semaphore_test();
 
-        sleep(60, .seconds);
+        // sleep(5, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -1081,7 +1081,9 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
         defer {
             // Defer, to allow 'continue' to be #inserted below.
 
-            if it.level != 0 {
+            is_large_page := it.flags & .PAGE_SIZE;
+
+            if it.level != 0 && !is_large_page {
                 // If we're not in the lowest level, go deeper.
                 it.level -= 1;
 
@@ -1155,15 +1157,20 @@ unmap_pages :: (virtual_address: *void, count: int) {
     }
 }
 
-get_physical_address :: (virtual_address: *void) -> u64, present: bool {
+get_physical_address :: (virtual_address: *void, loc := #caller_location) -> u64, present: bool {
     for VM_Iterator.{virtual_address, 1} {
-        is_present := it.flags & .PRESENT > 0;
-        assert(is_present);
+        is_present    := it.flags & .PRESENT   > 0;
+        is_large_page := it.flags & .PAGE_SIZE > 0;
 
-        if it.level != 0 continue;
+        if !is_present return 0, false;
+        if !is_large_page && it.level != 0 continue;
 
-        address := it.value & 0xfff;
-        return address, is_present;
+        mask := u64.[0xfff, 0x1f_ffff, 0x3fff_ffff][it.level];
+
+        address        := it.value & ~0xfff;
+        offset_in_page := cast(u64)virtual_address & mask;
+
+        return address + offset_in_page, is_present;
     }
 }
 
