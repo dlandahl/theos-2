@@ -340,21 +340,18 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
         bluescreen();
     }
 
-    virtual := alloc_block(*global.virtual_block_allocator, bar.limit);
+    virtual := cast(*void) alloc_block(*global.virtual_block_allocator, bar.limit);
 
     {
         push_print_style().default_format_int.base = 16;
-        log("Mapping BAR % to address %", bar, cast(*void)virtual);
+        log("Mapping BAR % to address %", bar, virtual);
     }
 
     pages_needed := (bar.limit + 4095) / 4096;
 
-    for 0..pages_needed-1 {
-        offset := it * 4096;
-        map_page(virtual + offset, bar.base + offset, uncacheable_flags);
-    }
+    map_pages(virtual, bar.base, pages_needed, uncacheable_flags);
 
-    return cast(*void) virtual;
+    return virtual;
 }
 
 register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
@@ -1237,9 +1234,9 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     nvme.ASQ__admin_sq = admin_sq;
     nvme.ACQ__admin_cq = admin_cq;
 
-    virt := alloc_block(*global.virtual_block_allocator, 4096 * 2);
-    map_page(virt,        admin_sq, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
-    map_page(virt + 4096, admin_cq, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
+    virt := cast(*void) alloc_block(*global.virtual_block_allocator, 4096 * 2);
+    map_pages(virt,        admin_sq, 1, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
+    map_pages(virt + 4096, admin_cq, 1, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
 
     nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry) virt;
     nvme.admin_cq = cast(*Nvme_Completion_Queue_Entry) (virt + 4096);
@@ -1445,7 +1442,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         list_size := align(4096, size_of(Ahci_Command_Header) * command_slot_count);
         fis_size  := align(4096, size_of(Ahci_Received_Fis));
 
-        memory_needed := cast(u64, list_size + fis_size + command_slot_count * 4096 + 4096);
+        memory_needed := cast(u64) (list_size + fis_size + command_slot_count * 4096 + 4096);
 
         using global;
         virtual  := cast(*void) alloc_block(*virtual_block_allocator,  memory_needed);
@@ -1455,12 +1452,9 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         physical = xx align(4096, xx physical);
 
         page_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
-        pages_needed := memory_needed / 4096;
+        pages_needed := cast(int)memory_needed / 4096;
 
-        for 0..pages_needed-1 {
-            offset := cast(u64) it * 4096;
-            map_page(virtual + offset, physical + offset, page_flags);
-        }
+        map_pages(virtual, physical, pages_needed, page_flags);
 
         controller: Ahci_Controller;
         controller.command_list.count = command_slot_count;

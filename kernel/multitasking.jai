@@ -1047,5 +1047,3 @@ queue_is_empty :: (queue: List_Queue) -> bool {
     assert(queue.last != null);
     return false;
 }
-
-

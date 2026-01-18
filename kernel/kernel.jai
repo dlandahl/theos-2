@@ -134,7 +134,7 @@ Kernel_Globals :: struct {
 
         font: Netpbm_Image;
 
-        spinlock: MCS_Spinlock;
+        spinlock: Spinlock;
 
         font_loaded: bool;
     }
@@ -1730,27 +1730,20 @@ free_guarded_memory :: (client_address: *void) {
     acquire(*spinlock);
 
     guarded: *Guarded_Allocation;
+    index: int;
+
     for* allocations if it.client_address == client_address {
         guarded = it;
+        index = it_index;
         break;
     }
-
     assert(guarded != null);
 
-    free_block(*global.physical_block_allocator, guarded.physical_base);
+    unmap_pages(guarded.client_address, guarded.physical_pages);
 
-    for 0..guarded.physical_pages-1 {
-        address := guarded.client_address + it * 4096;
-        unmap_page(cast(*void) address);
-    }
+    free_block(*global.physical_block_allocator,           guarded.physical_base);
+    free_block(*global.virtual\_block_allocator, cast(u64) guarded.virtual_base);
 
-    free_block(*global.virtual_block_allocator, cast(u64) guarded.virtual_base);
-
-    // Calculate the index in the array based on the address.
-    array_base  := cast(*void)allocations.data;
-    item_offset := cast(*void)guarded - array_base;
-
-    index := cast(int) (item_offset / size_of(Guarded_Allocation));                        
     array_unordered_remove_by_index(*allocations, index);
 
     release(*spinlock);
@@ -1783,12 +1776,20 @@ find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
 }
 
 guarded_memory_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    DEFAULT_GUARD_REGION :: 0x1_0000;
+
     if mode == {
       case .RESIZE;
-        assert(false, "Todo.");
+        new_memory := allocate_guarded_memory(size, DEFAULT_GUARD_REGION);
+
+        if old_memory {
+            memcpy(new_memory, old_memory, old_size);
+            free_guarded_memory(old_memory);
+        }
+
+        return new_memory;
 
       case .ALLOCATE;
-        DEFAULT_GUARD_REGION :: 0x1_0000;
         return allocate_guarded_memory(size, DEFAULT_GUARD_REGION);
 
       case .FREE;
@@ -1801,7 +1802,7 @@ guarded_memory_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64
 
 
 Serial_Port :: struct (base_address: u16) {
-    spinlock: MCS_Spinlock;
+    spinlock: Spinlock;
 }
 
 serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {

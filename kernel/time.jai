@@ -335,11 +335,11 @@ initialize_hpet :: () {
         acpi_table := cast(*acpi_hpet)table.hdr;
         assert(cast(uacpi_address_space)acpi_table.address.address_space_id == .SYSTEM_MEMORY);
 
-        virtual := alloc_block(*global.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-        map_page(virtual, acpi_table.address.address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        virtual := cast(*void) alloc_block(*global.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
+        map_pages(virtual, acpi_table.address.address, 1, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
         offset_in_page := acpi_table.address.address % 0x1000;
-        hpet.base_address = xx (virtual + offset_in_page);
+        hpet.base_address = (virtual + offset_in_page);
 
         uacpi_table_unref(*table);
     }

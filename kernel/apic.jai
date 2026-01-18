@@ -111,10 +111,10 @@ initialize_apic :: () {
         physical := cast(u64) apic_base & ~0xfff;
         assert(0xfee0_0000 == physical);
 
-        virtual := alloc_block(*global.virtual_block_allocator, 4096);
-        map_page(virtual, physical, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        virtual := cast(*void) alloc_block(*global.virtual_block_allocator, 4096);
+        map_pages(virtual, physical, 1, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-        global.apic = cast(*void) virtual;
+        global.apic = virtual;
     }
 
 
@@ -183,10 +183,10 @@ initialize_apic :: () {
 
             ioapic_ics := cast(*Ics_Io_Apic) ics;
 
-            virtual := alloc_block(*global.virtual_block_allocator, 4096);
-            map_page(virtual, ioapic_ics.address, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+            virtual := cast(*void) alloc_block(*global.virtual_block_allocator, 4096);
+            map_pages(virtual, ioapic_ics.address, 1, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-            global.io_apic = cast(*u32) virtual;
+            global.io_apic = virtual;
 
             assert(ioapic_ics.address == 0xfec0_0000);
 
@@ -638,19 +638,16 @@ uacpi_kernel_io_unmap :: () #c_call {
 #program_export
 uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
     push_context {
-        memory := alloc_block(*global.virtual_block_allocator, cast(u64) len);
+        memory := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) len);
  
-        pages_needed := len / 4096;
+        pages_needed := cast(s64) (len / 4096);
         if len % 4096 pages_needed += 1;
 
         page_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
 
-        for 0..pages_needed-1 {
-            offset := cast(u64) it * 4096;
-            map_page(memory + offset, addr + offset, page_flags);
-        }
+        map_pages(memory, addr, pages_needed, page_flags);
 
-        return xx memory;
+        return memory;
     }
 }
 
