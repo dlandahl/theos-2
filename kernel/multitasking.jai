@@ -844,7 +844,6 @@ ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory:
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {
-
         ts: Temporary_Storage;
         set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
 
@@ -853,15 +852,6 @@ task_do_work_in_ring_3 :: () #c_call {
 
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
-
-        random_seed(rdtsc() ^ (cast(u64)thread.id) ^ cast(u64)(thread & 0xffff_ffff));
-
-        memory_buffers: [4] struct {
-            used: bool;
-            size: int;
-            data: *void;
-            sentinel_value: u8;
-        };
 
         while true {
             print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
@@ -881,32 +871,6 @@ task_do_work_in_ring_3 :: () #c_call {
 
             print_from_user_mode("Sleeping for % ms.\n", ms);
             sleep_from_user_mode(milliseconds_to_apollo(xx ms));
-
-            {
-                r := random_get() % memory_buffers.count;
-                buf := *memory_buffers[r];
-
-                print_from_user_mode("Managing memory. Buf = %\n", buf.*);
-
-                if buf.used {
-                    for 0..buf.size-1 {
-                        assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
-                    }
-
-                    free_from_user_mode(buf.data);
-                } else {
-                    buf.size = cast(s64) (random_get() % 50) * 4096;
-                    buf.data = allocate_from_user_mode(buf.size);
-
-                    buf.sentinel_value = cast,trunc(u8) random_get();
-
-                    for 0..buf.size-1 {
-                        (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
-                    }
-                }
-
-                buf.used = !buf.used;
-            }
         }
     }
 }

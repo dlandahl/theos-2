@@ -215,14 +215,14 @@ kernel_entry :: () #no_context {
         if !it_index continue;
         region_size := region.pages * 4096;
 
-        if region_size >= 0x200_0000 && region.type == .FREE {
+        if region_size >= 0x2000_0000 && region.type == .FREE {
             first_page := region.address / 0x20_0000;
 
-            for first_page..first_page+32 {
+            for first_page..first_page+256 {
                 global.large_pages[it].state = .RESERVED;
             }
 
-            init_block_allocator(*global.physical_block_allocator, region.address, 0x200_0000, 0x10);
+            init_block_allocator(*global.physical_block_allocator, region.address, 0x2000_0000, 0x10);
             break;
         }
     }
@@ -334,11 +334,12 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
-        // user_mode_stress_test(2);
-        network_test();
+        memory_test();
+        // user_mode_stress_test();
+        // network_test();
         // semaphore_test();
 
-        // sleep(5, .seconds);
+        sleep(10, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -459,6 +460,68 @@ user_mode_stress_test :: (threads_per_core := 4) {
             put_task_on_core(task, core);
 
             thread_index += 1;
+        }
+    }
+}
+
+memory_test :: () {
+    proc :: () {
+        task := get_current_task();
+
+        random_seed(rdtsc() ^ (cast(u64)task.id) ^ cast(u64)(task & 0xffff_ffff));
+
+        memory_buffers: [4] struct {
+            used: bool;
+            size: int;
+            data: *void;
+            sentinel_value: u8;
+        };
+
+        total_clicks: u64;
+
+        for 1..10_000_000 {
+            r := random_get() % memory_buffers.count;
+            buf := *memory_buffers[r];
+
+            log("Managing memory. Buf = %\n", buf.*);
+
+            start := rdtsc();
+
+            if buf.used {
+                for 0..buf.size-1 {
+                    assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
+                }
+
+                free_guarded_memory(buf.data);
+            } else {
+                buf.size = cast(s64) (random_get() % 2000) * 4096;
+                buf.data = allocate_guarded_memory(buf.size, 0x4000);
+
+                buf.sentinel_value = cast,trunc(u8) random_get();
+
+                for 0..buf.size-1 {
+                    (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
+                }
+            }
+
+            end := rdtsc();
+            total_clicks += end - start;
+
+            average_ms := ((total_clicks / cast(u64)it) * 1_000) / global.tsc_frequency;
+            log("Running average: %ms", average_ms);
+
+            buf.used = !buf.used;
+
+            yield_execution();
+        }
+    }
+
+    threads_per_core := 3;
+
+    for *core: global.processor_cores {
+        for 1..threads_per_core {
+            task := create_task(proc, kernel_stack_size = 0x4_0000, name = "Memory Tester");
+            put_task_on_core(task, core);
         }
     }
 }
@@ -1050,12 +1113,13 @@ VM_Iterator :: struct {
 }
 
 for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
+    // Depth-first page table walker. "page_count" is how much memory you want to cover, measured in 4k pages. So if vm_it.page_count == 512 and it finds a 2MB page, it will be done after that.
+    // All non-leaf entries, i.e. all page tables, are expected to be PRESENT after the for-body runs (if it doesn't break or return) so it can walk into them.
+
     pt_index := decode_virtual_address(cast(u64) vm_it.start_address);
 
     `it: struct {
-        level: int;  // 3=PML4, 0=PT
-        table: *u64; // Base address of the current page table.
-        index: u64;  // 8-byte strided index into the page table.
+        level:  int; // 3=PML4, 0=PT
 
         // Pointer to the current entry (*table[index])
         using entry: *union {
@@ -1066,57 +1130,63 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
 
     `it_index: int;
 
-    // Cache the addresses of tables above us, so we don't have to walk from the root when going up a level. Maybe not worth it? It would make the code much simpler if we didn't do this.
+    // Cache the addresses of tables above us, so we don't have to walk from the root when going up the tree. Maybe not worth it? It would make the code much simpler if we didn't do this.
     tables: [4] *u64;
     tables[3] = global.page_tables.pml4.data;
 
     it.level = 3;
 
-    while true {
-        // Update the iterator based on level in the PT hierarchy.
-        it.table = tables[it.level];
-        it.index = pt_index[it.level];
-        it.entry = xx *it.table[it.index];
+    depth_first_go_to_next_pt_entry :: () #expand {
+        if it.level != 0 && (it.flags & .PAGE_SIZE == 0) {
+            // If we're not in the lowest level, go deeper.
+            it.level -= 1;
 
-        defer {
-            // Defer, to allow 'continue' to be #inserted below.
+            next_table_physical_address := it.value & ~0xfff;
+            tables[it.level] = cast(*u64) (next_table_physical_address + DIRECT_MAPPING_BASE);
+            return;
+        }
 
-            is_large_page := it.flags & .PAGE_SIZE;
+        // We just visited a page.
+        small_pages_per_page_at_this_level := int.[1, 512, 262144][it.level];
+        it_index += small_pages_per_page_at_this_level;
 
-            if it.level != 0 && !is_large_page {
-                // If we're not in the lowest level, go deeper.
-                it.level -= 1;
+        if it_index >= vm_it.page_count {
+            break;
+        }
 
-                next_table_physical_address := it.value & ~0xfff;
-                tables[it.level] = cast(*u64) (next_table_physical_address + DIRECT_MAPPING_BASE);
-                continue;
-            }
+        while true {
+            // Go to the next entry at the current level.
+            pt_index[it.level] += 1;
+            pt_index[it.level] &= 0x1ff;
 
-            // If we get here we just visited a level-0 entry. Increment the page counter.
-            it_index += 1;
-            if it_index >= vm_it.page_count {
+            if pt_index[it.level] != 0 {
+                // We are not at the end of the current table.
                 break;
-            }
-
-            while true {
-                // Go to the next entry at the current level.
-                pt_index[it.level] += 1;
-                pt_index[it.level] &= 0x1ff;
-
-                if pt_index[it.level] != 0 {
-                    // We are not at the end of the current table.
-                    break;
-                } else {
-                    // We are at the end of the table, go up a level.
-                    it.level += 1;
-                    assert(it.level < 4); // User tried to go past the end of virtual memory.
-                }
-            }
-
-            for 0..it.level-1 {
-                pt_index[it] = 0;
+            } else {
+                // We are at the end of the table, go up a level.
+                it.level += 1;
+                assert(it.level < 4); // User tried to go past the end of virtual memory.
             }
         }
+
+        for 0..it.level-1 {
+            pt_index[it] = 0;
+        }
+    }
+
+    first_time := true;
+
+    while true {
+        if !first_time {
+            depth_first_go_to_next_pt_entry();
+        }
+        first_time = false;
+
+        // Update the iterator based on level in the PT hierarchy.
+        table := tables  [it.level];
+        index := pt_index[it.level];
+
+        it.entry = xx *table[index];
 
         #insert body;
     }
@@ -1124,32 +1194,37 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
 
 map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
     for VM_Iterator.{virtual_start, page_count} {
+        assert(it.flags & .PAGE_SIZE == 0);
+
         if it.level == 0 {
-            // It's a page, map it.
-            physical := physical_start + cast(u64)it_index * 4096;
+            assert(it.flags & .PRESENT == 0);
+
             virtual  := virtual_start  + cast(u64)it_index * 4096;
+            physical := physical_start + cast(u64)it_index * 4096;
 
             it.value = physical;
             it.flags |= page_flags;
 
             pg := *virtual;
-            #asm {
-                invlpg [pg];
-            }
-        } else {
-            // It's a page table, create it if it doesn't exist.
-            if it.flags & .PRESENT continue;
+            #asm { invlpg [pg]; }
 
-            new_table := get_4k_page();
-            it.value = new_table;
-            it.flags |= .PRESENT | .READ_WRITE;
+            continue;
         }
+
+        // It's a page table, create it if it doesn't exist.
+        if it.flags & .PRESENT > 0 continue;
+
+        new_table := get_4k_page();
+
+        it.value = new_table;
+        it.flags |= .PRESENT | .READ_WRITE;
     }
 }
 
 unmap_pages :: (virtual_address: *void, count: int) {
     for VM_Iterator.{virtual_address, count} {
         assert(it.flags & .PRESENT > 0);
+        assert(it.flags & .PAGE_SIZE == 0);
 
         if it.level != 0 continue;
 
@@ -1157,13 +1232,12 @@ unmap_pages :: (virtual_address: *void, count: int) {
     }
 }
 
-get_physical_address :: (virtual_address: *void, loc := #caller_location) -> u64, present: bool {
+get_physical_address :: (virtual_address: *void) -> u64, present: bool {
     for VM_Iterator.{virtual_address, 1} {
-        is_present    := it.flags & .PRESENT   > 0;
-        is_large_page := it.flags & .PAGE_SIZE > 0;
+        is_present := it.flags & .PRESENT > 0;
 
         if !is_present return 0, false;
-        if !is_large_page && it.level != 0 continue;
+        if it.level != 0 && (it.flags & .PAGE_SIZE == 0) continue;
 
         mask := u64.[0xfff, 0x1f_ffff, 0x3fff_ffff][it.level];
 

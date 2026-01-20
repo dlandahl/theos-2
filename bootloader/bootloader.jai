@@ -227,7 +227,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 boot_data.framebuffer.buffer = cast(*u32) (TOP_2_GB + KERNEL_EXE_LARGE_PAGES*0x20_0000 + offset);
             }
 
-            // Direct-map all physical memory to the bottom of kernel memory.
+            // Direct-map all physical memory to the bottom of kernel memory. Todo: We could mape this as 1GB pages if all modern CPUs support that.
             pml4[0x100] = cast(u64) direct_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
 
             for pd: 0..direct_pd.count-1 {

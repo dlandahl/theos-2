@@ -424,29 +424,34 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     #asm { get_cr2 _cr2; }
     cr2 := _cr2;
 
-    push_print_style().default_format_int.base = 16;
-    print("Virtual Address: 0x%\n", cr2);
+    {
+        push_print_style().default_format_int.base = 16;
 
-    Flags :: enum_flags u32 {
-        PRESENT;
-        WRITE;
-        USER;
-        RESERVED_WRITE;
-        INSTRUCTION_FETCH;
-        PROTECTION_KEY;
-        SHADOW_STACK;
+        print("Virtual Address: 0x%\n", cr2);
+
+        Flags :: enum_flags u32 {
+            PRESENT;
+            WRITE;
+            USER;
+            RESERVED_WRITE;
+            INSTRUCTION_FETCH;
+            PROTECTION_KEY;
+            SHADOW_STACK;
+        }
+        flags := cast(Flags)stack.error_code;
+        print("Error flags: %\n\n", flags);
+
+        print("RIP: 0x%\n", stack.ip);
+        print("RSP: 0x%\n", stack.sp);
+        print("SS: %\n", stack.ss);
+        print("CS: %\n", stack.cs);
     }
-    flags := cast(Flags)stack.error_code;
-    print("Error flags: %\n\n", flags);
-
-    print("RIP: 0x%\n", stack.ip);
-    print("RSP: 0x%\n", stack.sp);
-    print("SS: %\n", stack.ss);
-    print("CS: %\n", stack.cs);
 
     g := find_guarded_memory(cast(*void) cr2);
     if g {
-        print("This was a guarded allocation requested at %:%\n", g.created_at.fully_pathed_filename, g.created_at.line_number);
+        print("This was a guarded allocation requested at %:%.\n",
+              g.created_at.fully_pathed_filename,
+              g.created_at.line_number);
     }
 
     while true {
