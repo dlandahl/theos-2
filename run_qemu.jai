@@ -20,7 +20,7 @@
             -serial chardev:char0
             -chardev file,id=char1,path=logs/qemu_trace.bin
             -serial chardev:char1
-            -m 256M
+            -m 2G
             -smp 4 
     QEMU_CMD);
 

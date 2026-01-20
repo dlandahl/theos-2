@@ -21,6 +21,8 @@ Trace_Tag :: enum u16 {
     block_free;
     block_resize;
     contended_spinlock;
+    irq_disable;
+    irq_restore;
 }
 
 Trace_Header :: struct {

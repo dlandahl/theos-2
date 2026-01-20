@@ -119,7 +119,7 @@ core_begin_multitasking :: () {
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x18000000, global.scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(0x20000000, global.scheduling_interrupt_gate);
     }
 }
 
@@ -262,6 +262,8 @@ new_task_start :: () #no_context {
     push_context {
         core := get_current_core();
         release(*core.scheduler.spinlock);
+
+        irq_restore(true);
 
         trace(.start_task);
 

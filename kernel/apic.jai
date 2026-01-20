@@ -418,7 +418,9 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     core := get_current_core();
     task := core.scheduler.current_task;
 
-    print("\nPage Fault (On core %, running thread \"%\")\n", core.id, task.name);
+    b: String_Builder;
+
+    print(*b, "\nPage Fault (On core %, running thread \"%\")\n", core.id, task.name);
 
     _cr2: u64;
     #asm { get_cr2 _cr2; }
@@ -427,7 +429,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     {
         push_print_style().default_format_int.base = 16;
 
-        print("Virtual Address: 0x%\n", cr2);
+        print(*b, "Virtual Address: 0x%\n", cr2);
 
         Flags :: enum_flags u32 {
             PRESENT;
@@ -439,24 +441,24 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
             SHADOW_STACK;
         }
         flags := cast(Flags)stack.error_code;
-        print("Error flags: %\n\n", flags);
+        print(*b, "Error flags: %\n\n", flags);
 
-        print("RIP: 0x%\n", stack.ip);
-        print("RSP: 0x%\n", stack.sp);
-        print("SS: %\n", stack.ss);
-        print("CS: %\n", stack.cs);
+        print(*b, "RIP: 0x%\n", stack.ip);
+        print(*b, "RSP: 0x%\n", stack.sp);
+        print(*b, "SS: %\n", stack.ss);
+        print(*b, "CS: %\n", stack.cs);
     }
 
-    g := find_guarded_memory(cast(*void) cr2);
-    if g {
-        print("This was a guarded allocation requested at %:%.\n",
+    found, g := find_guarded_memory(cast(*void) cr2);
+    if found {
+        print(*b, "This was a guarded allocation requested at %:%.\n",
               g.created_at.fully_pathed_filename,
               g.created_at.line_number);
     }
 
-    while true {
-        #asm { cli; hlt; }
-    }
+    write_builder(*b);
+
+    bluescreen();
 } @InterruptRoutineWithErrorCode
 
 #program_export
@@ -466,13 +468,15 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
         core := get_current_core();
         task := core.scheduler.current_task;
 
-        print("\nGeneral Protection Fault    (On core %, running thread \"%\")\n", core.id, task.name);
+        b: String_Builder;
+
+        print(*b, "\nGeneral Protection Fault    (On core %, running thread \"%\")\n", core.id, task.name);
 
         push_print_style().default_format_int.base = 16;
-        print("RIP: 0x%\n", stack.ip);
-        print("RSP: 0x%\n", stack.sp);
-        print("SS: %\n", stack.ss);
-        print("CS: %\n", stack.cs);
+        print(*b, "RIP: 0x%\n", stack.ip);
+        print(*b, "RSP: 0x%\n", stack.sp);
+        print(*b, "SS: %\n", stack.ss);
+        print(*b, "CS: %\n", stack.cs);
 
         Selector_Error_Code :: enum u32 {
             external              :: 1;
@@ -489,7 +493,9 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
         table       :=            bitfield_get(selector_error, .descriptor_table_kind);
         index       :=            bitfield_get(selector_error, .selector_index);
 
-        print("Error code: external=%, table=%, index=% (0x%)\n", is_external, table_names[table], formatInt(index, base=10), index);
+        print(*b, "Error code: external=%, table=%, index=% (0x%)\n", is_external, table_names[table], formatInt(index, base=10), index);
+
+        write_builder(*b);
 
         bluescreen();
     }
@@ -563,6 +569,7 @@ uACPI_State :: struct {
         ctx: uacpi_handle;
     };
     irq_contexts_used: int;
+    irq_handlers_in_flight: int;
 
     Work_Item :: struct {
         type:    uacpi_work_type;
@@ -807,7 +814,10 @@ UACPI_IRQ_HANDLER :: #string END
 handle_uacpi_irq_%1 :: (stack: *void) #c_call {
     using global.uacpi_state;
     irq := *irq_contexts[%1];
+
+    irq_handlers_in_flight += 1;
     irq.handler(irq.ctx);
+    irq_handlers_in_flight -= 1;
 } @InterruptRoutine
 END;
 
@@ -897,7 +907,7 @@ uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handle
     using global.uacpi_state;
 
     push_context {
-        item := New(work_queue.Node,, global.small_objects);
+        item := New(work_queue.Node,, global.small_objects); // Todo: Allocation in interrupt handler.
         item.type = type;
         item.handler = handler;
         item.ctx = ctx;
@@ -917,6 +927,10 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
     using global.uacpi_state;
 
     push_context {
+        while irq_handlers_in_flight > 0 {
+            sleep(1, .milliseconds);
+        }
+
         acquire(*work_queue_lock);
 
         predicate :: #code queue_is_empty(work_queue) && !work_in_progress;

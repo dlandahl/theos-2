@@ -574,12 +574,17 @@ draw_one_frame :: (dt: float) {
               case .contended_spinlock;
                 text = tprint("Contention level: %", it.user[0]);
                 label(label_rect, text, lt);
+
+              case .irq_disable; #through;
+              case .irq_restore;
+                text = tprint("Previous IRQ state: %", it.user[0] > 0);
+                label(label_rect, text, lt);
             }
         }
 
         end_scrollable_region(state, row_rect.x, row_rect.y, *scroll_position);
     }
-
+    
     switch_to_right_rect(slide_state);
 
     {

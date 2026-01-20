@@ -82,11 +82,8 @@ Kernel_Globals :: struct {
 
     small_objects: Small_Objects_Allocator;
 
-    guarded_memory: struct {
-        // Temporary to help debugging.
-
-        allocations: [..] Guarded_Allocation;
-        allocations.allocator.proc = runtime_support_default_allocator_proc; // So it doesn't get auto-set to the guarded allocator the first time we make a guarded allocation.
+    guarded_memory: struct {    // Temporary to help debugging.
+        allocations: List_Queue(Guarded_Allocation);
 
         spinlock: Spinlock;
 
@@ -339,7 +336,7 @@ kernel_entry :: () #no_context {
         // network_test();
         // semaphore_test();
 
-        sleep(10, .seconds);
+        sleep(4, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -392,6 +389,67 @@ do_stack_trace :: (output: [] u32) #no_context {
 }
 
 
+
+memory_test :: () {
+    proc :: () {
+        task := get_current_task();
+
+        random_seed(rdtsc() ^ (cast(u64)task.id) ^ cast(u64)(task & 0xffff_ffff));
+
+        memory_buffers: [4] struct {
+            used: bool;
+            size: int;
+            data: *void;
+            sentinel_value: u8;
+        };
+
+        total_clicks: u64;
+
+        for 1..10_000_000 {
+            r := random_get() % memory_buffers.count;
+            buf := *memory_buffers[r];
+
+            log("Managing memory. Buf = %\n", buf.*);
+
+            start := rdtsc();
+
+            if buf.used {
+                for 0..buf.size-1 {
+                    assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
+                }
+
+                free_guarded_memory(buf.data);
+            } else {
+                buf.size = cast(s64) (random_get() % 2000) * 4096;
+                buf.data = allocate_guarded_memory(buf.size, 0x4000);
+
+                buf.sentinel_value = cast,trunc(u8) random_get();
+
+                for 0..buf.size-1 {
+                    (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
+                }
+            }
+
+            end := rdtsc();
+            total_clicks += end - start;
+
+            average_ms := ((total_clicks / cast(u64)it) * 1_000) / global.tsc_frequency;
+            log("Running average: %ms", average_ms);
+
+            buf.used = !buf.used;
+        }
+    }
+
+    threads_per_core := 3;
+
+    for *core: global.processor_cores {
+        for 1..threads_per_core {
+            task := create_task(proc, kernel_stack_size = 0x40_0000, name = "Memory Tester");
+            put_task_on_core(task, core);
+
+        }
+    }
+}
 
 semaphore_test :: (threads_per_core := 2) {
 
@@ -460,68 +518,6 @@ user_mode_stress_test :: (threads_per_core := 4) {
             put_task_on_core(task, core);
 
             thread_index += 1;
-        }
-    }
-}
-
-memory_test :: () {
-    proc :: () {
-        task := get_current_task();
-
-        random_seed(rdtsc() ^ (cast(u64)task.id) ^ cast(u64)(task & 0xffff_ffff));
-
-        memory_buffers: [4] struct {
-            used: bool;
-            size: int;
-            data: *void;
-            sentinel_value: u8;
-        };
-
-        total_clicks: u64;
-
-        for 1..10_000_000 {
-            r := random_get() % memory_buffers.count;
-            buf := *memory_buffers[r];
-
-            log("Managing memory. Buf = %\n", buf.*);
-
-            start := rdtsc();
-
-            if buf.used {
-                for 0..buf.size-1 {
-                    assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
-                }
-
-                free_guarded_memory(buf.data);
-            } else {
-                buf.size = cast(s64) (random_get() % 2000) * 4096;
-                buf.data = allocate_guarded_memory(buf.size, 0x4000);
-
-                buf.sentinel_value = cast,trunc(u8) random_get();
-
-                for 0..buf.size-1 {
-                    (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
-                }
-            }
-
-            end := rdtsc();
-            total_clicks += end - start;
-
-            average_ms := ((total_clicks / cast(u64)it) * 1_000) / global.tsc_frequency;
-            log("Running average: %ms", average_ms);
-
-            buf.used = !buf.used;
-
-            yield_execution();
-        }
-    }
-
-    threads_per_core := 3;
-
-    for *core: global.processor_cores {
-        for 1..threads_per_core {
-            task := create_task(proc, kernel_stack_size = 0x4_0000, name = "Memory Tester");
-            put_task_on_core(task, core);
         }
     }
 }
@@ -824,33 +820,13 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 bluescreen :: (loc := #caller_location) #no_context {
-
     write_string("\nBluescreen!\n");
 
-    stack_trace: *Stack_Trace_Node;
+    write_string("Source code location:\n");
+    write_loc(loc);
+    write_string("\n");
 
-    if global.multiprocessing_initialized {
-        task := get_current_task();
-        stack_trace_is_available := task && task._context && task._context.stack_trace;
-
-        if stack_trace_is_available {
-            stack_trace = task._context.stack_trace;
-        }
-    }
-
-    else if global.first_context {
-        stack_trace = global.first_context.stack_trace;
-    }
-
-    if stack_trace && false {
-        push_context {
-            print_stack_trace(global.first_context.stack_trace);
-        }
-    } else {
-        write_string("Source code location:\n");
-        write_loc(loc);
-        write_string("\n");
-    }
+    // Todo: If we load the debug information from disk we can display a frame pointer based call stack here. Although that can generate page faults if things are very broken.
 
     using global.framebuffer;
 
@@ -1192,7 +1168,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
     }
 }
 
-map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
+map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
     for VM_Iterator.{virtual_start, page_count} {
         assert(it.flags & .PAGE_SIZE == 0);
 
@@ -1776,7 +1752,7 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
     assert(guard_region_size % 4096 == 0, "Guarded allocation size must be a multiple of 4KB.");
 
     // Physical block allocator doesn't return page aligned memory, so worst case we have to offset by 4095 bytes to align the returned memory.
-    padded_size := size + 4095;
+    padded_size  := size + 4095;
     virtual_size := padded_size + 2 * guard_region_size; // Put guard regions on both sides because why not?
 
     physical := alloc_block(*global.physical_block_allocator, cast(u64) padded_size);
@@ -1789,16 +1765,16 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
     map_pages(client_address, physical_aligned, physical_pages);
 
     {
+        node := New(allocations.Node,, global.small_objects);
+
+        node.created_at      = caller_location;
+        node.physical_base   = physical;
+        node.virtual_base    = cast(*void) virtual;
+        node.physical_pages  = physical_pages;
+        node.client_address  = client_address;
+
         acquire(*spinlock);
-
-        result := array_add(*allocations);
-
-        result.created_at      = caller_location;
-        result.physical_base   = physical;
-        result.virtual_base    = cast(*void) virtual;
-        result.physical_pages  = physical_pages;
-        result.client_address  = client_address;
-
+        queue_push(*allocations, node);
         release(*spinlock);
     }
 
@@ -1808,29 +1784,27 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
 free_guarded_memory :: (client_address: *void) {
     using global.guarded_memory;
 
+    guarded: Guarded_Allocation;
+
     acquire(*spinlock);
 
-    guarded: *Guarded_Allocation;
-    index: int;
-
     for* allocations if it.client_address == client_address {
-        guarded = it;
-        index = it_index;
+        guarded = it.item;
+        remove it;
         break;
     }
-    assert(guarded != null);
+
+    release(*spinlock);
+
+    assert(guarded.client_address != null);
 
     unmap_pages(guarded.client_address, guarded.physical_pages);
 
     free_block(*global.physical_block_allocator,           guarded.physical_base);
     free_block(*global.virtual\_block_allocator, cast(u64) guarded.virtual_base);
-
-    array_unordered_remove_by_index(*allocations, index);
-
-    release(*spinlock);
 }
 
-find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
+find_guarded_memory :: (address: *void) -> found: bool, Guarded_Allocation {
     using global.guarded_memory;
 
     acquire(*spinlock);
@@ -1847,13 +1821,14 @@ find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
         limit := it.virtual_base + total_pages * 4096;
 
         if base <= address && address < limit {
+            g := it.item;
             release(*spinlock);
-            return it;
+            return true, g;
         }
     }
 
     release(*spinlock);
-    return null;
+    return false, .{};
 }
 
 guarded_memory_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
@@ -1968,11 +1943,16 @@ get_rflags :: () -> X64_Flags #foreign Assembly;
 
 irq_disable :: () -> bool #no_context {
     flags := get_rflags();
+    was_enabled := flags & .IF__interrupt > 0;
+
     #asm { cli; }
-    return flags & .IF__interrupt > 0;
+
+    trace(.irq_disable, was_enabled);
+    return was_enabled;
 }
 
 irq_restore :: (was_enabled: bool) #no_context {
+    trace(.irq_restore, was_enabled);
     if was_enabled {
         #asm { sti; }
     }
