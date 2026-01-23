@@ -36,6 +36,8 @@ Boot_Data :: struct {
 
     trace_buffers: [4] u64;
 
+    kernel_elf: []u8;
+
     page_directories_used: int;
 
     framebuffer: Framebuffer;
@@ -114,6 +116,7 @@ memcpy :: (dst: *void, src: *void, count: s64) -> *void #c_call {
 }
 
 // For some reason the function interposition trick doesn't work with memcmp, even though it works with memset and memcpy.
+#program_export
 _memcmp :: (a: *void, b: *void, count: u64) -> s16 #c_call {
     for 0..count-1 {
         if a.(*u8)[it] != b.(*u8)[it] return -1;

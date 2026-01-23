@@ -190,6 +190,14 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
+
+    {
+        offset := offset_of(X64_Core, "preempt_disable_count");
+        count := cast(int)gs_relative_read(offset);
+
+        assert(count == 0, "Context switch from a core with preemption disabled is not allowed.");
+    }
+
     current := get_current_task();
     scheduler := lock_scheduler_for_task(current);
 

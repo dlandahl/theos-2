@@ -108,7 +108,7 @@ Trace_Entry :: struct {
             memcpy(*entry.user[it_index], it.value_pointer, it.type.runtime_size);
         }
 
-        do_stack_trace(entry.stack_trace);
+        inline do_stack_trace(entry.stack_trace);
 
         buffer_index    := index / TRACE_ENTRIES_PER_BUFFER;
         index_in_buffer := index % TRACE_ENTRIES_PER_BUFFER;

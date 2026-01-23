@@ -8,6 +8,9 @@ using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
 #import "Random";
 #import "Hash";
 
+#import "debug_info";
+#import "executable_formats";
+
 #import "Bucket_Array";
 
 array_add :: bucket_array_add;
@@ -74,6 +77,9 @@ Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
 
     trace_state: Trace_State;
+
+    debug_info: Debug_Info;
+    debug_info_memory_pool: Pool;
 
     large_page_allocator: Large_Page_Allocator;
 
@@ -146,7 +152,7 @@ Kernel_Globals :: struct {
 
     pci_devices: [..] Pci_Device;
 
-    first_context: *#Context; // To have access to call stacks early in boot.
+    first_context: *#Context; // To have access to call stacks early in boot. Todo: Probably remove this because we use frame pointer based stack trace now.
 }
 
 global: Kernel_Globals;
@@ -272,6 +278,8 @@ kernel_entry :: () #no_context {
             context.temporary_storage = *ts;
         }
 
+        read_debug_info();
+
         {
             temporary_buffer := talloc(0x8000);
             uacpi_setup_early_table_access(temporary_buffer, 0x8000);
@@ -331,7 +339,7 @@ kernel_entry :: () #no_context {
 
         #asm { sti; }
 
-        memory_test();
+        // memory_test();
         // user_mode_stress_test();
         // network_test();
         // semaphore_test();
@@ -364,8 +372,8 @@ set_stack_trace_sentinel :: inline () #no_context {
     stack_frame.rbp = null;
 }
 
-do_stack_trace :: (output: [] u32) #no_context {
-    stack_frame := cast(*Call_Stack_Frame) get_rbp();
+do_stack_trace :: (output: [] u32, start_frame_pointer: u64 = 0) #no_context {
+    stack_frame := cast(*Call_Stack_Frame) ifx start_frame_pointer then start_frame_pointer else get_rbp();
 
     for 0..output.count-1 {
         if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
@@ -386,6 +394,86 @@ do_stack_trace :: (output: [] u32) #no_context {
         output[it] = cast,trunc(u32) stack_frame.return_address;
         stack_frame = stack_frame.rbp;
     }
+}
+
+read_debug_info :: () {
+    log_category("DWARF");
+
+    success, elf := parse_elf(cast(string)global.kernel_elf, "kernel");
+
+    if !success {
+        log_error("Failed to parse elf.");
+        return;
+    }
+
+    if !elf.debug_info_section || !elf.debug_abbrev_section || !elf.debug_line_section {
+        log_error("Failed to find debug sections in elf.");
+        return;
+    }
+
+    info   := get_section_data(elf, elf.debug_info_section);
+    abbrev := get_section_data(elf, elf.debug_abbrev_section);
+    line   := get_section_data(elf, elf.debug_line_section);
+    str    := get_section_data(elf, elf.debug_str_section);
+
+    success &= apply_relocations(elf, elf.debug_line_section_index, line);
+    success &= apply_relocations(elf, elf.debug_info_section_index, info);
+
+    if !success {
+        log_error("Failed to apply relocations.");
+        return;
+    }
+
+    {
+        pool := *global.debug_info_memory_pool;
+        pool.memblock_size  = 0x10_0000;
+        pool.oversized_size =  0x1_0000;
+
+        set_allocators(pool);
+        push_allocator(.{pool_allocator_proc, pool});
+
+        global.debug_info, success = parse_dwarf_debug_info(info, abbrev, line, str);
+    }
+
+    if !success {
+        log_error("Failed to parse debug info.");
+        return;
+    }
+}
+
+get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string, line: int {
+    // Copypasted from tools/tracer.jai
+
+    for cu: global.debug_info.compilation_units {
+        if address < cu.low_pc || address >= cu.high_pc continue;
+
+        proc_name: string;
+
+        for sp: cu.subprograms {
+            if address < sp.low_pc || address >= sp.high_pc continue;
+
+            proc_name = sp.name;
+            break;
+        }
+
+        for seq: cu.line_info.sequences {
+            first := seq.addresses[0];
+            last  := seq.addresses[seq.addresses.count-1];
+
+            if address < first || address >= last continue;
+
+            for< seq_addr: seq.addresses {
+                if seq_addr > address continue;
+
+                mapping   := seq.mappings[it_index];
+                file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
+
+                return proc_name, file_name, mapping.line;
+            }
+        }
+    }
+
+    return "(no debug info)", "", 0;
 }
 
 
@@ -623,15 +711,34 @@ set_default_context_callbacks :: () #no_context {
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         builder: String_Builder;
 
-        append(*builder, "Assertion failure");
+        append(*builder, "\n=== Assertion failure. ===\n");
         if message.count {
-            append(*builder, ": ");
+            append(*builder, "Message: ");
             append(*builder, message);
         }
         append(*builder, "\n");
 
+        buffer: [32] u32;
+        do_stack_trace(buffer);
+
+        for buffer {
+            if it == 0 break;
+
+            address := cast(u64)it + 0xffff_ffff_0000_0000;
+
+            proc_name, file, line := get_debug_info_for_address(address);
+            formatted := formatInt(address, base=16);
+
+            print(*builder, "%. [%] %\n", it_index, formatted, proc_name);
+
+            if file {
+                print(*builder, "   at %:%\n", file, line);
+            }
+        }
+
         write_builder(*builder);
-        bluescreen(location);
+
+        bluescreen();
         return true;
     };
 
@@ -645,7 +752,7 @@ set_default_context_callbacks :: () #no_context {
         }
 
         if info.common_flags & .ERROR {
-            append(*builder, "ERROR: ");
+            append(*builder, "Error: ");
         }
 
         append(*builder, message);
@@ -718,7 +825,8 @@ init_processor_core :: () {
                 break;
             }
         }
-        if !core bluescreen();
+
+        assert(core != null, "APIC id not found: %", my_local_apic_id);
 
         #asm FSGSBASE { wrgsbase core; }
     }
@@ -819,14 +927,8 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
     write_string("Spurious...\n");
 } @InterruptRoutine
 
-bluescreen :: (loc := #caller_location) #no_context {
+bluescreen :: () #no_context {
     write_string("\nBluescreen!\n");
-
-    write_string("Source code location:\n");
-    write_loc(loc);
-    write_string("\n");
-
-    // Todo: If we load the debug information from disk we can display a frame pointer based call stack here. Although that can generate page faults if things are very broken.
 
     using global.framebuffer;
 
@@ -847,7 +949,7 @@ bluescreen :: (loc := #caller_location) #no_context {
 Large_Page_Allocator :: struct {
     max_large_page_used: int;
 
-    freelist: int;
+    freelist:  int;
     clearlist: int;
 
     lru_least: s32;
@@ -1314,6 +1416,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
             // We didn't use the whole block, make a new one and move the others over.
 
             if blocks.count >= max_block_descriptors-1 {
+                write_string("Block allocator out of block descriptors.");
                 bluescreen();
             }
 
@@ -1347,11 +1450,7 @@ resize_block :: (using allocator: *Block_Allocator, address: u64, new_size: u64)
 
     block, m := find_block(allocator, address);
 
-    if !block || !block.used {
-        print_stack_trace(context.stack_trace);
-        bluescreen();
-        return false;
-    }
+    assert(block && block.used);
 
     if m == blocks.count-1 {
         return false;
@@ -1391,12 +1490,7 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
 
     block, m := find_block(allocator, address);
 
-    if !block || !block.used {
-        print_stack_trace(context.stack_trace);
-        bluescreen();
-        return;
-    }
-
+    assert(block && block.used);
     assert(block.base == address - allocator.base_address);
 
     trace(.block_free, address, block.size);
@@ -1464,10 +1558,7 @@ allocate_small_object :: (size: int) -> *void {
 
     Scoped_Acquire(*lock);
 
-    if size > 4096 {
-        bluescreen();
-        return null;
-    }
+    assert(size <= 4096);
 
     bucket_index := bit_scan_reverse(size-1);
     bucket_index = max(bucket_index - 5, 0); // This makes 32 bytes the smallest bucket.
@@ -2403,20 +2494,18 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
 
 
 
-align :: (alignment: $T, value: $V) -> V #no_context {
+align :: (alignment: $T, value: $V) -> V {
     #assert size_of(T) == 8;
     #assert size_of(V) == 8;
 
     return cast(V) align(cast(int) alignment, cast(int) value);
 }
 
-align :: (alignment: int, value: int) -> int #no_context {
+align :: (alignment: int, value: int) -> int {
     if alignment == 0 return value;
 
     // This only works for powers of two.
-    if popcount(alignment) != 1 {
-        bluescreen();
-    }
+    assert(alignment & (alignment-1) == 0);
 
     return (value + (alignment - 1)) & -alignment;
 }

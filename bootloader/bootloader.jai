@@ -108,12 +108,16 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         file_info: Efi_File_Info;
         info_size := size_of(Efi_File_Info);
 
-        EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
+        EFI_CHECK(kernel_file.GetInfo(kernel_file, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
-        size: u64 = 0x20_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
+        file_size: u64 = file_info.FileSize;
 
-        EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, size, *load_buffer));
-        EFI_CHECK(kernel_file.Read(kernel_file, *size, load_buffer));
+        EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, file_size, *load_buffer));
+        EFI_CHECK(kernel_file.Read(kernel_file, *file_size, load_buffer));
+
+        // Remember where the ELF file is stored so we can get debug info from it later.
+        boot_data.kernel_elf.count = cast(s64)file_size;
+        boot_data.kernel_elf.data  = load_buffer + DIRECT_MAPPING_BASE;
 
 
 

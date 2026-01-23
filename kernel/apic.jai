@@ -456,6 +456,14 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
               g.created_at.line_number);
     }
 
+    buffer: [32] u32;
+    do_stack_trace(buffer, stack.rbp);
+
+    for buffer {
+        if it == 0 break;
+        print(*b, "%: %\n", it_index, formatInt(cast(u64)it + 0xffff_ffff_0000_0000, base=16));
+    }
+
     write_builder(*b);
 
     bluescreen();
