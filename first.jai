@@ -248,11 +248,13 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     }
 
                     pop_error_code := "";
-                    if it.text == "InterruptRoutineWithErrorCode" {
-                        pop_error_code := "    sub rsp, 8\n";
+                    ip_offset := 15*8; // So we can find the return address, to create a stack frame for the stack tracer. 15 comes from the number of GPRs pushed to the stack after the CPU pushes the instruction pointer.
+                    if begins_with(it.text, "InterruptRoutineWithErrorCode") {
+                        pop_error_code = "    sub rsp, 8\n";
+                        ip_offset += 8;
                     }
 
-                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name, pop_error_code);
+                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name, pop_error_code, ip_offset);
                     array_add(*found_interrupts, proc.name);
                 }
             }
@@ -272,9 +274,19 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
             if phase.phase == .ALL_TARGET_CODE_BUILT {
                 if !kernel_only {
                     log("Assembling interrupt routines");
+                    result_assembly_code := builder_to_string(*interrupt_assembly,, temp);
 
-                    write_entire_file(".build/assembly.asm", builder_to_string(*interrupt_assembly));
-                    command := break_command_into_strings("nasm .build/assembly.asm -o .build/assembly.so -f elf64 -g -F dwarf -v 4");
+                    {
+                        // Use type info to get the offset of the interrupt-context-active flag in CPU local data, so we can access it from the interrupt service routines.
+                        offset := get_struct_field_offset_from_another_workspace("X64_Core", "interrupt_context_active", workspace);
+                        assert(offset != -1);
+
+                        offset_constant := tprint("\ninterrupt_context_active equ %\n\n", offset);
+                        result_assembly_code = join(offset_constant, result_assembly_code,, temp);
+                    }
+
+                    write_entire_file(".build/assembly.asm", result_assembly_code);
+                    command := break_command_into_strings("nasm -s .build/assembly.asm -o .build/assembly.so -f elf64 -g -F dwarf");
 
                     result := run_command(.. command);
                     if result.exit_code != 0 {
@@ -344,6 +356,25 @@ format_disk :: () -> success: bool {
     return true;
 }
 
+get_struct_field_offset_from_another_workspace :: (struct_name: string, field_name: string, workspace: Workspace) -> int {
+    tt := get_type_table(workspace);
+
+    for tt {
+        if it.type != .STRUCT continue;
+
+        ti_struct := cast(*Type_Info_Struct) it;
+        if ti_struct.name != struct_name continue;
+
+        for ti_struct.members {
+            if it.name != field_name continue;
+
+            return it.offset_in_bytes;
+        }
+    }
+
+    return -1;
+}
+
 INTERRUPT_STUB_FORMAT :: #string END
 
 extern %1
@@ -355,7 +386,21 @@ isr__%1:
     push_all
 
     mov rdi, rsp
+
+    ; Manually create a call stack frame that will tell the stack tracing code where the interrupt happened.
+    mov rax, [rsp + %3] ; May or may not have to skip the error code to get the return address.
+    push rax
+    push rbp
+    mov rbp, rsp
+
+    inc qword [gs:interrupt_context_active]
+
     call %1
+
+    dec qword [gs:interrupt_context_active]
+
+    pop rax
+    pop rax
 
     pop_all
     %2

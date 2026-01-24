@@ -179,6 +179,8 @@ Trace_Entry :: struct {
         buffer_index    := last_entry_index / TRACE_ENTRIES_PER_BUFFER;
         index_in_buffer := last_entry_index % TRACE_ENTRIES_PER_BUFFER;
 
+        // Todo: The first few trace entires are broken on VirtualBox for some reason.
+
         for 0..buffer_index {
 
             s: string;

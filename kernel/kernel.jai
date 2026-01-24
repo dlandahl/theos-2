@@ -59,7 +59,9 @@ X64_Core :: struct {
 
     scheduler: Scheduler;
 
-    preempt_disable_count: int;
+    preempt_disable_count: s64;
+
+    interrupt_context_active: s64;
 
     online: bool; // The core has called core_begin_multitasking, so we can put threads on it.
 
@@ -137,7 +139,7 @@ Kernel_Globals :: struct {
 
         font: Netpbm_Image;
 
-        spinlock: Spinlock;
+        spinlock: Spinlock(.IRQ);
 
         font_loaded: bool;
     }
@@ -163,6 +165,21 @@ Assembly :: #library,no_dll "../.build/assembly";
 kernel_entry :: () #no_context {
 
     set_stack_trace_sentinel();
+
+    {
+        // Initialize cpu-local data really early, because it's useful to have e.g. core ID and interrupt_context_active available.
+        core := space_for_processor_cores.data;
+        core.* = .{};
+        CR4_FSGSBASE := 1 << 16;
+
+        #asm FSGSBASE {
+            // Todo: FSGSBASE also gets initialized in initialize_processor_core as part of enable_cpu_features.
+            get_cr4 cr4:;
+            or  cr4, CR4_FSGSBASE;
+            set_cr4 cr4;
+            wrgsbase core;
+        }
+    }
 
     write_string_callback = kernel_write_string;
     set_default_context_callbacks();
@@ -213,7 +230,6 @@ kernel_entry :: () #no_context {
     // global.trace_state.tracing_enabled = false;
 
     // Todo: hardcoded.
-
     for region: global.memory_map {
         if !it_index continue;
         region_size := region.pages * 4096;
@@ -341,10 +357,10 @@ kernel_entry :: () #no_context {
 
         // memory_test();
         // user_mode_stress_test();
-        // network_test();
+        network_test();
         // semaphore_test();
 
-        sleep(4, .seconds);
+        // sleep(10, .seconds);
 
         log("=== Writing trace buffers. ===");
         write_trace_buffers();
@@ -373,7 +389,7 @@ set_stack_trace_sentinel :: inline () #no_context {
 }
 
 do_stack_trace :: (output: [] u32, start_frame_pointer: u64 = 0) #no_context {
-    stack_frame := cast(*Call_Stack_Frame) ifx start_frame_pointer then start_frame_pointer else get_rbp();
+    stack_frame := cast(*Call_Stack_Frame) ifx start_frame_pointer else get_rbp();
 
     for 0..output.count-1 {
         if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
@@ -386,13 +402,29 @@ do_stack_trace :: (output: [] u32, start_frame_pointer: u64 = 0) #no_context {
             break;
         }
 
-        if stack_frame.return_address >> 20 != 0xffff_ffff_800 {
+        if stack_frame.return_address >> 24 != 0xffff_ffff_80 {
             // The return address doesn't point into kernel code, unless the kernel executable got really big.
             break;
         }
 
         output[it] = cast,trunc(u32) stack_frame.return_address;
         stack_frame = stack_frame.rbp;
+    }
+}
+
+append_formatted_stack_trace :: (builder: *String_Builder, trace: []u32) {
+    for trace {
+        if it == 0 break;
+
+        address := cast(u64)it + 0xffff_ffff_0000_0000;
+
+        proc_name, file, line := get_debug_info_for_address(address);
+
+        print(builder, "%. [%] %\n", it_index, formatInt(address, base=16), proc_name);
+
+        if file {
+            print(builder, "   at %:%\n", file, line);
+        }
     }
 }
 
@@ -613,7 +645,8 @@ user_mode_stress_test :: (threads_per_core := 4) {
 network_test :: () {
     USE_DNS :: false;
 
-    log_category("Test");
+    log_category("TLS Test");
+    log("Starting.");
 
     net := *global.network_connection;
 
@@ -666,13 +699,15 @@ network_test :: () {
     tls_transmit_application_data(*tls, request);
 
     for 1..2 {
-        response := tls_receive_application_data(*tls);
+        response := tls_receive_application_data(*tls, seconds_to_apollo(5));
         log("Got HTTPS response: %", response);
     }
 
     // Todo: TLS Close Notify.
 
     tcp_close(connection);
+
+    log("Completed.");
 }
 
 HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
@@ -721,20 +756,7 @@ set_default_context_callbacks :: () #no_context {
         buffer: [32] u32;
         do_stack_trace(buffer);
 
-        for buffer {
-            if it == 0 break;
-
-            address := cast(u64)it + 0xffff_ffff_0000_0000;
-
-            proc_name, file, line := get_debug_info_for_address(address);
-            formatted := formatInt(address, base=16);
-
-            print(*builder, "%. [%] %\n", it_index, formatted, proc_name);
-
-            if file {
-                print(*builder, "   at %:%\n", file, line);
-            }
-        }
+        append_formatted_stack_trace(*builder, buffer);
 
         write_builder(*builder);
 
@@ -1270,7 +1292,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
     }
 }
 
-map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
+map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
     for VM_Iterator.{virtual_start, page_count} {
         assert(it.flags & .PAGE_SIZE == 0);
 
@@ -1535,7 +1557,7 @@ Small_Objects_Allocator :: struct {
     // Bucket sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096
     bucket_freelists: [8] *Page_Metadata;
 
-    lock: Spinlock;
+    lock: Spinlock(.IRQ); // Todo: IRQ lock because this currently gets used for the uACPI work queue.
 }
 
 small_objects_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
@@ -1949,7 +1971,7 @@ guarded_memory_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64
 
 
 Serial_Port :: struct (base_address: u16) {
-    spinlock: Spinlock;
+    spinlock: Spinlock(.IRQ);
 }
 
 serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
@@ -2084,9 +2106,20 @@ acquire :: (lock: *Spinlock) #no_context {
 
     my_ticket := fetch_add(*lock.next_ticket, 1);
 
-    contention_level := my_ticket - lock.now_serving;
-    if contention_level > 0 {
-        trace(.contended_spinlock, contention_level);
+    {
+        // Detect issues with how spinlocks are used. This code is only for development.
+
+        contention_level := my_ticket - lock.now_serving;
+        if contention_level > 0 {
+            trace(.contended_spinlock, contention_level);
+        }
+
+        if lock.lock_type != .IRQ {
+            offset := offset_of(X64_Core, "interrupt_context_active");
+            active := cast(int)gs_relative_read(offset);
+
+            // assert(!active, "Non-IRQ lock used in interrupt context.");
+        }
     }
 
     while lock.now_serving != my_ticket {

@@ -457,12 +457,9 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     }
 
     buffer: [32] u32;
-    do_stack_trace(buffer, stack.rbp);
+    do_stack_trace(buffer);
 
-    for buffer {
-        if it == 0 break;
-        print(*b, "%: %\n", it_index, formatInt(cast(u64)it + 0xffff_ffff_0000_0000, base=16));
-    }
+    append_formatted_stack_trace(*b, buffer);
 
     write_builder(*b);
 
@@ -626,6 +623,10 @@ uACPI_State :: struct {
             }
 
             release(*work_queue_lock);
+
+            log("=== Writing trace buffers. ===");
+            write_trace_buffers();
+            log("=== Wrote % trace entries. ===", global.trace_state.current_index);
         }
     }
 

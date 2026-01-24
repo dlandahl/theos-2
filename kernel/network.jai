@@ -1291,19 +1291,21 @@ tls_transmit_application_data :: (tls: *Tls_Connection, plaintext: string) {
     memcpy(buffer.data, *record, size_of(Tls_Record_Header));
     memcpy(buffer.data + size_of(Tls_Record_Header), ciphertext.data, ciphertext.count);
 
-    blocking_write_tcp(tls.tcp, buffer);
+    blocking_write_tcp(tls.tcp, buffer); // Todo: Timeout.
     tcp_flush(tls.tcp);
 }
 
-tls_receive_application_data :: (tls: *Tls_Connection) -> string {
-    buffer := blocking_read_tcp(tls.tcp, size_of(Tls_Record_Header));
+tls_receive_application_data :: (tls: *Tls_Connection, timeout := INFINITE_TIMEOUT) -> string {
+    buffer := blocking_read_tcp(tls.tcp, size_of(Tls_Record_Header), timeout);
+
+    if !buffer return ""; // Timeout hit.
 
     record := cast(*Tls_Record_Header) buffer.data;
     byte_swap_in_place(record);
 
     assert(record.content_type == .APPLICATION_DATA);
 
-    ciphertext := blocking_read_tcp(tls.tcp, record.length);
+    ciphertext := blocking_read_tcp(tls.tcp, record.length); // Todo: Think about timeout.
     success, plaintext := tls_decrypt_message(tls, ciphertext, record.content_type);
     assert(success);
 

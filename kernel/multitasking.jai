@@ -4,6 +4,7 @@ Task_Info :: struct {
     // These fields must match the task switch assembly routine
     rsp: *void;
     cr3: u64;
+    interrupt_context_was_active: int;
     xsave: Xsave_Area #align 16;
 
     id: int;
@@ -36,7 +37,7 @@ Scheduler :: struct {
     sleeping:       List_Queue(*Task_Info);
     waiting_to_run: List_Queue(*Task_Info);
 
-    spinlock: Spinlock;
+    spinlock: Spinlock(.IRQ);
 
     last_task_switch_timestamp: Apollo_Time;
 }
@@ -119,7 +120,7 @@ core_begin_multitasking :: () {
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x20000000, global.scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(0x2000000, global.scheduling_interrupt_gate);
     }
 }
 
@@ -195,7 +196,7 @@ schedule_tasks :: () {
         offset := offset_of(X64_Core, "preempt_disable_count");
         count := cast(int)gs_relative_read(offset);
 
-        assert(count == 0, "Context switch from a core with preemption disabled is not allowed.");
+        assert(count == 0, "Context switch with preemption disabled is not allowed.");
     }
 
     current := get_current_task();
