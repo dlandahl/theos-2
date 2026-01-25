@@ -454,6 +454,7 @@ read_debug_info :: () {
     }
 
     {
+        // For some reason, parsing dwarf debug info uses a huge amount of memory.
         pool := *global.debug_info_memory_pool;
         pool.memblock_size  = 0x10_0000;
         pool.oversized_size =  0x1_0000;

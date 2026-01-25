@@ -351,7 +351,8 @@ format_disk :: () -> success: bool {
     }
 
     disk_image := read_entire_file("disk_image.img");
-    fat16_print_filesystem_tree(disk_image);
+
+    fat16_image := fat16_parse_disk_image(disk_image);
 
     return true;
 }
