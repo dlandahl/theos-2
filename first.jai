@@ -14,6 +14,8 @@
     #import,dir "modules/VirtualBox";
 }
 
+#import "FAT16";
+
 #run,stallable main();
 
 kernel_only := false;
@@ -23,7 +25,7 @@ main :: () {
     set_build_options_dc(.{ do_output = false });
 
     #if OS == .WINDOWS {
-        log("You are on Windows, but this build program works only on Linux. Attempting to automatically relaunch in WSL");
+        log("You are on Windows, but this build program works only on Linux. Attempting to automatically relaunch in WSL.");
 
         JAI_ROOT_DIR    :: "/mnt/c/jai";
         WSL_DISTRO_NAME :: "Ubuntu";
@@ -51,7 +53,7 @@ main :: () {
 
     nasm_result := run_command("nasm", "-v");
     if nasm_result.exit_code != 0 {
-        log_error("\nThe NASM assembler is required by this build program to assemble the interrupt routines. Please install it and try again. The command might be \"sudo apt install nasm\"");
+        log_error("\nThe NASM assembler is required by this build program to assemble the interrupt routines. Please install it and try again.");
         return;
     }
 
@@ -326,7 +328,7 @@ format_disk :: () -> success: bool {
 
     script :: string.[
         "dd if=/dev/zero of=fat.img bs=1M count=10",
-        "mkfs.vfat -F 16 fat.img",
+        "mkfs.fat -F 16 fat.img",
         "mmd -i fat.img ::/EFI",
         "mmd -i fat.img ::/EFI/BOOT",
         "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",
@@ -334,12 +336,7 @@ format_disk :: () -> success: bool {
         "mcopy -i fat.img startup.nsh ::",
 
         "mv fat.img disk_image.img",
-
-        // "mv fat.img .build/iso",
-        // "xorriso -as mkisofs -R -f -e fat.img -no-emul-boot -o disk_image.iso .build/iso",
     ];
-
-    // make_directory_if_it_does_not_exist(".build/iso");
 
     for script {
         if !it.count continue;
@@ -352,6 +349,9 @@ format_disk :: () -> success: bool {
             return false;
         }
     }
+
+    disk_image := read_entire_file("disk_image.img");
+    fat16_print_filesystem_tree(disk_image);
 
     return true;
 }
@@ -399,8 +399,7 @@ isr__%1:
 
     dec qword [gs:interrupt_context_active]
 
-    pop rax
-    pop rax
+    add rsp, 16
 
     pop_all
     %2

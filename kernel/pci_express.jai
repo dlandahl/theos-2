@@ -676,6 +676,12 @@ i8254x_interrupt :: (stack: *void) #c_call {
     // Todo: Should have a special interrupt Context, that ensures interrupts don't accidentally use temporary storage etc.
     push_context {
         net := *global.network_connection;
+
+        if !net.adapter.mmio {
+            // Todo: The ethernet card generates interrupts before we assign it to the global network_connection struct.
+            return;
+        }
+
         cause := net.adapter.ICR__interrupt_cause_read;
 
         if cause & .RXT0__Receiver_Timer_Interrupt {
@@ -1078,7 +1084,7 @@ Nvme_Identify_Controller_Structure :: struct {
 #assert size_of(Nvme_Submission_Queue_Entry) == 64;
 
 #program_export
-nvme_interrupt :: (stack: *void) {
+nvme_interrupt :: (stack: *void) #c_call {
     write_string("NVMe interrupt recieved.\n");
 
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);

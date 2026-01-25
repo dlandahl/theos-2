@@ -153,8 +153,6 @@ Kernel_Globals :: struct {
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
     pci_devices: [..] Pci_Device;
-
-    first_context: *#Context; // To have access to call stacks early in boot. Todo: Probably remove this because we use frame pointer based stack trace now.
 }
 
 global: Kernel_Globals;
@@ -253,8 +251,6 @@ kernel_entry :: () #no_context {
 
 
     push_context {
-        global.first_context = *context;
-
         using global.framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -320,7 +316,7 @@ kernel_entry :: () #no_context {
 
         core_begin_multitasking();
 
-        // Todo: system time alone is too low entropy for OS random number generation.
+        // Todo: System time alone is too low entropy for OS random number generation.
         time := get_monotonic_system_time();
         random_seed(cast(S128)time);
 
@@ -333,6 +329,8 @@ kernel_entry :: () #no_context {
         for *core: global.processor_cores {
             while !core.online pause();
         }
+
+        irq_restore(true);
 
         for *global.pci_devices {
             if it.class_code == .MASS_STORAGE {
@@ -353,8 +351,6 @@ kernel_entry :: () #no_context {
             }
         }
 
-        #asm { sti; }
-
         // memory_test();
         // user_mode_stress_test();
         network_test();
@@ -363,12 +359,13 @@ kernel_entry :: () #no_context {
         // sleep(10, .seconds);
 
         log("=== Writing trace buffers. ===");
-        write_trace_buffers();
-        log("=== Wrote % trace entries. ===", global.trace_state.current_index);
+        trace_event_count := write_trace_buffers();
+        log("=== Wrote % trace events. ===", trace_event_count);
 
         while true {
             schedule_tasks();
-            #asm { sti; hlt; }
+            assert(get_rflags() & .IF__interrupt > 0);
+            #asm { hlt; }
         }
     }
 }
@@ -388,8 +385,8 @@ set_stack_trace_sentinel :: inline () #no_context {
     stack_frame.rbp = null;
 }
 
-do_stack_trace :: (output: [] u32, start_frame_pointer: u64 = 0) #no_context {
-    stack_frame := cast(*Call_Stack_Frame) ifx start_frame_pointer else get_rbp();
+do_stack_trace :: (output: [] u32) #no_context {
+    stack_frame := cast(*Call_Stack_Frame) get_rbp();
 
     for 0..output.count-1 {
         if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
@@ -736,7 +733,7 @@ floating_point_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
 
     push_context {
         core := get_current_core();
-        log("Floating point exception: % (thread %)\n", mxcsr, core.scheduler.current_task.id);
+        log("Floating point exception: % (thread %)", mxcsr, core.scheduler.current_task.id);
     }
 } @InterruptRoutine
 
@@ -854,9 +851,9 @@ init_processor_core :: () {
     }
 
     {
-        // Global descriptor table
+        // Global descriptor table.
 
-        // Use the IO Permission Bitmap to give user mode access to all IO ports for now
+        // Use the IO Permission Bitmap to give user mode access to all IO ports for now.
         memset(core.task_state_segment.bitmap.data, 0, 8192);
         core.task_state_segment.iopb = size_of(Task_State_Segment);
 
@@ -902,7 +899,7 @@ init_processor_core :: () {
     }
 
     {
-        // Interrupt descriptor table
+        // Interrupt descriptor table.
         idt_desc: struct {
             limit: u16;
             base: *Interrupt_Gate_Descriptor #align 2;
@@ -916,7 +913,7 @@ init_processor_core :: () {
     }
 
     {
-        // Enable syscalls
+        // Enable syscalls.
 
         // According to https://www.felixcloutier.com/x86/sysret, sysret sets the privilege bits in the stack segment selector automatically, but this does not seem to happen in VirtualBox.
         star := (cast(u64) Segment_Selector.RING0_DATA | 3) << 48;
@@ -936,7 +933,7 @@ init_processor_core :: () {
     }
 
     {
-        // Spurious interrupts
+        // Spurious interrupts.
 
         register_interrupt_gate(isr__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
@@ -1214,7 +1211,6 @@ VM_Iterator :: struct {
 
 for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
     // Depth-first page table walker. "page_count" is how much memory you want to cover, measured in 4k pages. So if vm_it.page_count == 512 and it finds a 2MB page, it will be done after that.
-    // All non-leaf entries, i.e. all page tables, are expected to be PRESENT after the for-body runs (if it doesn't break or return) so it can walk into them.
 
     pt_index := decode_virtual_address(cast(u64) vm_it.start_address);
 
@@ -1237,7 +1233,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
     it.level = 3;
 
     depth_first_go_to_next_pt_entry :: () #expand {
-        if it.level != 0 && (it.flags & .PAGE_SIZE == 0) {
+        if it.level != 0 && (it.flags & .PAGE_SIZE == 0) && (it.flags & .PRESENT > 0) {
             // If we're not in the lowest level, go deeper.
             it.level -= 1;
 
@@ -1975,9 +1971,7 @@ Serial_Port :: struct (base_address: u16) {
 }
 
 serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
-    if global.multiprocessing_initialized {
-        acquire(*spinlock);
-    }
+    acquire(*spinlock);
 
     for data {
         for 1..10_0000 {
@@ -2005,9 +1999,7 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
         }
     }
 
-    if global.multiprocessing_initialized {
-        release(*spinlock);
-    }
+    release(*spinlock);
 }
 
 
@@ -2365,9 +2357,7 @@ draw_text :: (text: string) #no_context {
 
     if !font_loaded return;
 
-    if global.multiprocessing_initialized {
-        acquire(*spinlock);
-    }
+    acquire(*spinlock);
 
     line_spacing :: 5;   // Number of pixels between the bottom of one character cell, and the top of the next one down.
     char_width   :: 9;
@@ -2439,9 +2429,7 @@ draw_text :: (text: string) #no_context {
         cursor_x += 1;
     }
 
-    if global.multiprocessing_initialized {
-        release(*spinlock);
-    }
+    release(*spinlock);
 }
 
 Netpbm_Image :: struct {

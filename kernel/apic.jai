@@ -274,11 +274,12 @@ ap_entry_point :: () #c_call {
 
         core_begin_multitasking();
 
-        #asm { sti; }
+        irq_restore(true);
 
         while true {
             schedule_tasks();
-            #asm { sti; hlt; }
+            assert(get_rflags() & .IF__interrupt > 0);
+            #asm { hlt; }
         }
     }
 }

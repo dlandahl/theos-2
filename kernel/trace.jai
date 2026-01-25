@@ -122,7 +122,7 @@ Trace_Entry :: struct {
         trace_buffers[buffer_index].data[index_in_buffer] = entry;
     }
 
-    write_trace_buffers :: () {
+    write_trace_buffers :: () -> num_written: int {
         using global.trace_state;
 
         // Because this procedure is to be called after completing a kernel test workload, we don't care about extra latency and it's more important to have as controlled an environment as possible.
@@ -197,5 +197,7 @@ Trace_Entry :: struct {
         }
 
         irq_restore(irq_state);
+
+        return last_entry_index;
     }
 }
