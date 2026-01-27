@@ -84,17 +84,17 @@ main :: () {
     make_directory_if_it_does_not_exist(".build/");
 
     if (!kernel_only || bootloader_only) && !compile_bootloader(to_create) {
-        log_error("Failed to compile the bootloader.\n");
+        log_error("Failed to compile the bootloader.");
         exit(1);
     }
 
     if (!bootloader_only || kernel_only) && !compile_kernel(to_create) {
-        log_error("Failed to compile the kernel.\n");
+        log_error("Failed to compile the kernel.");
         exit(1);
     }
 
     if !format_disk() {
-        log_error("Failed to format the hard disk.\n");
+        log_error("Failed to format the hard disk.");
         exit(1);
     }
 }
@@ -323,38 +323,27 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     return success;
 }
 
-format_disk :: () -> success: bool {
-    log("Formatting disk image\n\n");
+format_disk :: () -> bool {
+    log("Formatting disk image");
 
-    script :: string.[
-        "dd if=/dev/zero of=fat.img bs=1M count=10",
-        "mkfs.fat -F 16 fat.img",
-        "mmd -i fat.img ::/EFI",
-        "mmd -i fat.img ::/EFI/BOOT",
-        "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",
-        "mcopy -i fat.img .build/kernel ::",
-        "mcopy -i fat.img startup.nsh ::",
+    bootloader := read_entire_file(".build/bootx64.efi");
+    kernel     := read_entire_file(".build/kernel");
 
-        "mv fat.img disk_image.img",
-    ];
+    disk_image := fat16_create_disk_image(0xa0_0000, set_volume_label="THEOS BOOT");
+    root := fat16_get_root_directory(*disk_image);
 
-    for script {
-        if !it.count continue;
+    fat16_create_directory(root, "EFI");
+    fat16_create_directory(root, "EFI/BOOT");
 
-        command := break_command_into_strings(it);
-        result := run_command(.. command);
+    fat16_write_file(root, "EFI/BOOT/BOOTX64.EFI", bootloader);
+    fat16_write_file(root, "kernel", kernel);
+    fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
 
-        if result.exit_code != 0 {
-            log_error("mtools disk formatting command failed: (\"%\").\nPlease make sure mtools is installed.", it);
-            return false;
-        }
-    }
+    fat16_copy_fat_table(*disk_image);
 
-    disk_image := read_entire_file("disk_image.img");
+    write_entire_file("disk_image.img", disk_image.all_file_data);
 
-    fat16_image := fat16_parse_disk_image(disk_image);
-
-    return true;
+    return true; // Todo: Check for errors.
 }
 
 get_struct_field_offset_from_another_workspace :: (struct_name: string, field_name: string, workspace: Workspace) -> int {

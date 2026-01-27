@@ -1,8 +1,6 @@
 
-// Todo: None of the disk-reading code guards against badly formatted disks, it will just crash or give you nonsense output.
-// A module like this is probably much more valuable if it can tell you where a disk is incorrectly formatted.
-
 Fat16_Media_Descriptor :: enum u8 {
+    FLOPPY     :: 0xf0;
     HARD_DRIVE :: 0xf8;
 }
 
@@ -69,9 +67,7 @@ Fat16_Fat :: struct {
     clusters:        void;
 }
 
-FAT16_CLUSTER_END_OF_CHAIN :u16: 0xffff;
-
-Fat16_Entry_Attributes :: enum_flags u8 {
+Fat16_Attributes :: enum_flags u8 {
     READ_ONLY  :: 0x01;
     HIDDEN     :: 0x02;
     SYSTEM     :: 0x04;
@@ -80,12 +76,14 @@ Fat16_Entry_Attributes :: enum_flags u8 {
     ARCHIVE    :: 0x20;
     DEVICE     :: 0x40;
     RESERVED   :: 0x80;
+
+    LFN_ENTRY  :: 0x0f;
 }
 
 Fat16_LFN_Entry :: struct {
     record_sequence:     u8;
     characters_1:    [5] u16 #align 1;
-    attributes:          Fat16_Entry_Attributes;
+    attributes:          Fat16_Attributes;
     reserved:            u8;
     chk_short_name:      u8;
     characters_2:    [6] u16;
@@ -98,7 +96,7 @@ Fat16_LFN_Entry :: struct {
 Fat16_Short_Entry ::  struct {
     name:          [8] u8;
     extension:     [3] u8;
-    attributes:        Fat16_Entry_Attributes;
+    attributes:        Fat16_Attributes;
     reserved:          u8;
     create_time_10ms:  u8;
     create_time:       DOSTIME;
@@ -120,17 +118,22 @@ Fat16_Disk_Image :: struct {
     bootsector: *Fat16_Bootsector;
 
     file_allocation_table: []u16;
-    root_directory: *Fat16_Short_Entry;
+    root_directory_area: *void;
     data_area: *void;
 
+    lowest_maybe_free_fat_entry: int;
     all_file_data: string;
-    pool: Flat_Pool;
 }
 
-fat16_create_disk_image :: (size_bytes: int, set_oem_name := "JaiFAT16", set_volume_label := "NO NAME    ", set_serial_number: u32 = 0) -> Fat16_Disk_Image {
+Fat16_Tree_Cursor :: struct {
+    disk_image: *Fat16_Disk_Image;
+    cluster: u16;
+}
+
+fat16_create_disk_image :: (size_bytes: int, set_oem_name := "JaiFAT16", set_volume_label := "NO NAME", set_serial_number: u32 = 0) -> Fat16_Disk_Image {
     // Code for creating a new FAT16 disk from scratch in memory.
 
-    using image: Fat16_Disk_Image;
+    all_file_data: string;
 
     all_file_data.count = size_bytes;
     all_file_data.data  = alloc(size_bytes);
@@ -140,9 +143,7 @@ fat16_create_disk_image :: (size_bytes: int, set_oem_name := "JaiFAT16", set_vol
 
     {
         // Setup the boot sector.
-        bootsector = cast(*Fat16_Bootsector)all_file_data.data;
-
-        using bootsector;
+        using bootsector := cast(*Fat16_Bootsector)all_file_data.data;
 
         jmp = .[235, 60, 144];
         memcpy(*oem_name, set_oem_name.data, 8);
@@ -169,108 +170,452 @@ fat16_create_disk_image :: (size_bytes: int, set_oem_name := "JaiFAT16", set_vol
         serial_number         = set_serial_number;
         bootsector_magic      = 0xaa55;
 
-        memcpy(*volume_label, set_volume_label.data, 11);
+        memcpy(*volume_label, set_volume_label.data, min(11, set_volume_label.count));
         memcpy(*file_system_label, "FAT16   ".data, 8);
 
         memcpy(*boot_code, FAT16_BOOT_CODE.data, FAT16_BOOT_CODE.count);
     }
 
     // Fill in the other pointers based on the values calculated for the boot sector.
-    image = fat16_parse_disk_image(all_file_data);
+    disk := fat16_parse_disk_image(all_file_data);
 
-    return image;
+    return disk;
 }
 
 fat16_parse_disk_image :: (file_data: string) -> Fat16_Disk_Image {
     // Code for reading from an existing disk in memory.
 
     using image: Fat16_Disk_Image;
-    init(*pool);
 
     all_file_data = file_data;
 
-    {
-        // Find the bootsector.
-        bootsector = cast(*Fat16_Bootsector) file_data.data;
-    }
-
+    // Find the bootsector.
+    bootsector = cast(*Fat16_Bootsector) file_data.data;
     using bootsector;
 
     bytes_per_cluster = cast(int)bytes_per_sector * sectors_per_cluster;
 
-    {
-        // Find the file allocation table.
-        fat_offset_bytes := reserved_sectors * bytes_per_sector;
-        file_allocation_table.data = cast(*u16) (file_data.data + fat_offset_bytes);
-        file_allocation_table.count = sectors_per_fat_table * bytes_per_sector / size_of(u16);
-    }
+    // Find the file allocation table.
+    fat_offset_bytes := reserved_sectors * bytes_per_sector;
+    file_allocation_table.data = cast(*u16) (file_data.data + fat_offset_bytes) + 2;
+    file_allocation_table.count = sectors_per_fat_table * bytes_per_sector / size_of(u16) - 2;
 
-    {
-        // Find the root directory.
-        root_directory_offset_sectors := reserved_sectors + (number_of_fat_tables * sectors_per_fat_table);
-        root_directory_offset_bytes   := root_directory_offset_sectors * bytes_per_sector;
+    // Todo: Metadata in FAT.
+    file_allocation_table.data[-2] = 0xfff8;
+    file_allocation_table.data[-1] = 0xffff;
 
-        root_directory = cast(*Fat16_Short_Entry) (file_data.data + root_directory_offset_bytes);
-    }
+    // Find the root directory.
+    root_directory_offset_sectors := reserved_sectors + (number_of_fat_tables * sectors_per_fat_table);
+    root_directory_offset_bytes   := root_directory_offset_sectors * bytes_per_sector;
 
-    {
-        // Find the data area.
-        root_dir_sectors := ((max_root_dir_entries * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
-        data_area = cast(*void)root_directory + root_dir_sectors * bytes_per_sector;
-    }
+    root_directory_area = (file_data.data + root_directory_offset_bytes);
+
+    // Find the data area.
+    root_dir_sectors := ((max_root_dir_entries * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
+    data_area = root_directory_area + root_dir_sectors * bytes_per_sector;
 
     return image;
 }
 
-fat16_list_directory :: (image: Fat16_Disk_Image, directory_data: *Fat16_Short_Entry) {
-    dir_entry := directory_data;
+fat16_get_root_directory :: (disk: *Fat16_Disk_Image) -> Fat16_Tree_Cursor {
+    handle: Fat16_Tree_Cursor;
+    handle.cluster = 0;
+    handle.disk_image = disk;
 
-    while true {
-        defer dir_entry += 1;
+    return handle;
+}
 
-        first_byte := (.*) cast(*u8) dir_entry;
+fat16_change_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> bool, Fat16_Tree_Cursor {
 
-        if first_byte == 0 {
-            break;
+    current_directory := relative_to;
+    remainder         := trim(path, "\\/");
+
+    while remainder {
+        _, left:, remainder = split_from_left_by_any(remainder, "\\/");
+
+        // Todo: Handle long names.
+        assert(left.count < 8);
+
+        short_entry := fat16_find_directory_entry(current_directory, left);
+
+        if !short_entry {
+            log_error("Directory entry \"%\" not found while evaluating path %.", left, path);
+            return false, .{};
         }
 
-        if first_byte == 0xe5 {
+        if short_entry.attributes & .DIRECTORY == 0 {
+            log_error("Directory entry \"%\", found while evaluating path %, is not a directory.", left, path);
+            return false, .{};
+        }
+
+        current_directory.cluster = short_entry.cluster;
+    }
+
+    return true, current_directory;
+}
+
+fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat16_Tree_Cursor {
+    entry, existed, parent := fat16_find_or_create_directory_entry(relative_to, path);
+
+    if existed {
+        return .{relative_to.disk_image, entry.cluster}; // Todo, we could warn if it's not a directory, etc.
+    }
+
+    new_cluster := fat16_allocate_fat_entry(relative_to.disk_image);
+    relative_to.disk_image.file_allocation_table[new_cluster] = 0xfff8;
+
+    entry.cluster = new_cluster + 2;
+    entry.attributes = .DIRECTORY;
+
+    new_directory := relative_to;
+    new_directory.cluster = entry.cluster;
+
+    self_link := fat16_find_or_create_directory_entry(new_directory, ".");
+    back_link := fat16_find_or_create_directory_entry(new_directory, "..");
+
+    assert(self_link && back_link);
+
+    self_link.cluster = entry.cluster;
+    back_link.cluster = parent.cluster;
+
+    self_link.attributes = .DIRECTORY;
+    back_link.attributes = .DIRECTORY;
+
+    return .{relative_to.disk_image, entry.cluster}; // Todo, we could warn if it's not a directory, etc.
+}
+
+fat16_write_file :: (relative_to: Fat16_Tree_Cursor, path: string, content: string) -> bool {
+    // Overwrites file contents if it already exists, creates file if it doesn't.
+    disk := relative_to.disk_image;
+
+    parent, file_name := parse_path(relative_to, path);
+    if !file_name return false; // The path doesn't exist, a warning was generated by change_directory. Todo: Return error code.
+
+    entry, already_existed := fat16_find_or_create_directory_entry(relative_to, path);
+
+    if already_existed {
+        if entry.attributes & .DIRECTORY return false; // Todo: Return error code.
+
+        // Might be marginally faster to reuse the existing clusters, but I'd rather keep the code a bit simpler.
+        erase_cluster_chain(disk, entry.cluster);
+    }
+
+    // Slower than necessary, because we could allocate all the clusters ahead of time, and then do larger contiguous memcpys.
+    next_cluster := fat16_allocate_fat_entry(disk);
+    entry.cluster = next_cluster + 2;
+
+    whole_clusters_needed := content.count / disk.bytes_per_cluster;
+
+    for 0..whole_clusters_needed-1 {
+        source      := content.data   + it           * disk.bytes_per_cluster;
+        destination := disk.data_area + next_cluster * disk.bytes_per_cluster;
+
+        memcpy(destination, source, disk.bytes_per_cluster);
+
+        if it != whole_clusters_needed - 1 {
+            // Todo: Clarify this offset by 2 thing.
+            disk.file_allocation_table[next_cluster] = fat16_allocate_fat_entry(disk)+2;
+            next_cluster = disk.file_allocation_table[next_cluster]-2;
+        }
+    }
+
+    {
+        // Do the final cluster.
+        remaining := content.count % disk.bytes_per_cluster;
+
+        if remaining {
+            disk.file_allocation_table[next_cluster] = fat16_allocate_fat_entry(disk)+2;
+            next_cluster = disk.file_allocation_table[next_cluster]-2;
+
+            source      := content.data   + content.count - remaining;
+            destination := disk.data_area + next_cluster * disk.bytes_per_cluster;
+
+            memcpy(destination, source, remaining);
+        }
+    }
+
+    disk.file_allocation_table[next_cluster] = 0xffff;
+
+    entry.attributes = .ARCHIVE;
+    entry.file_size = cast(u32)content.count;
+
+    return true;
+}
+
+fat16_read_file :: (relative_to: Fat16_Tree_Cursor, path: string) -> success: bool, string {
+    disk := relative_to.disk_image;
+
+    // Todo: Return error codes.
+
+    parent, file_name := parse_path(relative_to, path);
+    if !file_name return false, ""; // The path doesn't exist, a warning was generated by change_directory. Todo: Return error code.
+
+    file := fat16_find_directory_entry(parent, file_name);
+    if !file return false, "";
+
+    buffer := alloc(file.file_size);
+
+    whole_clusters := file.file_size / disk.bytes_per_cluster;
+    next_cluster := file.cluster - 2;
+
+    for 0..whole_clusters-1 {
+        source      := disk.data_area + next_cluster * disk.bytes_per_cluster;
+        destination := buffer         + it           * disk.bytes_per_cluster;
+
+        memcpy(destination, source, disk.bytes_per_cluster);
+
+        // Todo: Is there an off by one error with the cluster indices?
+        next_cluster = disk.file_allocation_table[next_cluster];
+    }
+
+    {
+        remaining := file.file_size % disk.bytes_per_cluster;
+
+        destination := buffer + file.file_size - remaining;
+        source      := disk.data_area + next_cluster * disk.bytes_per_cluster;
+
+        memcpy(destination, source, remaining);
+    }
+
+    s: string;
+    s.count = file.file_size;
+    s.data = buffer;
+
+    return true, s;
+}
+
+fat16_copy_fat_table :: (using disk: *Fat16_Disk_Image) {
+    fat_size := bootsector.sectors_per_fat_table * bootsector.bytes_per_sector;
+
+    fat_1_base := all_file_data.data + bootsector.reserved_sectors      * bootsector.bytes_per_sector;
+    fat_2_base := fat_1_base         + bootsector.sectors_per_fat_table * bootsector.bytes_per_sector;
+
+    memcpy(fat_2_base, fat_1_base, fat_size);
+}
+
+erase_cluster_chain :: (disk: *Fat16_Disk_Image, cluster: u16) {
+
+    assert(cluster >= 2);
+    next := cluster - 2;
+
+    while true {
+        assert(next != 0);
+
+        old_value := disk.file_allocation_table[next];
+        disk.file_allocation_table[next] = 0;
+
+        if next < disk.lowest_maybe_free_fat_entry {
+            disk.lowest_maybe_free_fat_entry = next;
+        }
+
+        if old_value >= 0xfff8 return;
+
+        next = disk.file_allocation_table[old_value];
+    }
+}
+
+parse_path :: (relative_to: Fat16_Tree_Cursor, path: string) -> parent_folder: Fat16_Tree_Cursor, entry_name: string {
+    parent  := relative_to;
+    trimmed := trim(path, "\\/");
+
+    found, left, file_name := split_from_right_by_any(trimmed, "\\/");
+
+    if found {
+        success:, parent = fat16_change_directory(relative_to, left);
+        if !success return .{}, "";
+    } else {
+        file_name = left;
+    }
+
+    return parent, file_name;
+}
+
+fat16_find_directory_entry :: (parent: Fat16_Tree_Cursor, file_name: string) -> *Fat16_Short_Entry {
+
+    _, base_name, extension := split_from_left(file_name, #char ".");
+    assert(base_name.count <= 8);
+    assert(extension.count <= 3);
+
+    for each_entry(parent) {
+        other_name, other_extension := fat16_get_name(it);
+
+        name_match := equal_nocase(other_name, base_name);
+        ext_match  := equal_nocase(other_extension, extension);
+
+        if name_match && ext_match {
+            return it;
+        }
+    }
+
+    return null;
+}
+
+fat16_find_or_create_directory_entry :: (relative_to: Fat16_Tree_Cursor, path: string) -> *Fat16_Short_Entry, existed: bool, parent_cursor: Fat16_Tree_Cursor {
+
+    parent, file_name := parse_path(relative_to, path);
+    if !file_name return null, false, parent;
+ 
+    existing := fat16_find_directory_entry(parent, file_name);
+    if existing return existing, true, parent;
+
+
+    _, base_name, extension := split_from_left(file_name, #char ".");
+    assert(base_name.count <= 8);
+    assert(extension.count <= 3);
+
+    if base_name.count == 0 {
+        // It was a . or .. link directory.
+        base_name = file_name;
+        extension = "\x20\x20\x20";
+    }
+
+    base_name = to_upper_copy(base_name,, temp);
+    extension = to_upper_copy(extension,, temp);
+
+
+    for each_entry(parent, skip_unused = false) {
+        first_byte := (.*) cast(*u8) it;
+
+        if first_byte && first_byte != 0xe5 {
             continue;
         }
 
-        print("Entry '%' has attributes: %.\n", cast(string) dir_entry.name, dir_entry.attributes);
+        // Found a free directory entry slot.
+
+        for* it.name {
+            if it_index < base_name.count {
+                it.* = base_name[it_index];
+            } else {
+                it.* = #char " ";
+            }
+        }
+
+        for* it.extension {
+            if it_index < extension.count {
+                it.* = extension[it_index];
+            } else {
+                it.* = #char " ";
+            }
+        }
+
+        time_now         := current_time_consensus();
+        cal              := to_calendar(time_now);
+        dosdate, dostime := calendar_to_dostime(cal);
+
+        it.create_time_10ms = cast(u8) (cal.millisecond / 10);
+        it.create_time      = dostime;
+        it.create_date      = dosdate;
+        it.access_date      = dosdate;
+        it.high_cluster     = 0;
+        it.update_time      = dostime;
+        it.update_date      = dosdate;
+        it.cluster          = 0; // Caller must set this up, otherwise this refers to the root directory.
+        it.file_size        = 0;
+
+        return it, false, parent;
     }
+
+    assert(false);
+    return null, false, parent;
 }
 
-fat16_read_cluster_chain :: (image: Fat16_Disk_Image, cluster: u16) -> *void {
-    // Very slow way of doing it, but I'll linearize the cluster chains ahead of time regardless of what data we actually need from it.
-    // This should be used for directories, not large files if you care about speed at all.
+fat16_get_name :: (entry: *Fat16_Short_Entry) -> string, string {
+    // Remove spaces from the end, FAT16 filenames get padded with spaces.
+    // Todo: Handle long names.
 
-    result := image.pool.current_point;
+    base_name: string;
+    base_name.data  = entry.name.data;
+    base_name.count = 8;
 
-    cluster_size := image.bytes_per_cluster;
-    next_cluster := cast(int)cluster - 2;
+    while base_name.count > 0 && base_name.data[base_name.count-1] == #char " " {
+        base_name.count -= 1;
+    }
 
-    while true {
-        cluster_data := get(*image.pool, cluster_size);
-        memcpy(cluster_data, image.data_area + cluster_size * next_cluster, cluster_size);
+    extension: string;
+    extension.data  = entry.extension.data;
+    extension.count = 3;
 
-        next_cluster = image.file_allocation_table[next_cluster];
+    while extension.count > 0 && extension.data[extension.count-1] == #char " " {
+        extension.count -= 1;
+    }
 
-        assert(next_cluster != 0, "Cluster chain should not contain unallocated entries.");
+    return base_name, extension;
+}
 
-        if next_cluster & 0xfff8 == 0xfff8 {
-            break;
+fat16_allocate_fat_entry :: (using disk: *Fat16_Disk_Image) -> u16 {
+    start := lowest_maybe_free_fat_entry;
+    end   := file_allocation_table.count - 1;
+
+    for start..end {
+        if file_allocation_table[it] == 0 {
+            lowest_maybe_free_fat_entry = it + 1;
+            return cast(u16)it;
         }
     }
 
-    return result;
+    return 0xffff;
+}
+
+Fat16_Directory_Iterator :: struct {
+    handle: Fat16_Tree_Cursor;
+    skip_unused: bool;
+}
+
+each_entry :: (directory: Fat16_Tree_Cursor, skip_unused := true) -> Fat16_Directory_Iterator {
+    return .{directory, skip_unused};
+}
+
+for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: For_Flags) #expand {
+    assert(flags == 0);
+
+    // Iterates directory contents. Doesn't recurse into subdirectories.
+    // Todo: Handle long names.
+
+    is_root := handle.cluster == 0;
+    disk    := handle.disk_image;
+
+    directory_entries_per_cluster := disk.bytes_per_cluster / 0x20;
+    next_cluster := handle.cluster - 2;
+
+    directory_data: *Fat16_Short_Entry;
+    if is_root directory_data = disk.root_directory_area;
+
+    `it_index := -1;
+
+    while true {
+        it_index += 1;
+
+        if is_root {
+            if it_index >= disk.bootsector.max_root_dir_entries {
+                break;
+            }
+        } else {
+            if it_index % directory_entries_per_cluster == 0 {
+                if next_cluster >= 0xfff8 {
+                    // Found the end of the cluster chain.
+                    break;
+                }
+
+                directory_data = disk.data_area + disk.bytes_per_cluster * next_cluster;
+                next_cluster   = disk.file_allocation_table[next_cluster];
+            }
+        }
+
+        `it := directory_data + it_index;
+
+        first_byte := (.*) cast(*u8) it;
+
+        if first_byte == 0xe5 if skip_unused continue;
+        if first_byte == 0    if skip_unused break;
+
+        #insert body;
+    }
 }
 
 
 
-#import "Flat_Pool";
 #import "Basic";
+#import "String";
 
 DOSTIME :: #type,distinct u16;
 DOSDATE :: #type,distinct u16;
@@ -312,49 +657,4 @@ calendar_to_dostime :: (cal: Calendar_Time) -> DOSDATE, DOSTIME {
     t := cast(DOSTIME) ((hour << 11) | (minute << 5) | (second));
 
     return d, t;
-}
-
-
-
-
-#run {
-    #import "String";
-    #import "Compiler";
-
-    cl := get_toplevel_command_line();
-
-    // Auto run the test without generating an executable, if the module gets passed to the compiler directly on the command line.
-    if cl.count == 2 && contains(cl[1], "FAT16.jai") {
-        set_build_options_dc(.{do_output = false});
-        fat16_test();
-    }
-}
-
-fat16_test :: () {
-    #import "File";
-
-    file_data := read_entire_file("../disk_image.img");
-    if !file_data return;
-
-    disk := fat16_parse_disk_image(file_data);
-
-    context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 0;
-    context.print_style.default_format_struct.use_newlines_if_long_form = true;
-
-    print("Boot Sector: %\n\n", disk.bootsector.*);
-    print("%\n%\n%\n\n",
-          cast(string)disk.bootsector.oem_name,
-          cast(string)disk.bootsector.volume_label,
-          cast(string)disk.bootsector.file_system_label,
-         );
-
-    print("Root Directory: %\n\n", disk.root_directory.*);
-
-    fat16_list_directory(disk, disk.root_directory);
-
-    root_dir_contents := fat16_read_cluster_chain(disk, disk.root_directory.cluster);
-
-    fat16_list_directory(disk, root_dir_contents);
-
-    fat16_create_disk_image(0xa0_0000);
 }
