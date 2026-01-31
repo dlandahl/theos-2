@@ -905,19 +905,11 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
 Nvme_Controller :: struct {
     using mmio: *Nvme_Property_Memory_Map;
 
-    queue_size: u32;
+    sq_size: u32;
+    cq_size: u32;
 
-    admin_sq_tail: u32;
-    admin_sq: *Nvme_Submission_Queue_Entry;
-
-    admin_cq_head: u32;
-    admin_cq: *Nvme_Completion_Queue_Entry;
-
-    io_sq_tail: u32;
-    io_sq: *Nvme_Submission_Queue_Entry;
-
-    io_cq_head: u32;
-    io_cq: *Nvme_Completion_Queue_Entry;
+    admin_queue: Nvme_Command_Queue;
+    io_queue:    Nvme_Command_Queue;
 
     identify: *Nvme_Identify_Controller_Structure;
 
@@ -925,6 +917,19 @@ Nvme_Controller :: struct {
 
     // A namespace ID identifies a drive.
     nsid: u32;
+}
+
+Nvme_Command_Queue :: struct {
+    tail_doorbell: *u32;
+    head_doorbell: *u32;
+
+    sq_tail: u32;
+    cq_head: u32;
+
+    sq: [] Nvme_Submission_Queue_Entry;
+    cq: [] Nvme_Completion_Queue_Entry;
+
+    current_phase: bool;
 }
 
 Nvme_Property_Memory_Map :: struct {
@@ -1066,6 +1071,8 @@ Nvme_Completion_Queue_Entry :: struct {
     };
 }
 
+#assert size_of(Nvme_Completion_Queue_Entry) == 16;
+
 Nvme_Opcode :: enum u8 {
     // Admin opcodes
     DELETE_IO_SUBMISSION_QUEUE :: 0x0;
@@ -1132,20 +1139,21 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
 
-    nvme.queue_size = 4096 / size_of(Nvme_Submission_Queue_Entry);
+    nvme.sq_size = 4096 / size_of(Nvme_Submission_Queue_Entry);
+    nvme.cq_size = 4096 / size_of(Nvme_Completion_Queue_Entry);
 
     nvme_reset_controller(*nvme);
 
     {
         // Send IDENTIFY command.
-        identify_page := get_4k_page(); // Todo: Identify controller data structure can be bigger than a page. Base spec Rev 2.3 Figure 328.
+        identify_page := get_4k_page();
 
         admin_command: Nvme_Submission_Queue_Entry;
         admin_command.OPC__opcode = .IDENTIFY;
         admin_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
         admin_command.DPTR__data_pointer[0] = identify_page;
 
-        nvme_send_admin_command(*nvme, admin_command);
+        nvme_send_command(*nvme.admin_queue, admin_command);
 
         nvme.identify = cast(*Nvme_Identify_Controller_Structure) (identify_page + DIRECT_MAPPING_BASE);
 
@@ -1154,12 +1162,10 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         for sn if it == #char " " { sn.count = it_index; break; }
         for mn if it == #char " " { mn.count = it_index; break; }
 
-
         mps_min := get(nvme.CAP__capabilities, .MPSMIN);
         assert(mps_min == 0); // If minimum memory page size is not zero (4k), we need to calculate maximum transfer size differently. But should always be zero in practice.
 
         nvme.maximum_transfer_size_in_4k_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
-
 
         log("Found controller with serial number '%' and model number '%'. Maximum transfer size % pages.", sn, mn, nvme.maximum_transfer_size_in_4k_blocks);
     }
@@ -1173,7 +1179,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         admin_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
         admin_command.DPTR__data_pointer[0] = nsid_page;
 
-        nvme_send_admin_command(*nvme, admin_command);
+        nvme_send_command(*nvme.admin_queue, admin_command);
 
         nsid_list := cast(*[1024] u32) (nsid_page + DIRECT_MAPPING_BASE);
 
@@ -1188,7 +1194,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         }
 
         log("Found NSID %.", nvme.nsid);
-        free_4k_page(nsid_page);
+        // free_4k_page(nsid_page);
     }
 
     {
@@ -1196,24 +1202,39 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_cq_base := get_4k_page();
         io_sq_base := get_4k_page();
 
-        admin_command: Nvme_Submission_Queue_Entry;
-        admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
-        admin_command.DPTR__data_pointer[0] = io_cq_base;
-        admin_command.NSID__namespace_id = nvme.nsid;
-        admin_command.QSIZE__queue_size = cast(u16) nvme.queue_size;
-        admin_command.QID__queue_identifier = 1;
-        admin_command.PC__physically_contiguous = 1;
+        {
+            admin_command: Nvme_Submission_Queue_Entry;
+            admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
+            admin_command.DPTR__data_pointer[0] = io_cq_base;
+            admin_command.NSID__namespace_id = nvme.nsid;
+            admin_command.QSIZE__queue_size = cast(u16) nvme.cq_size-1;
+            admin_command.QID__queue_identifier = 1;
+            admin_command.PC__physically_contiguous = 1;
 
-        nvme_send_admin_command(*nvme, admin_command);
+            nvme_send_command(*nvme.admin_queue, admin_command);
+        }
 
-        admin_command.OPC__opcode = .CREATE_IO_SUBMISSION_QUEUE;
-        admin_command.DPTR__data_pointer[0] = io_sq_base;
-        admin_command.CQID__completion_queue_identifier = 1;
+        {
+            admin_command: Nvme_Submission_Queue_Entry;
+            admin_command.OPC__opcode = .CREATE_IO_SUBMISSION_QUEUE;
+            admin_command.DPTR__data_pointer[0] = io_sq_base;
+            admin_command.NSID__namespace_id = nvme.nsid;
+            admin_command.QSIZE__queue_size = cast(u16) nvme.sq_size-1;
+            admin_command.QID__queue_identifier = 1;
+            admin_command.CQID__completion_queue_identifier = 1;
+            admin_command.PC__physically_contiguous = 1;
 
-        nvme_send_admin_command(*nvme, admin_command);
+            nvme_send_command(*nvme.admin_queue, admin_command);
+        }
 
-        nvme.io_sq = xx (io_sq_base + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
-        nvme.io_cq = xx (io_cq_base + DIRECT_MAPPING_BASE);
+        nvme.io_queue.sq.data = xx (io_sq_base + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
+        nvme.io_queue.cq.data = xx (io_cq_base + DIRECT_MAPPING_BASE);
+
+        nvme.io_queue.sq.count = nvme.sq_size;
+        nvme.io_queue.cq.count = nvme.cq_size;
+
+        nvme.io_queue.tail_doorbell = *nvme.doorbell_base + 2 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
+        nvme.io_queue.head_doorbell = *nvme.doorbell_base + 3 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
     }
 
     {
@@ -1227,7 +1248,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_command.SLBA__starting_lba = 0;
         io_command.NLB__number_of_logical_blocks = 0; // This means 1 block.
 
-        nvme_send_io_command(*nvme, io_command);
+        nvme_send_command(*nvme.io_queue, io_command);
 
         assert((.*) cast(*u16) (buffer + 510 + DIRECT_MAPPING_BASE) == 0xaa55, "NVMe read bootsector test failed.");
     }
@@ -1249,46 +1270,56 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
         return;
     }
 
-    // Initialize admin queues.
-    admin_sq := get_4k_page();
-    admin_cq := get_4k_page();
+    {
+        // Initialize admin queues.
 
-    // Subtract one, because the field is zero based.
-    queue_size := nvme.queue_size - 1;
+        admin_sq := get_4k_page();
+        admin_cq := get_4k_page();
 
-    nvme.AQA__admin_queue_attributes = .{
-        cast(u16) queue_size,
-        cast(u16) queue_size
-    };
+        nvme.AQA__admin_queue_attributes = .{
+            // Subtract one, because the field is zero based.
+            cast(u16) nvme.sq_size-1,
+            cast(u16) nvme.cq_size-1
+        };
 
-    nvme.ASQ__admin_sq = admin_sq;
-    nvme.ACQ__admin_cq = admin_cq;
+        nvme.ASQ__admin_sq = admin_sq;
+        nvme.ACQ__admin_cq = admin_cq;
 
-    virt := cast(*void) alloc_block(*global.virtual_block_allocator, 4096 * 2);
-    map_pages(virt,        admin_sq, 1, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
-    map_pages(virt + 4096, admin_cq, 1, .PRESENT | .READ_WRITE | .CACHE_DISABLE);
+        nvme.admin_queue.sq.data = cast(*Nvme_Submission_Queue_Entry) (admin_sq + DIRECT_MAPPING_BASE);
+        nvme.admin_queue.cq.data = cast(*Nvme_Completion_Queue_Entry) (admin_cq + DIRECT_MAPPING_BASE);
 
-    nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry) virt;
-    nvme.admin_cq = cast(*Nvme_Completion_Queue_Entry) (virt + 4096);
+        nvme.admin_queue.sq.count = nvme.sq_size;
+        nvme.admin_queue.cq.count = nvme.cq_size;
 
-    NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
-    IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
-    NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
+        nvme.admin_queue.tail_doorbell = *nvme.SQ0TDBL__submission_queue_0_tail_doorbell;
+        nvme.admin_queue.head_doorbell = *nvme.CQ0HDBL__completion_queue_0_head_doorbell;
+    }
 
-    if NOIOCSS         set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
-    if IOCSS           set(*nvme.CC__controller_config, .CSS__io_command_set, 0b110);
-    if !IOCSS && NCSS  set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
+    {
+        // Initialize config register.
 
-    set(*nvme.CC__controller_config, .AMS__arbitration_mechanism, 0);
-    set(*nvme.CC__controller_config, .MPS__memory_page_size, 0);
+        config       := nvme.CC__controller_config;
+        capabilities := nvme.CAP__capabilities;
 
-    // Todo, detect these values
-    set(*nvme.CC__controller_config, .IOSQES__io_submission_entry_size, 6);
-    set(*nvme.CC__controller_config, .IOCQES__io_completion_entry_size, 4);
+        NOIOCSS := get(capabilities, .NOIOCSS__no_io_command_set_support);
+        IOCSS   := get(capabilities, .IOCSS__io_command_set_support);
+        NCSS    := get(capabilities, .NCSS__nvm_command_set_support);
 
-    barrier();
+        if NOIOCSS         set(*config, .CSS__io_command_set, 0b111);
+        if IOCSS           set(*config, .CSS__io_command_set, 0b110);
+        if !IOCSS && NCSS  set(*config, .CSS__io_command_set, 0b000);
 
-    set(*nvme.CC__controller_config, .EN__enable, 1);
+        set(*config, .AMS__arbitration_mechanism, 0);
+        set(*config, .MPS__memory_page_size, 0);
+
+        // Todo, detect these values
+        set(*config, .IOSQES__io_submission_entry_size, 6);
+        set(*config, .IOCQES__io_completion_entry_size, 4);
+
+        set(*config, .EN__enable, 1);
+
+        nvme.CC__controller_config = config;
+    }
 
     if Timeout_Block(#code {
         if nvme.CSTS__controller_status & .RDY__READY break;
@@ -1303,76 +1334,54 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     }
 }
 
-nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
-    // Todo: If "Nvme Queue" is a struct, including sq, cq, doorbells etc, then this and send_io_command can be one procedure.
-
+nvme_send_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
     log_category("NVMe");
-    admin_sq[admin_sq_tail] = command;
 
-    start_phase := get_bit(admin_cq[admin_cq_head].STATUS__status, .PHASE);
+    {
+        // Enqueue the command in the submission queue.
 
-    admin_sq_tail += 1;
-    if admin_sq_tail == queue_size then admin_sq_tail = 0;
+        sq[sq_tail] = command;
 
-    barrier();
-    SQ0TDBL__submission_queue_0_tail_doorbell = admin_sq_tail;
+        sq_tail += 1;
+        sq_tail %= cast(u32)sq.count;
 
-    Timeout(get_bit(admin_cq[admin_cq_head].STATUS__status, .PHASE) != start_phase);
-
-    status := admin_cq[admin_cq_head].STATUS__status;
-    clear_bit(*status, .PHASE);
-
-    if status != 0 {
-        push_print_style().use_newlines_if_long_form = true;
-        s := to_string(status,, temp);
-        log_error("Admin command failed with status: %", s);
+        barrier();
+        tail_doorbell.* = sq_tail;
     }
 
-    admin_cq_head += 1;
-    if admin_cq_head == queue_size then admin_cq_head = 0;
+    COMMAND_PROCESSED :: #code get_bit(cq[cq_head].STATUS__status, .PHASE) != queue.current_phase;
+    Timeout(COMMAND_PROCESSED);
 
-    barrier();
-    CQ0HDBL__completion_queue_0_head_doorbell = admin_cq_head;
-}
+    {
+        // Report any errors generated by the controller.
 
-nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
-    log_category("NVMe");
-    io_sq[io_sq_tail] = command;
+        status := cq[cq_head].STATUS__status;
+        clear_bit(*status, .PHASE);
 
-    start_phase := get_bit(io_cq[io_cq_head].STATUS__status, .PHASE);
-
-    io_sq_tail += 1;
-    if io_sq_tail == queue_size then io_sq_tail = 0;
-
-    sq_tail_doorbell := *doorbell_base;
-    sq_tail_doorbell += 2 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
-
-    barrier();
-    (.*) cast(*u32) sq_tail_doorbell = io_sq_tail;
-
-    Timeout(get_bit(io_cq[io_cq_head].STATUS__status, .PHASE) != start_phase);
-
-
-    status := io_cq[io_cq_head].STATUS__status;
-    clear_bit(*status, .PHASE);
-
-    if status != 0 {
-        push_print_style().use_newlines_if_long_form = true;
-        s := to_string(status,, temp);
-        log_error("IO command failed with status: %", s);
+        if status != 0 {
+            push_print_style().use_newlines_if_long_form = true;
+            s := to_string(status,, temp);
+            log_error("IO command failed with status: %", s);
+        }
     }
 
-    io_cq_head += 1;
-    if io_cq_head == queue_size then io_cq_head = 0;
+    {
+        // Dequeue completion queue entry.
 
-    cq_head_doorbell := *doorbell_base;
-    cq_head_doorbell += 3 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
+        cq_head += 1;
 
-    barrier();
-    (.*) cast(*u32) cq_head_doorbell = io_cq_head;
+        if cq_head == cq.count {
+            cq_head = 0;
+            queue.current_phase = !queue.current_phase;
+        }
+
+        barrier();
+        head_doorbell.* = cq_head;
+    }
 }
 
 nvme_read :: (using nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_4k_blocks: int) {
+
     assert(number_of_4k_blocks <= maximum_transfer_size_in_4k_blocks);
 
     command: Nvme_Submission_Queue_Entry;
@@ -1429,7 +1438,7 @@ nvme_read :: (using nvme: *Nvme_Controller, starting_disk_block: u64, destinatio
     command.SLBA__starting_lba = starting_disk_block;
     command.NLB__number_of_logical_blocks = cast(u16)number_of_4k_blocks-1;
 
-    nvme_send_io_command(nvme, command);
+    nvme_send_command(*nvme.io_queue, command);
 
     // Todo: Free PRP list.
 }

@@ -47,7 +47,6 @@ Curve25519 :: #import "Curve25519";
 #load "multitasking.jai";
 #load "time.jai";
 #load "file_system.jai";
-#load "development.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";
@@ -1543,6 +1542,8 @@ allocate_small_object :: (size: int) -> *void {
     }
 
     trace(.small_object_alloc, slot, size);
+
+    memset(slot, 0, size);
     return slot;
 }
 
