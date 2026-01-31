@@ -608,6 +608,8 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
         if first_byte == 0xe5 if skip_unused continue;
         if first_byte == 0    if skip_unused break;
 
+        if it.attributes == .LFN_ENTRY continue;
+
         #insert body;
     }
 }

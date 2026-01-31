@@ -25,6 +25,7 @@ set          :: bitfield_set;
 get          :: bitfield_get;
 set_bit      :: bitfield_set_bit;
 get_bit      :: bitfield_get_bit;
+clear_bit    :: bitfield_clear_bit;
 set_in_place :: bitfield_set_in_place;
 get_in_place :: bitfield_get_in_place;
 
@@ -32,6 +33,8 @@ get_in_place :: bitfield_get_in_place;
 #import "ASN1";
 #import "Aes";
 #import "Jai_Crypto";
+
+#import,file "../modules/FAT16.jai";
 
 Curve25519 :: #import "Curve25519";
 
@@ -44,6 +47,7 @@ Curve25519 :: #import "Curve25519";
 #load "multitasking.jai";
 #load "time.jai";
 #load "file_system.jai";
+#load "development.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";
@@ -151,6 +155,8 @@ Kernel_Globals :: struct {
 
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
+
+    nvme: Nvme_Controller;
 
     pci_devices: [..] Pci_Device;
 }
@@ -335,7 +341,7 @@ kernel_entry :: () #no_context {
         for *global.pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
-                    case 0x8; init_nvme_controller(it);
+                    case 0x8; global.nvme = init_nvme_controller(it);
                     case 0x6; init_ahci_controller(it);
                 }
             }
@@ -351,12 +357,41 @@ kernel_entry :: () #no_context {
             }
         }
 
-        // memory_test();
-        // user_mode_stress_test();
-        network_test();
-        // semaphore_test();
+        {
+            assert(global.nvme.mmio != null);
+            buffer := NewArray(0xa0_0000, u8);
 
-        // sleep(10, .seconds);
+            transfers := 0xa0_0000 / (global.nvme.maximum_transfer_size_in_4k_blocks * 4096);
+
+            for 0..transfers-1 {
+                start_block   := it * global.nvme.maximum_transfer_size_in_4k_blocks;
+                memory_buffer := buffer.data + start_block * 4096;
+                nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, global.nvme.maximum_transfer_size_in_4k_blocks);
+            }
+
+            disk_image := fat16_parse_disk_image(cast(string)buffer);
+
+            root := fat16_get_root_directory(*disk_image);
+
+            print_directory_tree :: (root: Fat16_Tree_Cursor, depth: int) {
+                for each_entry(root) {
+                    name := fat16_get_name(it);
+                    if it.name[0] == #char "." continue;
+
+                    for 1..depth print("| ");
+                    print("%\n", name);
+
+                    if it.attributes & .DIRECTORY {
+                        success, sub := fat16_change_directory(root, name);
+                        assert(success);
+
+                        print_directory_tree(sub, depth + 1);
+                    }
+                }
+            }
+
+            print_directory_tree(root, 0);
+        }
 
         log("=== Writing trace buffers. ===");
         trace_event_count := write_trace_buffers();
@@ -369,6 +404,87 @@ kernel_entry :: () #no_context {
         }
     }
 }
+
+network_test :: () {
+    USE_DNS :: false;
+
+    log_category("TLS Test");
+    log("Starting.");
+
+    net := *global.network_connection;
+
+    network_adapter_initialized := net.adapter.mmio != null;
+    assert(network_adapter_initialized);
+
+    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
+    put_task_on_core(task, *global.processor_cores[1]);
+
+    log("Waiting for DHCP handshake.");
+    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
+
+    ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
+    port: u16 = 4443;
+
+    #if USE_DNS {
+        log("Sending DNS Query.");
+
+        for 1..100 {
+            // Usually works the first time unless network is bad.
+
+            dns_query := transmit_dns_query(net, "thinkpad");
+
+            if Timeout(dns_query.complete, 1000) {
+                continue;
+            }
+
+            if dns_query.response != .NOERROR {
+                log("DNS Query failed with code %", dns_query.response);
+                return;
+            }
+
+            ip_address = dns_query.answer;
+            // port = 443;
+            break;
+        }
+    }
+
+    transmit_ping(net, ip_address);
+
+    connection := initiate_tcp_connection(net, ip_address, port);
+
+    Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
+
+    tls := establish_tls_connection(connection);
+
+    request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
+    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+
+    tls_transmit_application_data(*tls, request);
+
+    for 1..2 {
+        response := tls_receive_application_data(*tls, seconds_to_apollo(5));
+        log("Got HTTPS response: %", response);
+    }
+
+    // Todo: TLS Close Notify.
+
+    tcp_close(connection);
+
+    log("Completed.");
+}
+
+HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
+
+HTTP_MESSAGE :: #string,cr END
+POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
+Host: discord.com
+Authorization: %3
+Accept: application/json
+Content-Type: application/json
+Content-Length: %1
+
+%2
+END;
 
 
 
@@ -505,221 +621,6 @@ get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string,
 
     return "(no debug info)", "", 0;
 }
-
-
-
-memory_test :: () {
-    proc :: () {
-        task := get_current_task();
-
-        random_seed(rdtsc() ^ (cast(u64)task.id) ^ cast(u64)(task & 0xffff_ffff));
-
-        memory_buffers: [4] struct {
-            used: bool;
-            size: int;
-            data: *void;
-            sentinel_value: u8;
-        };
-
-        total_clicks: u64;
-
-        for 1..10_000_000 {
-            r := random_get() % memory_buffers.count;
-            buf := *memory_buffers[r];
-
-            log("Managing memory. Buf = %\n", buf.*);
-
-            start := rdtsc();
-
-            if buf.used {
-                for 0..buf.size-1 {
-                    assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
-                }
-
-                free_guarded_memory(buf.data);
-            } else {
-                buf.size = cast(s64) (random_get() % 2000) * 4096;
-                buf.data = allocate_guarded_memory(buf.size, 0x4000);
-
-                buf.sentinel_value = cast,trunc(u8) random_get();
-
-                for 0..buf.size-1 {
-                    (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
-                }
-            }
-
-            end := rdtsc();
-            total_clicks += end - start;
-
-            average_ms := ((total_clicks / cast(u64)it) * 1_000) / global.tsc_frequency;
-            log("Running average: %ms", average_ms);
-
-            buf.used = !buf.used;
-        }
-    }
-
-    threads_per_core := 3;
-
-    for *core: global.processor_cores {
-        for 1..threads_per_core {
-            task := create_task(proc, kernel_stack_size = 0x40_0000, name = "Memory Tester");
-            put_task_on_core(task, core);
-
-        }
-    }
-}
-
-semaphore_test :: (threads_per_core := 2) {
-
-    User_Data :: struct {
-        sem: Semaphore;
-        holders: int;
-    }
-
-    user_data := New(User_Data);
-    user_data.sem.counter = 2;
-
-    time_scale :: 5;
-
-    proc :: () {
-        task := get_current_task();
-        data := cast(*User_Data) task.user_data;
-
-        while true {
-            yield_execution();
-
-            us := cast(s64)rdtsc() % (1_000_000 * time_scale);
-            busy_wait(us);
-
-            log("[%] Trying to take the semaphore.", task.name);
-
-            us = cast(s64)rdtsc() % (200_000 * time_scale);
-            if wait_for(*data.sem, microseconds_to_apollo(us)) {
-                data.holders += 1;
-                log("[%] Got the semaphore. Holders: %", task.name, data.holders);
-
-                us := cast(s64)rdtsc() % (800_000 * time_scale);
-                busy_wait(us);
-
-                data.holders -= 1;
-                signal(*data.sem);
-            } else {
-                log("[%] Timed out after %ms", task.name, us / 1000);
-            }
-        }
-    }
-
-    thread_index := 1;
-
-    #asm { sti; }
-
-    for *core: global.processor_cores {
-        for 1..threads_per_core {
-            name := tprint("Sem test %:%", core.id, thread_index);
-            task := create_task(proc, kernel_stack_size = 0x4_0000, name = name, user_data = user_data);
-            put_task_on_core(task, core);
-
-            thread_index += 1;
-        }
-    }
-}
-
-user_mode_stress_test :: (threads_per_core := 4) {
-    thread_index := 1;
-
-    for *core: global.processor_cores {
-        // if core.id != 0 continue;
-
-        for 1..threads_per_core {
-            name := tprint("Do Work %:%", core.id, thread_index);
-            task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
-            put_task_on_core(task, core);
-
-            thread_index += 1;
-        }
-    }
-}
-
-network_test :: () {
-    USE_DNS :: false;
-
-    log_category("TLS Test");
-    log("Starting.");
-
-    net := *global.network_connection;
-
-    network_adapter_initialized := net.adapter.mmio != null;
-    assert(network_adapter_initialized);
-
-    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
-    put_task_on_core(task, *global.processor_cores[1]);
-
-    log("Waiting for DHCP handshake.");
-    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
-
-    ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
-    port: u16 = 4443;
-
-    #if USE_DNS {
-        log("Sending DNS Query.");
-
-        for 1..100 {
-            // Usually works the first time unless network is bad.
-
-            dns_query := transmit_dns_query(net, "thinkpad");
-
-            if Timeout(dns_query.complete, 1000) {
-                continue;
-            }
-
-            if dns_query.response != .NOERROR {
-                log("DNS Query failed with code %", dns_query.response);
-                return;
-            }
-
-            ip_address = dns_query.answer;
-            // port = 443;
-            break;
-        }
-    }
-
-    transmit_ping(net, ip_address);
-
-    connection := initiate_tcp_connection(net, ip_address, port);
-
-    Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
-
-    tls := establish_tls_connection(connection);
-
-    request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-
-    tls_transmit_application_data(*tls, request);
-
-    for 1..2 {
-        response := tls_receive_application_data(*tls, seconds_to_apollo(5));
-        log("Got HTTPS response: %", response);
-    }
-
-    // Todo: TLS Close Notify.
-
-    tcp_close(connection);
-
-    log("Completed.");
-}
-
-HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
-
-HTTP_MESSAGE :: #string,cr END
-POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
-Host: discord.com
-Authorization: %3
-Accept: application/json
-Content-Type: application/json
-Content-Length: %1
-
-%2
-END;
 
 
 
@@ -1330,6 +1231,16 @@ unmap_pages :: (virtual_address: *void, count: int) {
 }
 
 get_physical_address :: (virtual_address: *void) -> u64, present: bool {
+
+    {
+        // Fast path if the address is in the direct mapping.
+        u64_address := cast(u64)virtual_address;
+
+        if u64_address >= DIRECT_MAPPING_BASE && u64_address < DIRECT_MAPPING_END {
+            return u64_address - DIRECT_MAPPING_BASE, true;
+        }
+    }
+
     for VM_Iterator.{virtual_address, 1} {
         is_present := it.flags & .PRESENT > 0;
 
@@ -1343,6 +1254,8 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
 
         return address + offset_in_page, is_present;
     }
+
+    return 0, false;
 }
 
 
@@ -2242,49 +2155,6 @@ allocate_interrupt_gate :: () -> int {
 
 
 
-
-debug_print_physical_memory_map :: () {
-    using global;
-    push_print_style().default_format_float.trailing_width = 2;
-
-    #if false {
-        total_by_type: [5] float;
-
-        for 0..boot_data.memory_map_entries_used-1 {
-            region := boot_data.memory_map[it];
-            mb := (cast(float) region.pages * 4096) / 0x20_0000;
-            print("Region (%) at % (% blocks)\n", region.type, formatInt(region.address, base=16), mb);
-
-            total_by_type[region.type] += cast(int) region.pages;
-
-            if false for 0..cast(int) mb-1 {
-                if region.type == {
-                    case .FREE; print("-");
-                    case .RESERVED_BY_THE_BOOTLOADER; print("+");
-                    case .RESERVED_BY_FIRMWARE; print("=");
-                    case .DONT_KNOW; print("?");
-                }
-            }
-        }
-
-        print("\n\n\n");
-
-        push_print_style().default_format_float.trailing_width = 2;
-        for total_by_type {
-            print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
-        }
-    }
-
-    // Visualize the disk cache LRU
-    print("Most recently used: %\nLeast recently used: %\n", large_page_allocator.lru_most, large_page_allocator.lru_least);
-
-    for boot_data.large_pages {
-        print("[% ->%] % (%<->%)\n", it_index, it.lru_entry, it.state, it.less_recently_used, it.more_recently_used);
-    }
-}
-
-
-
 // These are mainly used by drivers when waiting for a response from the device. Maybe they should yield when the timeout is long.
 
 Timeout_Block :: (code: Code, time_ms := 1000) -> bool #expand {
@@ -2323,14 +2193,26 @@ Timeout :: (code: Code, time_ms := 1000) -> bool #expand {
     return false;
 }
 
-push_print_style :: (style := context.print_style) -> *Print_Style #expand {
+
+
+Terse_Print_Style :: struct {
+    #as using ps: Print_Style;
+
+    SHARED_FIELDS :: string.["value", "formatter"];
+
+    using,except SHARED_FIELDS ps.default_format_int;
+    using,except SHARED_FIELDS ps.default_format_float;
+    using,except SHARED_FIELDS ps.default_format_struct;
+}
+
+push_print_style :: (style := context.print_style) -> *Terse_Print_Style #expand {
     // User may choose whether to use the input argument, return value, or neither
 
     old := context.print_style;
     `defer context.print_style = old;
 
     context.print_style = style;
-    return *context.print_style;
+    return cast(*Terse_Print_Style) *context.print_style;
 }
 
 hex :: #bake_arguments formatInt(base=16);
@@ -2345,8 +2227,6 @@ log_category :: (category: string) #expand {
 }
 
 
-
-// Temporary debug text draw logic
 
 font_file :: #run,host -> [] u8 {
     image := read_entire_file("font.pgm");

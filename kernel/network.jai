@@ -909,7 +909,7 @@ Tls_Client_Hello :: struct {
 }
 
 establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
-    push_print_style().default_format_int.base = 16;
+    push_print_style().base = 16;
 
     if tcp.handshake_state != .ESTABLISHED {
         log_error("Trying to create a TLS connection without an established TCP connection.");
@@ -1033,7 +1033,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         session_id_size := receive(u8);
         session_id      := receive(session_id_size);
 
-        push_print_style().default_format_int.base = 16;
+        push_print_style().base = 16;
         log("Got session ID: %", session_id);
 
         cipher_suite := receive(Tls_Cipher_Suite);

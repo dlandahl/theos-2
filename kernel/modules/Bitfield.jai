@@ -93,17 +93,17 @@ bitfield_set_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $
 bitfield_clear_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
-    bit_mask :: #run get_single_bit_mask(B, loc, call);
+    bit_mask :: cast(B) #run get_single_bit_mask(B, loc, call);
 
     bitfield.* &= ~bit_mask;
 }
 
-bitfield_get_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) -> bool #modify {
+bitfield_get_bit :: inline (bitfield: $B, flag: $F, $loc := #caller_location, $call := #caller_code) -> bool #modify {
     return handle_as(*B, *F);
 } {
     bit_mask :: #run get_single_bit_mask(B, loc, call);
 
-    return bitfield.* & bit_mask > 0;
+    return bitfield & bit_mask > 0;
 }
 
 
@@ -150,6 +150,12 @@ bitfield_get_in_place :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $l
 }
 
 
+
+to_string :: (bitfield: $B, format: *FormatStruct = null, $loc := #caller_location) -> string {
+    builder: String_Builder;
+    print_bitfield(*builder, bitfield, format, loc);
+    return builder_to_string(*builder);
+}
 
 print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct = null, $loc := #caller_location) {
     ti :: type_info(B);

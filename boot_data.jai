@@ -28,6 +28,7 @@ Page_Tables :: struct {
 }
 
 DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000;
+DIRECT_MAPPING_END  :: 0xffff_8010_0000_0000; // Todo: This is 64 Gig, not enough.
 
 Boot_Data :: struct {
     page_tables: Page_Tables; // This should be the first field to ensure alignment of page tables to a page boundary

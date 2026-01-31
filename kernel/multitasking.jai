@@ -852,6 +852,22 @@ ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory:
     return null;
 }
 
+user_mode_stress_test :: (threads_per_core := 4) {
+    thread_index := 1;
+
+    for *core: global.processor_cores {
+        // if core.id != 0 continue;
+
+        for 1..threads_per_core {
+            name := tprint("Do Work %:%", core.id, thread_index);
+            task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
+            put_task_on_core(task, core);
+
+            thread_index += 1;
+        }
+    }
+}
+
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {

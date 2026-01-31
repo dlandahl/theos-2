@@ -428,7 +428,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     cr2 := _cr2;
 
     {
-        push_print_style().default_format_int.base = 16;
+        push_print_style().base = 16;
 
         print(*b, "Virtual Address: 0x%\n", cr2);
 
@@ -478,7 +478,9 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
 
         print(*b, "\nGeneral Protection Fault    (On core %, running thread \"%\")\n", core.id, task.name);
 
-        push_print_style().default_format_int.base = 16;
+        ps := push_print_style();
+        ps.base = 16;
+
         print(*b, "RIP: 0x%\n", stack.ip);
         print(*b, "RSP: 0x%\n", stack.sp);
         print(*b, "SS: %\n", stack.ss);
@@ -500,6 +502,12 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
         index       :=            bitfield_get(selector_error, .selector_index);
 
         print(*b, "Error code: external=%, table=%, index=% (0x%)\n", is_external, table_names[table], formatInt(index, base=10), index);
+
+        buffer: [32] u32;
+        do_stack_trace(buffer);
+
+        ps.base = 10;
+        append_formatted_stack_trace(*b, buffer);
 
         write_builder(*b);
 

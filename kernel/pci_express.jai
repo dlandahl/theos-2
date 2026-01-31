@@ -343,7 +343,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     virtual := cast(*void) alloc_block(*global.virtual_block_allocator, bar.limit);
 
     {
-        push_print_style().default_format_int.base = 16;
+        push_print_style().base = 16;
         log("Mapping BAR % to address %", bar, virtual);
     }
 
@@ -919,6 +919,10 @@ Nvme_Controller :: struct {
     io_cq_head: u32;
     io_cq: *Nvme_Completion_Queue_Entry;
 
+    identify: *Nvme_Identify_Controller_Structure;
+
+    maximum_transfer_size_in_4k_blocks: int;
+
     // A namespace ID identifies a drive.
     nsid: u32;
 }
@@ -1041,6 +1045,8 @@ Nvme_Submission_Queue_Entry :: struct {
     }
 }
 
+#assert size_of(Nvme_Submission_Queue_Entry) == 64;
+
 Nvme_Completion_Queue_Entry :: struct {
     DW0: u32;
     DW1: u32;
@@ -1049,7 +1055,15 @@ Nvme_Completion_Queue_Entry :: struct {
     SQID__sq_identifier: u16;
 
     CID__command_identifier: u16;
-    STATUS__status: u16;
+
+    STATUS__status: enum u16 {
+        PHASE                    :: 1;
+        SC__STATUS_CODE          :: 8;
+        SCT__STATUS_CODE_TYPE    :: 3;
+        CRD__COMMAND_RETRY_DELAY :: 2;
+        M__MORE                  :: 1;
+        DNR__DO_NOT_RETRY        :: 1;
+    };
 }
 
 Nvme_Opcode :: enum u8 {
@@ -1079,9 +1093,14 @@ Nvme_Identify_Controller_Structure :: struct {
     SSVID__pci_subsystem_vendor_id: u16;
     SN__serial_number: [20] u8;
     MN__model_number:  [40] u8;
+    FR__firmware_revision: u64 #align 1;
+    RAB__recommended_arbitration_burst: u8;
+    IEEE_ieee_oui_identifier: [3]u8;
+    CMIC: u8;
+    MDTS__maximum_data_transfer_size: u8;
 }
 
-#assert size_of(Nvme_Submission_Queue_Entry) == 64;
+#assert size_of(Nvme_Identify_Controller_Structure) == 78;
 
 #program_export
 nvme_interrupt :: (stack: *void) #c_call {
@@ -1119,34 +1138,44 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     {
         // Send IDENTIFY command.
+        identify_page := get_4k_page(); // Todo: Identify controller data structure can be bigger than a page. Base spec Rev 2.3 Figure 328.
+
         admin_command: Nvme_Submission_Queue_Entry;
         admin_command.OPC__opcode = .IDENTIFY;
         admin_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
-        admin_command.DPTR__data_pointer[0] = get_4k_page();
+        admin_command.DPTR__data_pointer[0] = identify_page;
 
         nvme_send_admin_command(*nvme, admin_command);
 
-        identify := cast(*Nvme_Identify_Controller_Structure, admin_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+        nvme.identify = cast(*Nvme_Identify_Controller_Structure) (identify_page + DIRECT_MAPPING_BASE);
 
-        sn := cast(string) identify.SN__serial_number;
-        mn := cast(string) identify.MN__model_number;
+        sn := cast(string) nvme.identify.SN__serial_number;
+        mn := cast(string) nvme.identify.MN__model_number;
         for sn if it == #char " " { sn.count = it_index; break; }
         for mn if it == #char " " { mn.count = it_index; break; }
 
-        log("Found controller with serial number '%' and model number '%'.", sn, mn);
-        free_4k_page(admin_command.DPTR__data_pointer[0]);
+
+        mps_min := get(nvme.CAP__capabilities, .MPSMIN);
+        assert(mps_min == 0); // If minimum memory page size is not zero (4k), we need to calculate maximum transfer size differently. But should always be zero in practice.
+
+        nvme.maximum_transfer_size_in_4k_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
+
+
+        log("Found controller with serial number '%' and model number '%'. Maximum transfer size % pages.", sn, mn, nvme.maximum_transfer_size_in_4k_blocks);
     }
 
     {
         // Get active namespace ID list.
+        nsid_page := get_4k_page();
+
         admin_command: Nvme_Submission_Queue_Entry;
         admin_command.OPC__opcode = .IDENTIFY;
         admin_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
-        admin_command.DPTR__data_pointer[0] = get_4k_page();
+        admin_command.DPTR__data_pointer[0] = nsid_page;
 
         nvme_send_admin_command(*nvme, admin_command);
 
-        nsid_list := cast(*[1024]u32) (admin_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+        nsid_list := cast(*[1024] u32) (nsid_page + DIRECT_MAPPING_BASE);
 
         for nsid_list.* if it != 0 {
             nvme.nsid = it;
@@ -1159,7 +1188,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         }
 
         log("Found NSID %.", nvme.nsid);
-        free_4k_page(admin_command.DPTR__data_pointer[0]);
+        free_4k_page(nsid_page);
     }
 
     {
@@ -1196,15 +1225,11 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_command.DPTR__data_pointer[0] = buffer;
         io_command.NSID__namespace_id = nvme.nsid;
         io_command.SLBA__starting_lba = 0;
-        io_command.NLB__number_of_logical_blocks = 0; // This means 1 block
+        io_command.NLB__number_of_logical_blocks = 0; // This means 1 block.
 
         nvme_send_io_command(*nvme, io_command);
 
-        if (.*) cast(*u16) (buffer + 510 + DIRECT_MAPPING_BASE) == 0xaa55 {
-            log("Success");
-        } else {
-            log("Failure");
-        }
+        assert((.*) cast(*u16) (buffer + 510 + DIRECT_MAPPING_BASE) == 0xaa55, "NVMe read bootsector test failed.");
     }
 
     return nvme;
@@ -1279,10 +1304,12 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
 }
 
 nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
+    // Todo: If "Nvme Queue" is a struct, including sq, cq, doorbells etc, then this and send_io_command can be one procedure.
+
     log_category("NVMe");
     admin_sq[admin_sq_tail] = command;
 
-    start_phase := admin_cq[admin_cq_head].STATUS__status & 1;
+    start_phase := get_bit(admin_cq[admin_cq_head].STATUS__status, .PHASE);
 
     admin_sq_tail += 1;
     if admin_sq_tail == queue_size then admin_sq_tail = 0;
@@ -1290,11 +1317,15 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
     barrier();
     SQ0TDBL__submission_queue_0_tail_doorbell = admin_sq_tail;
 
-    Timeout((admin_cq[admin_cq_head].STATUS__status & 1) != start_phase);
+    Timeout(get_bit(admin_cq[admin_cq_head].STATUS__status, .PHASE) != start_phase);
 
-    status := admin_cq[admin_cq_head].STATUS__status >> 1;
+    status := admin_cq[admin_cq_head].STATUS__status;
+    clear_bit(*status, .PHASE);
+
     if status != 0 {
-        log_error("Admin command failed with status %", status);
+        push_print_style().use_newlines_if_long_form = true;
+        s := to_string(status,, temp);
+        log_error("Admin command failed with status: %", s);
     }
 
     admin_cq_head += 1;
@@ -1308,7 +1339,7 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
     log_category("NVMe");
     io_sq[io_sq_tail] = command;
 
-    start_phase := io_cq[io_cq_head].STATUS__status & 1;
+    start_phase := get_bit(io_cq[io_cq_head].STATUS__status, .PHASE);
 
     io_sq_tail += 1;
     if io_sq_tail == queue_size then io_sq_tail = 0;
@@ -1317,13 +1348,18 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
     sq_tail_doorbell += 2 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
 
     barrier();
-    cast(*u32, sq_tail_doorbell).* = io_sq_tail;
+    (.*) cast(*u32) sq_tail_doorbell = io_sq_tail;
 
-    Timeout((io_cq[io_cq_head].STATUS__status & 1) != start_phase);
+    Timeout(get_bit(io_cq[io_cq_head].STATUS__status, .PHASE) != start_phase);
 
-    status := io_cq[io_cq_head].STATUS__status >> 1;
+
+    status := io_cq[io_cq_head].STATUS__status;
+    clear_bit(*status, .PHASE);
+
     if status != 0 {
-        log_error("IO command failed with status %", status);
+        push_print_style().use_newlines_if_long_form = true;
+        s := to_string(status,, temp);
+        log_error("IO command failed with status: %", s);
     }
 
     io_cq_head += 1;
@@ -1333,7 +1369,69 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
     cq_head_doorbell += 3 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
 
     barrier();
-    cast(*u32, cq_head_doorbell).* = io_cq_head;
+    (.*) cast(*u32) cq_head_doorbell = io_cq_head;
+}
+
+nvme_read :: (using nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_4k_blocks: int) {
+    assert(number_of_4k_blocks <= maximum_transfer_size_in_4k_blocks);
+
+    command: Nvme_Submission_Queue_Entry;
+    command.OPC__opcode = .READ;
+
+    // Fill in PRP (physical region page) list.
+
+    number_of_page_crossings := number_of_4k_blocks - 1;
+
+    if cast(u64)destination_memory & 0xfff != 0 {
+        number_of_page_crossings += 1;
+    }
+
+    first_page := get_physical_address(destination_memory);
+    assert(first_page & 0b11 == 0);
+    command.DPTR__data_pointer[0] = first_page;
+
+    if number_of_page_crossings == 1 {
+        second_page := get_physical_address(destination_memory + 4096);
+        second_page &= ~0xfff;
+
+        command.DPTR__data_pointer[1] = second_page;
+    } else if number_of_page_crossings > 1 {
+        page_index := 1;
+
+        next_prp_list_phys_base := get_4k_page();
+        prp_list := cast(*u64) (next_prp_list_phys_base + DIRECT_MAPPING_BASE);
+
+        command.DPTR__data_pointer[1] = next_prp_list_phys_base;
+
+        while page_index < number_of_page_crossings {
+            is_final_prp_list := page_index > number_of_page_crossings - 512 - 1;
+
+            current_prp_list_length := min(number_of_page_crossings - page_index, ifx is_final_prp_list then 512 else 511);
+
+            for 0..current_prp_list_length-1 {
+                page := get_physical_address(destination_memory + 4096 * page_index);
+                page &= ~0xfff;
+
+                prp_list[it] = page;
+
+                page_index += 1;
+            }
+
+            if !is_final_prp_list {
+                next_prp_list_phys_base = get_4k_page();
+                prp_list[511] = next_prp_list_phys_base;
+                prp_list = cast(*u64) (next_prp_list_phys_base + DIRECT_MAPPING_BASE);
+            }
+        }
+    }
+
+    command.NSID__namespace_id = nvme.nsid;
+    command.SLBA__starting_lba = starting_disk_block;
+    command.NLB__number_of_logical_blocks = cast(u16)number_of_4k_blocks-1;
+
+    nvme_send_io_command(nvme, command);
+
+    // Todo: Free PRP list.
 }
 
 
@@ -1587,8 +1685,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     prdt.I__interrupt_on_completion = .YES;
 
     {
-        push_print_style();
-        context.print_style.default_format_int.base = 16;
+        push_print_style().base = 16;
         log("PRDT: %\n", prdt.*);
     }
 
@@ -1901,7 +1998,7 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
         set_bit(*hda.GCTL__global_control, .CRST__controller_reset);
         barrier();
 
-        if Timeout(get_bit(*hda.GCTL__global_control, .CRST__controller_reset)) {
+        if Timeout(get_bit(hda.GCTL__global_control, .CRST__controller_reset)) {
             log_error("Failed to reset (CRST remains low).");
             return;
         }
