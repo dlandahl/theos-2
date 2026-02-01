@@ -632,10 +632,6 @@ uACPI_State :: struct {
             }
 
             release(*work_queue_lock);
-
-            log("=== Writing trace buffers. ===");
-            write_trace_buffers();
-            log("=== Wrote % trace entries. ===", global.trace_state.current_index);
         }
     }
 

@@ -234,10 +234,6 @@ kernel_entry :: () #no_context {
     global.large_page_allocator.lru_least = LRU_TAIL;
     global.large_page_allocator.lru_most  = LRU_TAIL;
 
-    // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
-    init_tracing();
-    // global.trace_state.tracing_enabled = false;
-
     // Todo: hardcoded.
     for region: global.memory_map {
         if !it_index continue;
@@ -247,6 +243,7 @@ kernel_entry :: () #no_context {
             first_page := region.address / 0x20_0000;
 
             for first_page..first_page+256 {
+                // Todo: Make sure all these pages were actually marked free.
                 global.large_pages[it].state = .RESERVED;
             }
 
@@ -254,6 +251,10 @@ kernel_entry :: () #no_context {
             break;
         }
     }
+
+    // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
+    init_tracing();
+    // global.trace_state.tracing_enabled = false;
 
     if global.physical_block_allocator.base_address == 0 {
         write_string("Could not find enough memory for the kernel...\n");
@@ -1097,7 +1098,7 @@ Page_Flags :: enum_flags u64 {
     WRITE_THROUGH   :: 1 << 3;
     CACHE_DISABLE   :: 1 << 4;
     ACCESSED        :: 1 << 5;
-    AVAILABLE       :: 1 << 6;
+    DIRTY           :: 1 << 6;
     PAGE_SIZE       :: 1 << 7;
     EXECUTE_DISABLE :: 1 << 63;
 }
