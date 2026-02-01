@@ -363,31 +363,35 @@ kernel_entry :: () #no_context {
             assert(global.nvme.mmio != null);
             buffer := cast(string) NewArray(0xa0_0000, u8);
 
-            blocks_per_transfer := global.nvme.maximum_transfer_size_in_4k_blocks;
-            transfers := 0xa0_0000 / (blocks_per_transfer * 4096);
+            blocks_per_transfer := global.nvme.maximum_transfer_size_in_blocks;
+            transfers := 0xa0_0000 / (blocks_per_transfer * global.nvme.block_size);
+
+            log("Blocks per transfer: %, transfers: %, total bytes: %",
+                hex(blocks_per_transfer), transfers, hex(transfers * blocks_per_transfer * global.nvme.block_size)
+               );
 
             for 0..transfers-1 {
                 start_block   := it * blocks_per_transfer;
-                memory_buffer := buffer.data + start_block * 4096;
+                memory_buffer := buffer.data + start_block * global.nvme.block_size;
                 nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
             }
 
             disk_image := fat16_parse_disk_image(buffer);
             root       := fat16_get_root_directory(*disk_image);
 
-            // fat16_create_directory(root, "THEOS");
-            // fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
+            fat16_create_directory(root, "THEOS");
+            fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
 
-            success, data := fat16_read_file(root, "THEOS/TEST");
-            assert(success);
-            log(data);
+            // success, data := fat16_read_file(root, "THEOS/TEST");
+            // assert(success);
+            // log(data);
 
             fat16_print_directory_tree(root);
             fat16_copy_fat_table(*disk_image);
 
             for 0..transfers-1 {
                 start_block   := it * blocks_per_transfer;
-                memory_buffer := buffer.data + start_block * 4096;
+                memory_buffer := buffer.data + start_block * global.nvme.block_size;
                 nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
             }
         }

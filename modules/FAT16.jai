@@ -371,8 +371,7 @@ fat16_read_file :: (relative_to: Fat16_Tree_Cursor, path: string) -> success: bo
 
         memcpy(destination, source, disk.bytes_per_cluster);
 
-        // Todo: Is there an off by one error with the cluster indices?
-        next_cluster = disk.file_allocation_table[next_cluster] - 2;
+        next_cluster = disk.file_allocation_table[next_cluster];
     }
 
     {

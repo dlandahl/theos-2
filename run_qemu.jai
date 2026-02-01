@@ -23,6 +23,7 @@
             -m 2G
             -smp 4 
     QEMU_CMD);
+    // --trace "*nvme*" 
 
 #if OS == .LINUX {
     array_add(*command,

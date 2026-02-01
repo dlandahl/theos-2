@@ -922,9 +922,10 @@ Nvme_Controller :: struct {
 
     identify: *Nvme_Identify_Controller_Structure;
 
-    maximum_transfer_size_in_4k_blocks: int;
+    maximum_transfer_size_in_blocks: int;
 
-    // A namespace ID identifies a drive.
+    // These are properties of the namespace, will need to be moved into a separate struct when we support multiple drives connected to the same controller.
+    block_size: int;
     nsid: u32;
 }
 
@@ -1126,7 +1127,7 @@ Nvme_Identify_Namespace_Structure :: struct {
     NLBAF__lba_format_count: u8;
     FLBAS__formatted_lba_size: u8;
 
-    space_for_lbaf_table: [0x100] u8;
+    _: [0x100] u8;
 
     #overlay(start) using _: struct {
         offset: [128] u8;
@@ -1205,9 +1206,9 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         mps_min := get(nvme.CAP__capabilities, .MPSMIN);
         assert(mps_min == 0); // If minimum memory page size is not zero (4k), we need to calculate maximum transfer size differently. But should always be zero in practice.
 
-        nvme.maximum_transfer_size_in_4k_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
+        nvme.maximum_transfer_size_in_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
 
-        log("Found controller with serial number '%' and model number '%'. Maximum transfer size % pages.", sn, mn, nvme.maximum_transfer_size_in_4k_blocks);
+        log("Found controller with serial number '%' and model number '%'. Maximum transfer size % blocks.", sn, mn, nvme.maximum_transfer_size_in_blocks);
     }
 
     {
@@ -1238,6 +1239,8 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     }
 
     {
+        // Identify namespace (drive).
+
         identify_page := get_4k_page();
 
         admin_command: Nvme_Submission_Queue_Entry;
@@ -1246,7 +1249,15 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         admin_command.NSID__namespace_id = nvme.nsid;
         admin_command.DPTR__data_pointer[0] = identify_page;
 
-        nvme_send_command(*nvme_admin_queue, admin_command);
+        nvme_send_command(*nvme.admin_queue, admin_command);
+        identify := cast(*Nvme_Identify_Namespace_Structure) (identify_page + DIRECT_MAPPING_BASE);
+
+        index := identify.FLBAS__formatted_lba_size & 0xf;
+
+        lba_format := identify.LBAF__lba_format_support[index];
+        nvme.block_size = 1 << lba_format.LBADS__lba_data_size;
+
+        assert(nvme.block_size == 4096 || nvme.block_size == 512, "Todo: Nvme block size % not supported.", nvme.block_size);
     }
 
     {
@@ -1432,35 +1443,37 @@ nvme_send_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission
     }
 }
 
-nvme_read :: (nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_4k_blocks: int) {
-    nvme_transfer(nvme, starting_disk_block, destination_memory, number_of_4k_blocks, .READ);
+nvme_read :: (nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_blocks: int) {
+    nvme_transfer(nvme, starting_disk_block, destination_memory, number_of_blocks, .READ);
 }
 
-nvme_write :: (nvme: *Nvme_Controller, starting_disk_block: u64, source_memory: *void, number_of_4k_blocks: int) {
-    nvme_transfer(nvme, starting_disk_block, source_memory, number_of_4k_blocks, .WRITE);
+nvme_write :: (nvme: *Nvme_Controller, starting_disk_block: u64, source_memory: *void, number_of_blocks: int) {
+    nvme_transfer(nvme, starting_disk_block, source_memory, number_of_blocks, .WRITE);
 }
 
-nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_4k_blocks: int, direction: enum {READ; WRITE;}) {
+nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory_buffer: *void, number_of_blocks: int, direction: enum {READ; WRITE;}) {
 
-    assert(number_of_4k_blocks <= maximum_transfer_size_in_4k_blocks);
+    assert(number_of_blocks <= maximum_transfer_size_in_blocks);
 
     command: Nvme_Submission_Queue_Entry;
     command.OPC__opcode = ifx direction == .READ then .READ else .WRITE;
 
     // Fill in PRP (physical region page) list.
 
-    number_of_page_crossings := number_of_4k_blocks - 1;
+    number_of_pages := number_of_blocks * nvme.block_size / 4096;
+    number_of_page_crossings := number_of_pages - 1;
 
-    if cast(u64)destination_memory & 0xfff != 0 {
+    offset_in_page := cast(s64)memory_buffer & 0xfff;
+    if offset_in_page > (4096 - nvme.block_size) {
         number_of_page_crossings += 1;
     }
 
-    first_page := get_physical_address(destination_memory);
+    first_page := get_physical_address(memory_buffer);
     assert(first_page & 0b11 == 0);
     command.DPTR__data_pointer[0] = first_page;
 
     if number_of_page_crossings == 1 {
-        second_page := get_physical_address(destination_memory + 4096);
+        second_page := get_physical_address(memory_buffer + 4096);
         second_page &= ~0xfff;
 
         command.DPTR__data_pointer[1] = second_page;
@@ -1478,7 +1491,7 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, destin
             current_prp_list_length := min(number_of_page_crossings - page_index, ifx is_final_prp_list then 512 else 511);
 
             for 0..current_prp_list_length-1 {
-                page := get_physical_address(destination_memory + 4096 * page_index);
+                page := get_physical_address(memory_buffer + 4096 * page_index);
                 page &= ~0xfff;
 
                 prp_list[it] = page;
@@ -1496,7 +1509,7 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, destin
 
     command.NSID__namespace_id = nvme.nsid;
     command.SLBA__starting_lba = starting_disk_block;
-    command.NLB__number_of_logical_blocks = cast(u16)number_of_4k_blocks-1;
+    command.NLB__number_of_logical_blocks = cast(u16)number_of_blocks-1;
 
     nvme_send_command(*nvme.io_queue, command);
 
