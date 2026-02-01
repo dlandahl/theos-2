@@ -34,7 +34,13 @@ get_in_place :: bitfield_get_in_place;
 #import "Aes";
 #import "Jai_Crypto";
 
-#import,file "../modules/FAT16.jai";
+get_calendar_time :: () -> Calendar_Time {
+    apollo := get_monotonic_time();
+    calendar := native_apollo_to_calendar(apollo);
+    return calendar;
+}
+
+#import,file "../modules/FAT16.jai"(get_calendar_time);
 
 Curve25519 :: #import "Curve25519";
 
@@ -338,58 +344,52 @@ kernel_entry :: () #no_context {
         irq_restore(true);
 
         for *global.pci_devices {
-            if it.class_code == .MASS_STORAGE {
-                if it.subclass == {
-                    case 0x8; global.nvme = init_nvme_controller(it);
-                    case 0x6; init_ahci_controller(it);
-                }
-            }
+            if it.combined_class_code == {
+              case .SATA_CONTROLLER;
+                init_ahci_controller(it);
 
-            if it.class_code == .NETWORK && it.subclass == 0x0 {
+              case .NVME_CONTROLLER;
+                global.nvme = init_nvme_controller(it);
+
+              case .I8254X_ETHERNET;
                 global.network_connection.adapter = init_i8254x(it);
-            }
 
-            if false if it.class_code == .MULTIMEDIA {
-                if it.subclass == 0x3 {
-                    init_high_definition_audio_controller(it);
-                }
+              case .HIGH_DEFINITION_AUDIO;
+                init_high_definition_audio_controller(it);
             }
         }
 
         {
             assert(global.nvme.mmio != null);
-            buffer := NewArray(0xa0_0000, u8);
+            buffer := cast(string) NewArray(0xa0_0000, u8);
 
-            transfers := 0xa0_0000 / (global.nvme.maximum_transfer_size_in_4k_blocks * 4096);
+            blocks_per_transfer := global.nvme.maximum_transfer_size_in_4k_blocks;
+            transfers := 0xa0_0000 / (blocks_per_transfer * 4096);
 
             for 0..transfers-1 {
-                start_block   := it * global.nvme.maximum_transfer_size_in_4k_blocks;
+                start_block   := it * blocks_per_transfer;
                 memory_buffer := buffer.data + start_block * 4096;
-                nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, global.nvme.maximum_transfer_size_in_4k_blocks);
+                nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
             }
 
-            disk_image := fat16_parse_disk_image(cast(string)buffer);
+            disk_image := fat16_parse_disk_image(buffer);
+            root       := fat16_get_root_directory(*disk_image);
 
-            root := fat16_get_root_directory(*disk_image);
+            // fat16_create_directory(root, "THEOS");
+            // fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
 
-            print_directory_tree :: (root: Fat16_Tree_Cursor, depth: int) {
-                for each_entry(root) {
-                    name := fat16_get_name(it);
-                    if it.name[0] == #char "." continue;
+            success, data := fat16_read_file(root, "THEOS/TEST");
+            assert(success);
+            log(data);
 
-                    for 1..depth print("| ");
-                    print("%\n", name);
+            fat16_print_directory_tree(root);
+            fat16_copy_fat_table(*disk_image);
 
-                    if it.attributes & .DIRECTORY {
-                        success, sub := fat16_change_directory(root, name);
-                        assert(success);
-
-                        print_directory_tree(sub, depth + 1);
-                    }
-                }
+            for 0..transfers-1 {
+                start_block   := it * blocks_per_transfer;
+                memory_buffer := buffer.data + start_block * 4096;
+                nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
             }
-
-            print_directory_tree(root, 0);
         }
 
         log("=== Writing trace buffers. ===");
@@ -404,7 +404,7 @@ kernel_entry :: () #no_context {
     }
 }
 
-network_test :: () {
+network_test :: () -> string {
     USE_DNS :: false;
 
     log_category("TLS Test");
@@ -460,8 +460,12 @@ network_test :: () {
 
     tls_transmit_application_data(*tls, request);
 
+    builder: String_Builder;
+
     for 1..2 {
         response := tls_receive_application_data(*tls, seconds_to_apollo(5));
+        append(*builder, response);
+
         log("Got HTTPS response: %", response);
     }
 
@@ -470,6 +474,7 @@ network_test :: () {
     tcp_close(connection);
 
     log("Completed.");
+    return builder_to_string(*builder);
 }
 
 HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";

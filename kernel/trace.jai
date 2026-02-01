@@ -165,8 +165,7 @@ Trace_Entry :: struct {
             }
             release(*global.task_info_storage_spinlock);
 
-            // Todo: Maybe do the #code thing suggested in 'modules/String_Builder.write_builder'
-            assert(string_table_builder.current_buffer == null, "Todo: iterate string builder buffers and output each of them to the serial port.");
+            assert(string_table_builder.current_buffer == null, "Todo: Iterate string builder buffers and output each of them to the serial port.");
 
             base_buffer := get_base_buffer(*string_table_builder);
 
