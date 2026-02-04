@@ -10,6 +10,7 @@ Compilation_Unit :: struct {
     producer:       string;
     language:       u16;
     name:           string;
+    comp_dir:       string;
     statement_list: u64; // Could be removed. We only need it until we’ve parsed the line info.
     low_pc:         u64;
     high_pc:        u64;
@@ -570,6 +571,9 @@ parse_compilation_unit_content_v4 :: (using parse_context: *Parse_Context, base_
                 Reflection.range_check_and_store(value, type_info(type_of(cu.language)), *cu.language);
             case .NAME;
                 cu.name, offset, success = parse_string_attribute(it.format, data, offset, debug_string_data);
+                if !success     return cu, false;
+            case .COMP_DIR;
+                cu.comp_dir, offset, success = parse_string_attribute(it.format, data, offset, debug_string_data);
                 if !success     return cu, false;
             case .STMT_LIST;
                 cu.statement_list, offset, success = parse_unsigned_int_attribute(it.format, data, offset);

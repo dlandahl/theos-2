@@ -14,7 +14,7 @@ Input :: #import "Input";
 #import "String";
 #import "Bucket_Array";
 
-#import "debug_info";
+#import,dir "../../kernel/modules/debug_info";
 #import "executable_formats";
 
 TRACE_INCLUDE_RUNTIME_CODE :: false;
@@ -257,7 +257,7 @@ trace_file_exists: bool;
 kernel_file_name: string;
 kernel_file_exists: bool;
 
-editor_command_format_string: string = "C:\\Program Files\\Notepad++\\notepad++.exe -n%2 %1";
+editor_command_format_string: string = "C:\\Program Files\\Notepad++\\notepad++.exe -n%2 \"%1\"";
 
 selected_entry: int;
 highlighted_trace_entries: [..] int;
@@ -626,7 +626,7 @@ draw_one_frame :: (dt: float) {
 
                 address := cast(u64)it + 0xffff_ffff_0000_0000;
 
-                proc_name, file, line := get_debug_info_for_address(address);
+                proc_name, file, line := get_debug_info_for_address(address,, temp);
 
                 remove_prefix :: (s: string) #expand {
                     if starts_with(file, s) {
@@ -638,9 +638,13 @@ draw_one_frame :: (dt: float) {
                 cwd := get_working_directory();
                 project_root := split(cwd, "tools")[0];
 
-                remove_prefix("/mnt/c/");
-                remove_prefix("new os/");
-                remove_prefix(project_root);
+                // remove_prefix("/mnt/c/");
+                // remove_prefix("new os/");
+                // remove_prefix(project_root);
+
+                if OS == .WINDOWS {
+                    file = replace(file, "/mnt/c/", "c:/");
+                }
 
                 if file {
                     button_rect := row_rect;
@@ -648,9 +652,7 @@ draw_one_frame :: (dt: float) {
                     button_rect.y -= row_height - 2*UI_SCALE;
 
                     if button(button_rect, "", *row_button_theme, it_index) {
-                        full_filepath := tprint("\"%1%2\"", project_root, file); // Todo: The file path might be a Jai module or uACPI source code.
-
-                        command_line := tprint(editor_command_format_string, full_filepath, line);
+                        command_line := tprint(editor_command_format_string, file, line);
                         command := break_command_into_strings(command_line);
 
                         process: Process;
@@ -710,6 +712,11 @@ get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string,
 
                 mapping   := seq.mappings[it_index];
                 file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
+
+                if cu.comp_dir && !ends_with(file_name, ".jai") {
+                    // For some reason Jai files have the full path, but still have comp_dir set. Not sure if I'm doing something wrong, or the DWARF module, or the Jai compiler.
+                    file_name = join(cu.comp_dir, "/", file_name);
+                }
 
                 return proc_name, file_name, mapping.line;
             }
