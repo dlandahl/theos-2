@@ -15,10 +15,10 @@
             -cpu max,+apic,+fsgsbase,+tsc-deadline,+invtsc
             -bios OVMF.fd
             -drive format=raw,file=disk_image.img,id=nvm,if=none
-            -device nvme,serial=cafebabe,drive=nvm
+            -device nvme,serial=cafebabe,drive=nvm,mdts=12
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
-            -chardev file,id=char1,path=logs/qemu_trace.bin
+            -chardev file,id=char1,path=logs/kernel_trace.bin
             -serial chardev:char1
             -m 2G
             -smp 4 

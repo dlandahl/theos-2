@@ -52,10 +52,10 @@ Trace_Entry :: struct {
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
     user:        [2] u64;
-    stack_trace: [16] u32;
+    stack_trace: [24] u32;
 }
 
-#assert size_of(Trace_Entry) == 96;
+#assert size_of(Trace_Entry) == 128;
 
 // This file will also be #load-ed by any trace analyser software we create, in which case we only need the above descriptions of the format.
 #if TRACE_INCLUDE_RUNTIME_CODE {

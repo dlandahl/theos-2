@@ -240,10 +240,11 @@ kernel_entry :: () #no_context {
         region_size := region.pages * 4096;
 
         if region_size >= 0x2000_0000 && region.type == .FREE {
-            first_page := region.address / 0x20_0000;
+            first_page := region.address / 0x20_0000 + 1;
 
             for first_page..first_page+256 {
                 // Todo: Make sure all these pages were actually marked free.
+                if (global.large_pages[it].state != .FREE) bluescreen();
                 global.large_pages[it].state = .RESERVED;
             }
 
@@ -1838,10 +1839,10 @@ free_guarded_memory :: (client_address: *void) {
     free_block(*global.virtual\_block_allocator, cast(u64) guarded.virtual_base);
 }
 
-find_guarded_memory :: (address: *void) -> found: bool, Guarded_Allocation {
+find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
     using global.guarded_memory;
 
-    acquire(*spinlock);
+    assert(is_held(spinlock), "Caller should take the lock.");
 
     for* allocations {
         // Calculate the total number of pages by comparing the base address of the whole virtual memory region to the client address. We could also just store this number with the other alloction info.
@@ -1855,14 +1856,11 @@ find_guarded_memory :: (address: *void) -> found: bool, Guarded_Allocation {
         limit := it.virtual_base + total_pages * 4096;
 
         if base <= address && address < limit {
-            g := it.item;
-            release(*spinlock);
-            return true, g;
+            return *it.item;
         }
     }
 
-    release(*spinlock);
-    return false, .{};
+    return null;
 }
 
 guarded_memory_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
@@ -1995,7 +1993,7 @@ Any_Lock :: Type.[MCS_Spinlock, Spinlock(.RAW), Spinlock(.PREEMPT), Spinlock(.IR
 
 
 
-// Lock type (like "irqsave") is a static property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better.
+// Lock type (like "irqsave") is a static property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better. Todo: We could store IRQ state in CPU local data, same as preempt state.
 Lock_Type :: enum {
     RAW     :: 1;
     PREEMPT :: 2;
@@ -2007,11 +2005,12 @@ Spinlock :: struct (lock_type := Lock_Type.PREEMPT) {
     next_ticket: u16;
 
     #if lock_type == .IRQ {
-        irq_state: bool; // Todo: this could go in the high bit of one of the fields above to save cache space.
+        irq_state: bool; // Todo: this could go in the high bit of one of the fields above to save cache space. Or as a counter in CPU local data.
     }
 }
 
 is_held :: (lock: Spinlock) -> bool #no_context {
+    // Todo: Maybe should verify who the holder is in debug builds.
     return lock.now_serving != lock.next_ticket;
 }
 
@@ -2031,11 +2030,11 @@ acquire :: (lock: *Spinlock) #no_context {
             trace(.contended_spinlock, contention_level);
         }
 
-        if lock.lock_type != .IRQ {
-            offset := offset_of(X64_Core, "interrupt_context_active");
-            active := cast(int)gs_relative_read(offset);
+        offset := offset_of(X64_Core, "interrupt_context_active");
+        interrupt_context_active := cast(int)gs_relative_read(offset);
 
-            // assert(!active, "Non-IRQ lock used in interrupt context.");
+        if interrupt_context_active > 0 && lock.lock_type != .IRQ {
+            push_context { assert(false, "Non-IRQ lock used in interrupt context."); }
         }
     }
 

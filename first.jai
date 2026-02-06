@@ -10,8 +10,8 @@
 #if OS == .WINDOWS {
     #import "Windows_Utf8";
     #import "Windows";
-    #import,file "modules/Windows_Subsystem_For_Linux.jai";
-    #import,dir "modules/VirtualBox";
+    #import "Windows_Subsystem_For_Linux";
+    #import "VirtualBox";
 }
 
 #import "FAT16";
@@ -25,6 +25,7 @@ main :: () {
     set_build_options_dc(.{ do_output = false });
 
     #if OS == .WINDOWS {
+
         log("You are on Windows, but this build program works only on Linux. Attempting to automatically relaunch in WSL.");
 
         JAI_ROOT_DIR    :: "/mnt/c/jai";
@@ -400,8 +401,7 @@ END;
 
 
 
-
-#if false {
+#if false do_virtualbox_things :: () {
     // WIP VirtualBox SDK attempt.
 
     load_virtualbox_api_pointers();

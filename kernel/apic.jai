@@ -450,12 +450,18 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         print(*b, "CS: %\n", stack.cs);
     }
 
-    found, g := find_guarded_memory(cast(*void) cr2);
-    if found {
+
+    acquire(*global.guarded_memory.spinlock);
+
+    g := find_guarded_memory(cast(*void) cr2);
+    if g {
         print(*b, "This was a guarded allocation requested at %:%.\n",
               g.created_at.fully_pathed_filename,
               g.created_at.line_number);
     }
+
+    release(*global.guarded_memory.spinlock);
+
 
     buffer: [32] u32;
     do_stack_trace(buffer);
