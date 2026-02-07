@@ -151,7 +151,7 @@ main :: () {
     my_init_fonts();
     ui_init();
 
-    trace_file_name = "../../logs/qemu_trace.bin";
+    trace_file_name = "../../logs/kernel_trace.bin";
     trace_file_exists = file_exists(trace_file_name);
 
     if trace_file_exists {
