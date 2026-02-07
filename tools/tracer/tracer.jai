@@ -576,7 +576,9 @@ draw_one_frame :: (dt: float) {
                 label(label_rect, text, lt);
 
               case .contended_spinlock;
-                text = tprint("Contention level: %", it.user[0]);
+                time_ns := cast(float)it.user[1] / cast(float)trace_data.tsc_frequency;
+
+                text = tprint("Contention level: %, blocked for %ns", it.user[0], cast(int)(time_ns * 1_000_000_000));
                 label(label_rect, text, lt);
 
               case .irq_disable; #through;
@@ -588,7 +590,7 @@ draw_one_frame :: (dt: float) {
 
         end_scrollable_region(state, row_rect.x, row_rect.y, *scroll_position);
     }
-    
+
     switch_to_right_rect(slide_state);
 
     {

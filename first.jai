@@ -73,6 +73,7 @@ main :: () {
     for remaining_args if it == {
         case "kernel";     kernel_only = true;
         case "bootloader"; bootloader_only = true;
+        case "format"; format_disk(); return;
         case; log_error("Command line argument not understood: %", it);
     }
 

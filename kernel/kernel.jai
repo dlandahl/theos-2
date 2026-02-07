@@ -361,6 +361,8 @@ kernel_entry :: () #no_context {
             }
         }
 
+        // user_mode_stress_test();
+
         {
             assert(global.nvme.mmio != null);
             buffer := cast(string) NewArray(0xa0_0000, u8);
@@ -397,6 +399,8 @@ kernel_entry :: () #no_context {
                 nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
             }
         }
+
+        network_test();
 
         log("=== Writing trace buffers. ===");
         trace_event_count := write_trace_buffers();
@@ -1474,10 +1478,13 @@ Small_Objects_Allocator :: struct {
     // Make sure it fits into slot 0 of any bucket size.
     #assert size_of(Page_Metadata) <= 32;
 
-    // Bucket sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096
-    bucket_freelists: [8] *Page_Metadata;
+    Bucket :: struct {
+        page_freelist: *Page_Metadata;
+        lock: Spinlock(.IRQ); // Todo: IRQ lock because this currently gets used for the uACPI work queue.
+    }
 
-    lock: Spinlock(.IRQ); // Todo: IRQ lock because this currently gets used for the uACPI work queue.
+    // Bucket sizes: 32, 64, 128, 256, 512, 1024, 2048, 4096
+    buckets: [8] Bucket;
 }
 
 small_objects_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
@@ -1498,8 +1505,6 @@ small_objects_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64,
 allocate_small_object :: (size: int) -> *void {
     using global.small_objects;
 
-    Scoped_Acquire(*lock);
-
     assert(size <= 4096);
 
     bucket_index := bit_scan_reverse(size-1);
@@ -1507,10 +1512,13 @@ allocate_small_object :: (size: int) -> *void {
 
     objects_size := cast(s16)(32 << bucket_index);
 
-    assert(bucket_index < bucket_freelists.count, "Trying to allocate an object of size % with the small objects allocator.", size);
+    assert(bucket_index < buckets.count, "Trying to allocate an object of size % with the small objects allocator.", size);
+    bucket := *buckets[bucket_index];
+
+    acquire(*bucket.lock);
 
     // Find or allocate a page to use.
-    page_freelist := *bucket_freelists[bucket_index];
+    page_freelist := *bucket.page_freelist;
 
     if page_freelist.* == null {
         new_page := allocate_large_page() + DIRECT_MAPPING_BASE;
@@ -1552,6 +1560,8 @@ allocate_small_object :: (size: int) -> *void {
         header.page_freelist = null;
     }
 
+    release(*bucket.lock);
+
     trace(.small_object_alloc, slot, size);
 
     memset(slot, 0, size);
@@ -1562,7 +1572,6 @@ free_small_object :: (address: *void) {
     if address == null return;
 
     using global.small_objects;
-    Scoped_Acquire(*lock);
 
     header := cast(*Page_Metadata)address & ~(PAGE_SIZE-1);
     trace(.small_object_free, address, header.objects_size);
@@ -1572,10 +1581,13 @@ free_small_object :: (address: *void) {
 
     max_objects  := (PAGE_SIZE - header.objects_size) / header.objects_size;
 
+    bucket := *buckets[bucket_index];
+    acquire(*bucket.lock);
+
     if header.total_objects == max_objects {
         // Add the page to the page freelist if it is full before removing this object.
-        header.page_freelist = bucket_freelists[bucket_index];
-        bucket_freelists[bucket_index] = header;
+        header.page_freelist = bucket.page_freelist;
+        bucket.page_freelist = header;
     }
 
     header.total_objects -= 1;
@@ -1586,7 +1598,7 @@ free_small_object :: (address: *void) {
         // Just walk the page freelist in order to remove this one. We could use a doubly-linked list, but
         // there are really never going to be many entries in the list, since each page can hold thousands
         // of objects, and we're not going to allocate large numbers of objects individually.
-        freelist := *bucket_freelists[bucket_index];
+        freelist := *bucket.page_freelist;
 
         while true {
             if freelist.* == header {
@@ -1607,6 +1619,8 @@ free_small_object :: (address: *void) {
         object_index  := (object_offset - header.objects_size) / header.objects_size;
         header.freelist = object_index;
     }
+
+    release(*bucket.lock);
 }
 
 
@@ -1711,7 +1725,7 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
 
         // This entry should be free or a child node.
         content := cast(Maple_Entry_Content) get(it.*, .content);
-        assert(content != .VALUE);
+        assert(content != .USER_VALUE);
 
         if content == .CHILD_NODE {
             // If it's a child node, recurse into it.
@@ -2044,14 +2058,9 @@ acquire :: (lock: *Spinlock) #no_context {
 
     my_ticket := fetch_add(*lock.next_ticket, 1);
 
+    profile_lock_contention();
+
     {
-        // Detect issues with how spinlocks are used. This code is only for development.
-
-        contention_level := my_ticket - lock.now_serving;
-        if contention_level > 0 {
-            trace(.contended_spinlock, contention_level);
-        }
-
         offset := offset_of(X64_Core, "interrupt_context_active");
         interrupt_context_active := cast(int)gs_relative_read(offset);
 
@@ -2077,6 +2086,18 @@ release :: (lock: *Spinlock) #no_context {
 Scoped_Acquire :: (lock: *Spinlock) #expand {
     acquire(lock);
     `defer release(lock);
+}
+
+profile_lock_contention :: () #expand {
+    contention_level := `my_ticket - `lock.now_serving;
+    if contention_level == 0 return;
+
+    start := rdtsc();
+
+    defer if contention_level != 0 {
+        end := rdtsc();
+        trace(.contended_spinlock, contention_level, end - start);
+    }
 }
 
 

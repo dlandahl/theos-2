@@ -279,7 +279,7 @@ Xsave_Area :: union {
     fpu: [512] u8 #align 16;
 
     struct {
-        offset: [24] u8 #align 16;
+        offset: [24] u8;
         mxcsr: Mxcsr;
     }
 }

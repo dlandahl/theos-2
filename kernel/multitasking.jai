@@ -265,9 +265,6 @@ context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
 new_task_start :: () #no_context {
     set_stack_trace_sentinel();
 
-    // When booting a new kernel thread, we could go straight to its entry point, but we always
-    // forward through this procedure to conveniently set up the Context and release the scheduler spinlock.
-
     push_context {
         core := get_current_core();
         release(*core.scheduler.spinlock);
@@ -277,7 +274,6 @@ new_task_start :: () #no_context {
         trace(.start_task);
 
         ts_data := alloc(TEMPORARY_STORAGE_SIZE);
-        defer free(ts_data);
 
         ts: Temporary_Storage;
         set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, ts_data);
@@ -287,6 +283,8 @@ new_task_start :: () #no_context {
         task._context = *context;
 
         task.entry_point();
+
+        free(ts_data);
 
         // Todo: Hack. This stops the scheduler from putting the task back on the run queue.
         task.blocked = true;
@@ -880,6 +878,8 @@ task_do_work_in_ring_3 :: () #c_call {
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
 
+        random_seed(rdtsc());
+
         while true {
             print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
 
@@ -903,12 +903,12 @@ task_do_work_in_ring_3 :: () #c_call {
 }
 
 
+
 List_Queue :: struct (Item_Type: Type) {
     Node :: struct {
         next: *Node;
         using item: Item_Type;
 
-        // For debugging:
         in_list_queue: *List_Queue(Item_Type);
     }
 
@@ -1037,4 +1037,41 @@ queue_is_empty :: (queue: List_Queue) -> bool {
 
     assert(queue.last != null);
     return false;
+}
+
+
+
+#if 0 {
+    List_Queue :: struct (_Item_Type: Type) {
+        Node :: struct {
+            Item_Type :: _Item_Type;
+            next: *Node;
+
+            // For debugging:
+            in_list_queue: *List_Queue(Item_Type);
+        }
+
+        first: *Node;
+        name: string;
+    }
+
+    get_container :: (node: *$T/List_Queue.Node) -> *T.Item_Type {
+        offset :: #run -> int {
+            // Todo: Allow 'using'?
+            ti_item := type_info(T.Item_Type);
+            ti_node := type_info(T);
+
+            for ti_item.members {
+                if it.type == ti_node {
+                    return it.offset_in_bytes;
+                }
+            }
+
+            return -1;
+        }
+
+        #assert offset != -1;
+
+        return cast(*void) node - offset;
+    }
 }

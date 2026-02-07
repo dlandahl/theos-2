@@ -1458,25 +1458,27 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
     command.OPC__opcode = ifx direction == .READ then .READ else .WRITE;
 
     // Fill in PRP (physical region page) list.
+    number_of_bytes := number_of_blocks * nvme.block_size;
 
-    number_of_pages := number_of_blocks * nvme.block_size / 4096;
-    number_of_page_crossings := number_of_pages - 1;
+    assert(number_of_bytes % 4096 == 0, "NVMe transfer size must be a multiple of the page size.");
+
+    number_of_pages := number_of_bytes / 4096;
 
     offset_in_page := cast(s64)memory_buffer & 0xfff;
-    if offset_in_page > (4096 - nvme.block_size) {
-        number_of_page_crossings += 1;
+    if offset_in_page > 0 {
+        number_of_pages += 1;
     }
 
     first_page := get_physical_address(memory_buffer);
     assert(first_page & 0b11 == 0);
     command.DPTR__data_pointer[0] = first_page;
 
-    if number_of_page_crossings == 1 {
+    if number_of_pages == 2 {
         second_page := get_physical_address(memory_buffer + 4096);
         second_page &= ~0xfff;
 
         command.DPTR__data_pointer[1] = second_page;
-    } else if number_of_page_crossings > 1 {
+    } else if number_of_pages > 2 {
         page_index := 1;
 
         next_prp_list_phys_base := get_4k_page();
@@ -1484,10 +1486,12 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
 
         command.DPTR__data_pointer[1] = next_prp_list_phys_base;
 
-        while page_index < number_of_page_crossings {
-            is_final_prp_list := page_index > number_of_page_crossings - 512 - 1;
+        while page_index < number_of_pages {
+            remaining_pages := number_of_pages - page_index;
 
-            current_prp_list_length := min(number_of_page_crossings - page_index, ifx is_final_prp_list then 512 else 511);
+            is_final_prp_list := remaining_pages <= 512;
+
+            current_prp_list_length := min(remaining_pages, ifx is_final_prp_list then 512 else 511);
 
             for 0..current_prp_list_length-1 {
                 page := get_physical_address(memory_buffer + 4096 * page_index);
@@ -1514,7 +1518,6 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
 
     // Todo: Free PRP list.
 }
-
 
 
 
