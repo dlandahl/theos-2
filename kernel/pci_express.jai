@@ -686,19 +686,17 @@ i8254x_interrupt :: (stack: *void) #c_call {
     push_context {
         net := *global.network_connection;
 
-        if !net.adapter.mmio {
-            // Todo: The ethernet card generates interrupts before we assign it to the global network_connection struct.
-            return;
+        if net.adapter.mmio { // Todo: The ethernet card generates interrupts before we assign it to the global network_connection struct.
+            cause := net.adapter.ICR__interrupt_cause_read;
+
+            if cause & .RXT0__Receiver_Timer_Interrupt {
+                signal(*net.work_to_do);
+            }
         }
 
-        cause := net.adapter.ICR__interrupt_cause_read;
-
-        if cause & .RXT0__Receiver_Timer_Interrupt {
-            signal(*net.work_to_do);
-        }
+        write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
     }
 
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 I8254x_Network_Interface_Card :: struct {
@@ -1459,13 +1457,10 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
 
     // Fill in PRP (physical region page) list.
     number_of_bytes := number_of_blocks * nvme.block_size;
-
-    assert(number_of_bytes % 4096 == 0, "NVMe transfer size must be a multiple of the page size.");
-
     number_of_pages := number_of_bytes / 4096;
 
     offset_in_page := cast(s64)memory_buffer & 0xfff;
-    if offset_in_page > 0 {
+    if offset_in_page > 0 || number_of_pages == 0 {
         number_of_pages += 1;
     }
 

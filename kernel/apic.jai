@@ -274,7 +274,8 @@ ap_entry_point :: () #c_call {
 
         core_begin_multitasking();
 
-        irq_restore(true);
+        assert(cpu_local_read("irq_disable_count") == 0);
+        #asm { sti; }
 
         while true {
             schedule_tasks();
@@ -299,8 +300,7 @@ get_core_id :: () -> int #no_context {
         return 0; // This is valid, if we haven't started multiprocessing then we know we're on core 0.
     }
 
-    offset := offset_of(X64_Core, "id");
-    return cast(int)gs_relative_read(offset);
+    return cpu_local_read("id");
 }
 
 get_task_id :: () -> int #no_context {
@@ -318,10 +318,35 @@ get_task_id :: () -> int #no_context {
     return task.id;
 }
 
-gs_relative_read  :: (offset: int) -> u64 #foreign Assembly;
-gs_relative_write :: (offset: int) -> u64 #foreign Assembly;
-gs_relative_inc   :: (offset: int) -> u64 #foreign Assembly;
-gs_relative_dec   :: (offset: int) -> u64 #foreign Assembly;
+
+
+cpu_local_read :: inline ($field_name: string) -> s64 #no_context {
+    offset := offset_of(X64_Core, field_name);
+
+    gs_relative_read :: (offset: int) -> s64 #foreign Assembly;
+    return gs_relative_read(offset);
+}
+
+cpu_local_write :: inline ($field_name: string, value: s64) #no_context {
+    offset := offset_of(X64_Core, field_name);
+
+    gs_relative_write :: (offset: int, value: s64) #foreign Assembly;
+    gs_relative_write(offset, s64);
+}
+
+cpu_local_increment :: inline ($field_name: string) #no_context {
+    offset := offset_of(X64_Core, field_name);
+
+    gs_relative_inc :: (offset: int) #foreign Assembly;
+    gs_relative_inc(offset);
+}
+
+cpu_local_decrement :: inline ($field_name: string) #no_context {
+    offset := offset_of(X64_Core, field_name);
+
+    gs_relative_dec :: (offset: int) #foreign Assembly;
+    gs_relative_dec(offset);
+}
 
 
 
@@ -834,6 +859,8 @@ handle_uacpi_irq_%1 :: (stack: *void) #c_call {
     irq_handlers_in_flight += 1;
     irq.handler(irq.ctx);
     irq_handlers_in_flight -= 1;
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 END;
 

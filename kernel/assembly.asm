@@ -47,8 +47,6 @@ global context_switch
 struc Task_Info
     .rsp:   resq 1
     .cr3:   resq 1
-    .interrupt_context_was_active: resq 1
-    .gap_to_align_xsave_area: resq 1
     .xsave: resq 1
 endstruc
 
@@ -58,16 +56,12 @@ context_switch:
     pushfq
     push_all
 
+    ; Save task-specific state, that's stored in CPU local data, onto the stack.
+    push qword [gs:interrupt_context_active]
+    push qword [gs:irq_disable_count]
+
     ; Store current stack on the old task
     mov [rdi + Task_Info.rsp], rsp
-
-    ; We move this in-and-out of CPU local data when context switching,
-    ; mainly because it's easier for interrupt handlers to access
-    ; CPU-local data than thread-specific data, partly because CPU-local
-    ; data is available earlier in boot.
-
-    mov rax, [gs:interrupt_context_active]
-    mov [rdi + Task_Info.interrupt_context_was_active], rax
 
     ; Store FPU state in the old task's xsave_area
     fxsave64 [rdi + Task_Info.xsave]
@@ -75,15 +69,15 @@ context_switch:
     ; Restore the stack pointer from the new task
     mov rsp, [rsi + Task_Info.rsp]
 
-    mov rax, [rsi + Task_Info.interrupt_context_was_active]
-    mov [gs:interrupt_context_active], rax
-
     ; Load FPU state from the new task's xsave_area
     fxrstor64 [rsi + Task_Info.xsave]
 
     ; Load the address space of the new task
     mov rdx, [rsi + Task_Info.cr3]
     mov cr3, rdx
+
+    pop qword [gs:irq_disable_count]
+    pop qword [gs:interrupt_context_active]
 
     ; Restore RFLAGS and GPRs from the stack
     pop_all

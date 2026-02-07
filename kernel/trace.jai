@@ -126,7 +126,7 @@ Trace_Entry :: struct {
         using global.trace_state;
 
         // Because this procedure is to be called after completing a kernel test workload, we don't care about extra latency and it's more important to have as controlled an environment as possible.
-        irq_state := irq_disable();
+        irq_disable();
 
         serial_out(KERNEL_TRACE_MAGIC_STRING, *global.COM2);
 
@@ -165,14 +165,7 @@ Trace_Entry :: struct {
             }
             release(*global.task_info_storage_spinlock);
 
-            assert(string_table_builder.current_buffer == null, "Todo: Iterate string builder buffers and output each of them to the serial port.");
-
-            base_buffer := get_base_buffer(*string_table_builder);
-
-            s: string;
-            s.data = get_buffer_data(base_buffer);
-            s.count = base_buffer.count;
-            serial_out(s, *global.COM2);
+            write_string_builder_to_serial_port(*string_table_builder, *global.COM2);
         }
 
         buffer_index    := last_entry_index / TRACE_ENTRIES_PER_BUFFER;
@@ -192,7 +185,7 @@ Trace_Entry :: struct {
             serial_out(s, *global.COM2);
         }
 
-        irq_restore(irq_state);
+        irq_restore();
 
         return last_entry_index;
     }

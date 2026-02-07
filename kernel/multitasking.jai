@@ -4,7 +4,6 @@ Task_Info :: struct {
     // These fields must match the task switch assembly routine
     rsp: *void;
     cr3: u64;
-    interrupt_context_was_active: int;
     xsave: Xsave_Area #align 16;
 
     id: int;
@@ -63,8 +62,7 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
 }
 
 get_current_task :: () -> *Task_Info #no_context {
-    offset := offset_of(X64_Core, "scheduler.current_task");
-    return cast(*Task_Info)gs_relative_read(offset);
+    return cast(*Task_Info) cpu_local_read("scheduler.current_task");
 }
 
 allocate_task_info :: () -> *Task_Info {
@@ -100,7 +98,8 @@ core_begin_multitasking :: () {
 
         idle :: () {
             while true {
-                #asm { sti; hlt; }
+                assert(get_rflags() & .IF__interrupt > 0);
+                #asm { hlt; }
                 schedule_tasks();
             }
         }
@@ -169,6 +168,9 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
         _: void #align 16;
 
         // Represents the stack layout used by the context_switch routine written in assembly.
+        irq_disable_count: s64;
+        interrupt_context_active: s64;
+
         registers: General_Registers;
         flags: X64_Flags;
         return_address: *void;
@@ -177,6 +179,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
     stack.flags = 0;
     stack.return_address = cast(*void) new_task_start;
+    stack.irq_disable_count = 1; // The entry point will release the scheduler spinlock. Setting this to 1 will cause that to enable IRQs on that core.
 
     new_task.rsp = stack;
     new_task.xsave.mxcsr = .MASK_ALL;
@@ -193,8 +196,7 @@ yield_execution :: schedule_tasks;
 schedule_tasks :: () {
 
     {
-        offset := offset_of(X64_Core, "preempt_disable_count");
-        count := cast(int)gs_relative_read(offset);
+        count := cpu_local_read("preempt_disable_count");
 
         assert(count == 0, "Context switch with preemption disabled is not allowed.");
     }
@@ -250,10 +252,10 @@ schedule_tasks :: () {
     current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
     current.on_core.task_state_segment.rsp[0] = next.kernel_stack;
 
-    trace(.context_switch, current.id, next.id);
-
     scheduler.last_task_switch_timestamp = time_now;
     scheduler.current_task = next;
+
+    trace(.context_switch, current.id, next.id);
 
     context_switch(current, next);
 
@@ -266,10 +268,9 @@ new_task_start :: () #no_context {
     set_stack_trace_sentinel();
 
     push_context {
+
         core := get_current_core();
         release(*core.scheduler.spinlock);
-
-        irq_restore(true);
 
         trace(.start_task);
 
@@ -854,7 +855,7 @@ user_mode_stress_test :: (threads_per_core := 4) {
     thread_index := 1;
 
     for *core: global.processor_cores {
-        // if core.id != 0 continue;
+        if core.id != 0 continue;
 
         for 1..threads_per_core {
             name := tprint("Do Work %:%", core.id, thread_index);
@@ -866,14 +867,23 @@ user_mode_stress_test :: (threads_per_core := 4) {
     }
 }
 
+simple_create_thread :: (proc: (), core_id := 1) {
+    task := create_task(proc, name = "Simple");
+
+    core := *global.processor_cores[core_id];
+    assert(core.online);
+
+    put_task_on_core(task, core);
+}
+
 task_do_work_in_ring_3 :: () #c_call {
 
     push_context {
+        context.allocator.proc = ring_3_allocator;
+
         ts: Temporary_Storage;
         set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
-
         context.temporary_storage = *ts;
-        context.allocator.proc = ring_3_allocator;
 
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;

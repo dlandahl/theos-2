@@ -72,6 +72,8 @@ X64_Core :: struct {
 
     interrupt_context_active: s64;
 
+    irq_disable_count: s64;
+
     online: bool; // The core has called core_begin_multitasking, so we can put threads on it.
 
     mcs_node: MCS_Node;
@@ -188,6 +190,8 @@ kernel_entry :: () #no_context {
             set_cr4 cr4;
             wrgsbase core;
         }
+
+        irq_disable();
     }
 
     write_string_callback = kernel_write_string;
@@ -343,7 +347,7 @@ kernel_entry :: () #no_context {
             while !core.online pause();
         }
 
-        irq_restore(true);
+        irq_restore();
 
         for *global.pci_devices {
             if it.combined_class_code == {
@@ -361,50 +365,15 @@ kernel_entry :: () #no_context {
             }
         }
 
-        // user_mode_stress_test();
+        user_mode_stress_test();
 
-        {
-            assert(global.nvme.mmio != null);
-            buffer := cast(string) NewArray(0xa0_0000, u8);
+        simple_create_thread(() {
+            sleep(10, .seconds);
 
-            blocks_per_transfer := global.nvme.maximum_transfer_size_in_blocks;
-            transfers := 0xa0_0000 / (blocks_per_transfer * global.nvme.block_size);
-
-            log("Blocks per transfer: %, transfers: %, total bytes: %",
-                hex(blocks_per_transfer), transfers, hex(transfers * blocks_per_transfer * global.nvme.block_size)
-               );
-
-            for 0..transfers-1 {
-                start_block   := it * blocks_per_transfer;
-                memory_buffer := buffer.data + start_block * global.nvme.block_size;
-                nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
-            }
-
-            disk_image := fat16_parse_disk_image(buffer);
-            root       := fat16_get_root_directory(*disk_image);
-
-            fat16_create_directory(root, "THEOS");
-            fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
-
-            // success, data := fat16_read_file(root, "THEOS/TEST");
-            // assert(success);
-            // log(data);
-
-            fat16_print_directory_tree(root);
-            fat16_copy_fat_table(*disk_image);
-
-            for 0..transfers-1 {
-                start_block   := it * blocks_per_transfer;
-                memory_buffer := buffer.data + start_block * global.nvme.block_size;
-                nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
-            }
-        }
-
-        network_test();
-
-        log("=== Writing trace buffers. ===");
-        trace_event_count := write_trace_buffers();
-        log("=== Wrote % trace events. ===", trace_event_count);
+            log("=== Writing trace buffers. ===");
+            trace_event_count := write_trace_buffers();
+            log("=== Wrote % trace events. ===", trace_event_count);
+        });
 
         while true {
             schedule_tasks();
@@ -414,8 +383,45 @@ kernel_entry :: () #no_context {
     }
 }
 
+disk_test :: () {
+    assert(global.nvme.mmio != null);
+    buffer := cast(string) NewArray(0xa0_0000, u8);
+
+    blocks_per_transfer := global.nvme.maximum_transfer_size_in_blocks;
+    transfers := 0xa0_0000 / (blocks_per_transfer * global.nvme.block_size);
+
+    log("Blocks per transfer: %, transfers: %, total bytes: %",
+        hex(blocks_per_transfer), transfers, hex(transfers * blocks_per_transfer * global.nvme.block_size)
+       );
+
+    for 0..transfers-1 {
+        start_block   := it * blocks_per_transfer;
+        memory_buffer := buffer.data + start_block * global.nvme.block_size;
+        nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
+    }
+
+    disk_image := fat16_parse_disk_image(buffer);
+    root       := fat16_get_root_directory(*disk_image);
+
+    fat16_create_directory(root, "THEOS");
+    fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
+
+    // success, data := fat16_read_file(root, "THEOS/TEST");
+    // assert(success);
+    // log(data);
+
+    fat16_print_directory_tree(root);
+    fat16_copy_fat_table(*disk_image);
+
+    for 0..transfers-1 {
+        start_block   := it * blocks_per_transfer;
+        memory_buffer := buffer.data + start_block * global.nvme.block_size;
+        nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
+    }
+}
+
 network_test :: () -> string {
-    USE_DNS :: false;
+    USE_DNS :: true;
 
     log_category("TLS Test");
     log("Starting.");
@@ -448,7 +454,7 @@ network_test :: () -> string {
 
             if dns_query.response != .NOERROR {
                 log("DNS Query failed with code %", dns_query.response);
-                return;
+                return "";
             }
 
             ip_address = dns_query.answer;
@@ -472,13 +478,14 @@ network_test :: () -> string {
 
     builder: String_Builder;
 
-    for 1..2 {
+    for 1..4 {
         response := tls_receive_application_data(*tls, seconds_to_apollo(5));
         append(*builder, response);
 
         log("Got HTTPS response: %", response);
     }
 
+    log(builder_to_string(*builder));
     // Todo: TLS Close Notify.
 
     tcp_close(connection);
@@ -1961,6 +1968,28 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
     release(*spinlock);
 }
 
+write_string_builder_to_serial_port :: (using builder: *String_Builder, serial_port: *Serial_Port, do_reset := true) -> s64 {
+
+    if !allocator.proc return 0;
+
+    buffer  := get_base_buffer(builder);
+    written := 0;
+    while buffer {
+        s: string = ---;
+        s.data  = get_buffer_data(buffer);
+        s.count = buffer.count;
+
+        serial_out(s, serial_port);
+        written += s.count;
+
+        buffer = buffer.next;
+    }
+
+    if do_reset reset(builder);
+
+    return written;
+}
+
 
 
 kernel_write_string :: (text: string) #no_context {
@@ -1991,33 +2020,34 @@ fetch_store :: (target: *$T, value: T) -> old_value: T #no_context {
 
 
 
-preempt_disable :: () -> int #no_context {
-    offset := offset_of(X64_Core, "preempt_disable_count");
-    gs_relative_inc(offset);
-
-    return 0;
+preempt_disable :: () #no_context {
+    cpu_local_increment("preempt_disable_count");
 }
 
-preempt_restore :: (expected: int, loc := #caller_location) #no_context {
-    offset := offset_of(X64_Core, "preempt_disable_count");
-    gs_relative_dec(offset);
+preempt_restore :: () #no_context {
+    cpu_local_decrement("preempt_disable_count");
 }
+
 
 get_rflags :: () -> X64_Flags #foreign Assembly;
 
-irq_disable :: () -> bool #no_context {
-    flags := get_rflags();
-    was_enabled := flags & .IF__interrupt > 0;
-
+irq_disable :: () #no_context {
     #asm { cli; }
 
-    trace(.irq_disable, was_enabled);
-    return was_enabled;
+    core := get_current_core();
+    trace(.irq_disable, core.irq_disable_count);
+
+    core.irq_disable_count += 1;
 }
 
-irq_restore :: (was_enabled: bool) #no_context {
-    trace(.irq_restore, was_enabled);
-    if was_enabled {
+irq_restore :: () #no_context {
+
+    core := get_current_core();
+    trace(.irq_restore, core.irq_disable_count);
+
+    core.irq_disable_count -= 1;
+
+    if core.irq_disable_count == 0 {
         #asm { sti; }
     }
 }
@@ -2029,7 +2059,7 @@ Any_Lock :: Type.[MCS_Spinlock, Spinlock(.RAW), Spinlock(.PREEMPT), Spinlock(.IR
 
 
 
-// Lock type (like "irqsave") is a static property of the spinlock type and IRQ/preempt state is stored with the lock. Other operating systems don't do this, they make the caller do everything. Not sure which is better. Todo: We could store IRQ state in CPU local data, same as preempt state.
+// Lock type (like "irqsave") is a static property of the spinlock type and IRQ/preempt state is stored in CPU local data. Other operating systems don't do this, they make the caller do everything. Not sure which is better.
 Lock_Type :: enum {
     RAW     :: 1;
     PREEMPT :: 2;
@@ -2039,10 +2069,6 @@ Lock_Type :: enum {
 Spinlock :: struct (lock_type := Lock_Type.PREEMPT) {
     now_serving: u16;
     next_ticket: u16;
-
-    #if lock_type == .IRQ {
-        irq_state: bool; // Todo: this could go in the high bit of one of the fields above to save cache space. Or as a counter in CPU local data.
-    }
 }
 
 is_held :: (lock: Spinlock) -> bool #no_context {
@@ -2053,7 +2079,7 @@ is_held :: (lock: Spinlock) -> bool #no_context {
 acquire :: (lock: *Spinlock) #no_context {
     #if lock.lock_type == {
         case .PREEMPT; preempt_disable();
-        case .IRQ;     lock.irq_state = irq_disable();
+        case .IRQ;     irq_disable();
     }
 
     my_ticket := fetch_add(*lock.next_ticket, 1);
@@ -2061,8 +2087,7 @@ acquire :: (lock: *Spinlock) #no_context {
     profile_lock_contention();
 
     {
-        offset := offset_of(X64_Core, "interrupt_context_active");
-        interrupt_context_active := cast(int)gs_relative_read(offset);
+        interrupt_context_active := cpu_local_read("interrupt_context_active");
 
         if interrupt_context_active > 0 && lock.lock_type != .IRQ {
             push_context { assert(false, "Non-IRQ lock used in interrupt context."); }
@@ -2078,8 +2103,8 @@ release :: (lock: *Spinlock) #no_context {
     lock.now_serving += 1;
 
     #if lock.lock_type == {
-        case .PREEMPT; preempt_restore(0 /* Todo */);
-        case .IRQ;     irq_restore(lock.irq_state);
+        case .PREEMPT; preempt_restore();
+        case .IRQ;     irq_restore();
     }
 }
 
@@ -2094,7 +2119,7 @@ profile_lock_contention :: () #expand {
 
     start := rdtsc();
 
-    defer if contention_level != 0 {
+    `defer if contention_level != 0 {
         end := rdtsc();
         trace(.contended_spinlock, contention_level, end - start);
     }
@@ -2107,18 +2132,16 @@ profile_lock_contention :: () #expand {
 MCS_Node :: struct {
     next: *MCS_Node;
     blocked: bool;
-    irq_state: bool;
 }
 
 MCS_Spinlock :: *MCS_Node;
 
 acquire :: (lock: *MCS_Spinlock) #no_context {
-    irq_state := irq_disable();
+    irq_disable();
 
     core := get_current_core();
     my_node := *core.mcs_node;
 
-    my_node.irq_state = irq_state;
     my_node.next = null;
 
     prev := fetch_store(lock, my_node);
@@ -2142,7 +2165,7 @@ release :: (lock: *MCS_Spinlock) #no_context {
 
     if !my_node.next {
         if compare_and_swap(lock, my_node, null) {
-            irq_restore(my_node.irq_state);
+            irq_restore();
             return;
         }
 
@@ -2152,7 +2175,7 @@ release :: (lock: *MCS_Spinlock) #no_context {
     }
 
     my_node.next.blocked = false;
-    irq_restore(my_node.irq_state);
+    irq_restore();
 }
 
 
@@ -2475,7 +2498,9 @@ offset_of :: ($T: Type, $member: string) -> s64 #no_context {
     return cast(*void) (*dummy.%) - cast(*void) *dummy;
     DONE
 
-    #insert #run sprint(BODY, member);
+    return #run -> int {
+        #insert -> string { return sprint(BODY, member); }
+    };
 }
 
 fill_random :: (buffer: []u8) {

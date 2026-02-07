@@ -281,12 +281,12 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     result_assembly_code := builder_to_string(*interrupt_assembly,, temp);
 
                     {
-                        // Use type info to get the offset of the interrupt-context-active flag in CPU local data, so we can access it from the interrupt service routines.
-                        offset := get_struct_field_offset_from_another_workspace("X64_Core", "interrupt_context_active", workspace);
-                        assert(offset != -1);
+                        // We save these on the stack during context switch, so assembly needs to know their offset within CPU-local data.
+                        offset_ica := get_struct_field_offset_from_another_workspace("X64_Core", "interrupt_context_active", workspace);
+                        offset_idq := get_struct_field_offset_from_another_workspace("X64_Core", "irq_disable_count", workspace);
 
-                        offset_constant := tprint("\ninterrupt_context_active equ %\n\n", offset);
-                        result_assembly_code = join(offset_constant, result_assembly_code,, temp);
+                        offset_string := tprint("\ninterrupt_context_active equ %\nirq_disable_count equ %\n\n", offset_ica, offset_idq);
+                        result_assembly_code = join(offset_string, result_assembly_code,, temp);
                     }
 
                     write_entire_file(".build/assembly.asm", result_assembly_code);
@@ -374,7 +374,6 @@ global isr__%1
 
 align 0x8
 isr__%1:
-    cli
     push_all
 
     mov rdi, rsp
@@ -387,6 +386,7 @@ isr__%1:
 
     inc qword [gs:interrupt_context_active]
 
+    cld
     call %1
 
     dec qword [gs:interrupt_context_active]

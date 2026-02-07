@@ -620,7 +620,7 @@ calibrate_tsc :: () -> hz: u64 {
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
     for 1..100 {
-        irq_state := irq_disable();
+        irq_disable();
 
         counter_start := counter_register.*;
         tsc0 := rdtsc();
@@ -640,7 +640,7 @@ calibrate_tsc :: () -> hz: u64 {
             }
         }
 
-        irq_restore(irq_state);
+        irq_restore();
 
         delta[2] = delta[1];
         delta[1] = delta[0];
@@ -673,7 +673,7 @@ calibrate_tsc :: () -> hz: u64 {
 }
 
 calibrate_tsc_using_interrupt :: () {
-    count := preempt_disable();
+    preempt_disable();
 
     for 1..10 {
         hpet_configure_timer(
@@ -698,13 +698,13 @@ calibrate_tsc_using_interrupt :: () {
         log("Frequency according to 1 second interrupt calibration: %\n", frequency);
     }
 
-    preempt_restore(count);
+    preempt_restore();
 }
 
 debug_measure_tsc_drift :: () {
     push_print_style().default_format_int.base = 10;
 
-    #asm { cli; }
+    irq_disable();
 
     tsc_start := rdtsc();
     tsc_frequency := cast(float) global.tsc_frequency;
@@ -721,12 +721,14 @@ debug_measure_tsc_drift :: () {
 
         print("[%] TSC: % | Error: %\n", it, seconds_according_to_tsc, cast(float) it - seconds_according_to_tsc);
     }
+
+    irq_restore();
 }
 
 debug_run_tsc_timer :: () {
     push_print_style().default_format_int.base = 10;
 
-    #asm { cli; }
+    irq_disable();
 
     tsc_start := rdtsc();
     tsc_frequency := cast(float) global.tsc_frequency;
@@ -742,4 +744,6 @@ debug_run_tsc_timer :: () {
 
         for 1..1_000_000 #asm {pause;}
     }
+
+    irq_restore();
 }
