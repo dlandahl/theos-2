@@ -1800,7 +1800,7 @@ Icmp_Request :: struct {
     id: u32;
     destination_ip: u32;
     sent_at: Apollo_Time;
-};
+}
 
 Icmp_Packet :: struct {
     eth: Ethernet_Header;

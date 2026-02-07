@@ -22,7 +22,7 @@ Ics_Local_Apic :: struct {
     flags: enum_flags u32 {
         ENABLED           :: 0x1;
         ONLINE_CAPABLE    :: 0x2;
-    };
+    }
 }
 
 Ics_Io_Apic :: struct {
@@ -603,10 +603,6 @@ uACPI_State :: struct {
         using global.uacpi_state;
 
         log_category("uACPI");
-
-        // uACPI uses thread local storage.
-        tls := get_4k_page() + DIRECT_MAPPING_BASE;
-        #asm FSGSBASE { wrfsbase tls; }
 
         while true {
             wait_for(*work_added);

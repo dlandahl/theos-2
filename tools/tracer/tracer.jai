@@ -257,7 +257,11 @@ trace_file_exists: bool;
 kernel_file_name: string;
 kernel_file_exists: bool;
 
-editor_command_format_string: string = "C:\\Program Files\\Notepad++\\notepad++.exe -n%2 \"%1\"";
+#if OS == .WINDOWS {
+    editor_command_format_string: string = "C:\\Program Files\\Notepad++\\notepad++.exe -n%2 \"%1\"";
+} else {
+    editor_command_format_string: string = "kate %1 --line %2";
+}
 
 selected_entry: int;
 highlighted_trace_entries: [..] int;
@@ -656,7 +660,7 @@ draw_one_frame :: (dt: float) {
                         command := break_command_into_strings(command_line);
 
                         process: Process;
-                        create_process(*process, ..command, kill_process_if_parent_exits=false);
+                        create_process(*process, ..command);
                     }
                 }
 

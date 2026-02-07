@@ -65,6 +65,7 @@ context_switch:
     ; mainly because it's easier for interrupt handlers to access
     ; CPU-local data than thread-specific data, partly because CPU-local
     ; data is available earlier in boot.
+
     mov rax, [gs:interrupt_context_active]
     mov [rdi + Task_Info.interrupt_context_was_active], rax
 

@@ -670,7 +670,7 @@ set_default_context_callbacks :: () #no_context {
 
         bluescreen();
         return true;
-    };
+    }
 
     kernel_default_logger = (message: string, data: *void, info: Log_Info) {
         builder: String_Builder;
@@ -738,7 +738,7 @@ set_default_context_callbacks :: () #no_context {
         }
 
         return null;
-    };
+    }
 }
 
 init_processor_core :: () {
@@ -1133,7 +1133,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
             value: u64;
             flags: Page_Flags;
         };
-    };
+    }
 
     `it_index: int;
 
@@ -1611,25 +1611,6 @@ free_small_object :: (address: *void) {
 
 
 Maple_Tree_Node :: struct {
-    // Maybe having so many nested types makes it harder to read.
-    Entry_Content :: enum {
-        FREE       :: 0;
-        CHILD_NODE :: 1;
-        VALUE      :: 2;
-    }
-
-    Entry :: enum s64 {
-        content :: 2;
-        unused  :: 5; // Could put search marks here.
-
-        // We could save a lot of bits by storing nodes in an array that can be accessed by index, and then only storing the index in nonleaf nodes. But just making it work for now.
-        // It would have to be a specially implemented array that just uses large pages, because I don't want this tree to have to go to the physical block allocator to get more memory,
-        // because that would prevent us from:
-        //   A) Using this as part of a memory debug mode where all block-allocator allocations are guarded with virtual memory guard pages by default.
-        //   B) Using this when block allocator physical memory runs out / is too fragmented to support a large allocation. Don't really care about this case that much.
-        address :: 57;
-    }
-
     Meta :: enum s64 {
         entry_count    :: 3;
         unused         :: 4;
@@ -1639,10 +1620,28 @@ Maple_Tree_Node :: struct {
     meta: Meta;
 
     pivots:  [7] s64;
-    entries: [8] Entry;
+    entries: [8] Maple_Entry;
 }
 
 #assert size_of(Maple_Tree_Node) == 128; // Two cache lines for now.
+
+Maple_Entry_Content :: enum {
+    FREE       :: 0;
+    CHILD_NODE :: 1;
+    USER_VALUE :: 2;
+}
+
+Maple_Entry :: enum s64 {
+    content :: 2;
+    unused  :: 5; // Could put search marks here.
+
+    // We could save a lot of bits by storing nodes in an array that can be accessed by index, and then only storing the index in nonleaf nodes. But just making it work for now.
+    // It would have to be a specially implemented array that just uses large pages, because I don't want this tree to have to go to the physical block allocator to get more memory,
+    // because that would prevent us from:
+    //   A) Using this as part of a memory debug mode where all block-allocator allocations are guarded with virtual memory guard pages by default.
+    //   B) Using this when block allocator physical memory runs out / is too fragmented to support a large allocation. Don't really care about this case that much.
+    address :: 57;
+}
 
 Maple_Tree_Node_Expanded :: struct {
     #as using node: *Maple_Tree_Node;
@@ -1661,7 +1660,7 @@ each_range :: (node: *Maple_Tree_Node_Expanded, body: Code, flags: For_Flags) #e
     `it_min: s64;
     `it_max: s64;
 
-    `it: *Maple_Tree_Node.Entry;
+    `it: *Maple_Entry;
 
     entry_count := get(node.meta, .entry_count);
 
@@ -1710,7 +1709,7 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
         assert(it_max >= range_max);
 
         // This entry should be free or a child node.
-        content := cast(Maple_Tree_Node.Entry_Content) get(it.*, .content);
+        content := cast(Maple_Entry_Content) get(it.*, .content);
         assert(content != .VALUE);
 
         if content == .CHILD_NODE {
@@ -1730,34 +1729,57 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
             // If it matches exactly, we can just use this range without splitting it.
 
             set_in_place(it, .address, cast(s64)value);
-            set(it, .content, cast(s64)Maple_Tree_Node.Entry_Content.VALUE);
+            set(it, .content, cast(s64)Maple_Entry_Content.USER_VALUE);
 
             return;
         }
 
-        // If we get here we need to move the entries and pivots, to make room for either one or two new entries, depending.
-        new_entries_needed: int;
+        // If we get here we need to move the entries and pivots, to make room for either one or two new entries, depending on whether the existing range gets split by the new range.
+        new_free_entries_needed: int;
 
-        if it_min != range_min new_entries_needed += 1;
-        if it_max != range_max new_entries_needed += 1;
+        if it_min != range_min new_free_entries_needed += 1;
+        if it_max != range_max new_free_entries_needed += 1;
 
         entry_count := get(node.meta, .entry_count);
-        new_entry_count := entry_count + new_entries_needed;
+        new_entry_count := entry_count + new_free_entries_needed;
 
         // This would split the node. Todo.
         assert(new_entry_count <= 8);
 
-        // Move the entries after this one over.
-        start := it_index + new_entries_needed + 1; // The lowest entry that we move other entries to.
+        new_node := New(Maple_Tree_Node,, global.small_objects);
 
-        for< start..new_entry_count-1 {
-            node.entries[it] = node.entries[it - new_entries_needed];
+        // Copy the entries before the new ones.
+        for 0..it_index-1 {
+            new_node.entries[it] = node.entries[it];
+            new_node.pivots[it]  = node.pivots[it];
         }
 
-        entry_to_fill := it_index;
+        new_entry_index := it_index;
 
         if it_min != range_min {
             // We need a free entry before the one we want to add.
+
+            new_node.entries[it_index] = 0;
+            new_node.pivots[it_index]  = range_min;
+
+            new_entry_index += 1;
+        }
+
+        // Add the new entry.
+        new_entry := *new_node.entries[new_entry_index];
+        set(new_entry, .content, cast(s64)Maple_Entry_Content.USER_VALUE);
+        set(new_entry, .address, cast(s64)value);
+
+        if it_max != range_max {
+            // We need a free entry after the one we've added.
+
+            new_node.entries[it_index + new_free_entries_needed] = 0;
+            new_node.pivots [it_index + new_free_entries_needed - 1] = range_max;
+        }
+
+        // Copy the entries after the new ones from the old node.
+        for it_index..entry_count {
+            new_node.entries;
         }
     }
 

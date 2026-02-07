@@ -2048,7 +2048,7 @@ HDA_RB_Size :: enum u8 {
     RBSIZE  :: 2;
     _       :: 2;
     RBSZCAP :: 4;
-};
+}
 
 HDA_GCTL__Global_Control :: enum u32 {
     CRST__controller_reset :: 1;
