@@ -225,10 +225,9 @@ startup_application_processors :: () {
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
     ap_startup_data.pml4 = global.boot_data.page_tables.pml4.data;
 
-    bsp := get_current_core();
-
     for* global.processor_cores {
-        if it == bsp {
+        if it_index == 0 {
+            // This is the bootstrap processor.
             continue;
         }
 
@@ -426,13 +425,25 @@ debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
 
 #program_export
 breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
-    push_context {
-        context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 0;
-        context.print_style.default_format_struct.use_newlines_if_long_form = true;
-        context.print_style.default_format_int.base = 16;
+    push_context,defer_pop;
 
-        print("\nBreakpoint hit. Context:\n%", stack.*);
+    b: String_Builder;
+
+    {
+        ps := push_print_style();
+        ps.use_long_form_if_more_than_this_many_members = 0;
+        ps.use_newlines_if_long_form = true;
+        ps.base = 16;
+
+        print(*b, "\nBreakpoint hit. Context:\n%\n", stack.*);
     }
+
+    buffer: [32] u32;
+    do_stack_trace(buffer);
+
+    append_formatted_stack_trace(*b, buffer);
+
+    write_builder(*b);
 
     bluescreen();
 } @InterruptRoutine
@@ -546,6 +557,21 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
     }
 } @InterruptRoutineWithErrorCode
 
+#program_export
+floating_point_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
+    mxcsr: Mxcsr;
+    pmxcsr := *mxcsr;
+
+    #asm {
+        stmxcsr [pmxcsr];
+    }
+
+    push_context {
+        core := get_current_core();
+        log("Floating point exception: % (thread %)", mxcsr, core.scheduler.current_task.id);
+    }
+} @InterruptRoutine
+
 
 
 initialize_uacpi :: () {
@@ -574,7 +600,7 @@ initialize_uacpi :: () {
     uacpi := *global.uacpi_state;
     uacpi.work_thread = create_task(uacpi.work_thread_proc, name="uACPI Worker");
 
-    // Note: according to uACPI kernel_api.h, work items should be done on CPU0 due to firmware bugs.
+    // According to uACPI kernel_api.h, work items should be done on CPU0 due to firmware bugs.
     cpu0 := *global.processor_cores[0];
     put_task_on_core(uacpi.work_thread, cpu0);
 
@@ -933,7 +959,7 @@ uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
 
 #program_export
 uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call {
-    lock := cast(*Spinlock)handle;
+    lock := cast(*Spinlock(.IRQ))handle;
     acquire(lock);
 
     return 0;
@@ -941,7 +967,7 @@ uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call 
 
 #program_export
 uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #c_call {
-    lock := cast(*Spinlock)handle;
+    lock := cast(*Spinlock(.IRQ))handle;
     release(lock);
 }
 

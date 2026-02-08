@@ -1232,7 +1232,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         }
 
         log("Found NSID %.", nvme.nsid);
-        // free_4k_page(nsid_page);
+        free_4k_page(nsid_page);
     }
 
     {

@@ -170,7 +170,6 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
         // Represents the stack layout used by the context_switch routine written in assembly.
         irq_disable_count: s64;
         interrupt_context_active: s64;
-
         registers: General_Registers;
         flags: X64_Flags;
         return_address: *void;
@@ -197,7 +196,6 @@ schedule_tasks :: () {
 
     {
         count := cpu_local_read("preempt_disable_count");
-
         assert(count == 0, "Context switch with preemption disabled is not allowed.");
     }
 

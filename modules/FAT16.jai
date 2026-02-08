@@ -580,7 +580,10 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
     disk    := handle.disk_image;
 
     directory_entries_per_cluster := disk.bytes_per_cluster / 0x20;
-    next_cluster := handle.cluster - 2;
+
+    next_cluster := handle.cluster;
+    // If it's the root directory (handle.cluster = 0) then we don't actually use next_cluster, because root directory clusters are implicit and contiguous. But this 'if' prevents AOC from triggering in that case.
+    if next_cluster != 0 next_cluster -= 2;
 
     directory_data: *Fat16_Short_Entry;
     if is_root directory_data = disk.root_directory_area;

@@ -1,62 +1,4 @@
 
-#import "Basic";
-
-#import "Machine_X64";
-using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
-#import "Hash_Table";
-#import "String";
-#import "Random";
-#import "Hash";
-
-#import "debug_info";
-#import "executable_formats";
-
-#import "Bucket_Array";
-
-array_add :: bucket_array_add;
-array_add :: (array: *Bucket_Array) -> *array.type {
-    loc, item := bucket_array_add(array, .{});
-    return item;
-}
-
-#import "Bitfield"(true);
-
-set          :: bitfield_set;
-get          :: bitfield_get;
-set_bit      :: bitfield_set_bit;
-get_bit      :: bitfield_get_bit;
-clear_bit    :: bitfield_clear_bit;
-set_in_place :: bitfield_set_in_place;
-get_in_place :: bitfield_get_in_place;
-
-#import "Ring_Buffer";
-#import "ASN1";
-#import "Aes";
-#import "Jai_Crypto";
-
-get_calendar_time :: () -> Calendar_Time {
-    apollo := get_monotonic_time();
-    calendar := native_apollo_to_calendar(apollo);
-    return calendar;
-}
-
-#import,file "../modules/FAT16.jai"(get_calendar_time);
-
-Curve25519 :: #import "Curve25519";
-
-#load "../boot_data.jai";
-
-#load "apic.jai";
-#load "x64.jai";
-#load "network.jai";
-#load "pci_express.jai";
-#load "multitasking.jai";
-#load "time.jai";
-#load "file_system.jai";
-
-TRACE_INCLUDE_RUNTIME_CODE :: true;
-#load "trace.jai";
-
 X64_Core :: struct {
     task_state_segment: Tss_With_Iopb #align 0x80;
 
@@ -79,8 +21,8 @@ X64_Core :: struct {
     mcs_node: MCS_Node;
 }
 
-// This can't be in global, or else, due to the size of the IOPB, the compiler will
-// reserve 8Mb in the executable, all of which is zero. Todo: is there really a reason not to dynamically allocate this?
+// This can't be in Kernel_Globals, or else, due to the size of the IOPB, the compiler will
+// reserve 8Mb in the executable, all of which is zero.
 space_for_processor_cores: [1024] X64_Core;
 
 // For the same reason this struct shouldn't have default values. Todo: move the IOPB.
@@ -101,7 +43,7 @@ Kernel_Globals :: struct {
 
     small_objects: Small_Objects_Allocator;
 
-    guarded_memory: struct {    // Temporary to help debugging.
+    guarded_memory: struct { // Temporary to help debugging.
         allocations: List_Queue(Guarded_Allocation);
 
         spinlock: Spinlock;
@@ -177,6 +119,14 @@ kernel_entry :: () #no_context {
 
     set_stack_trace_sentinel();
 
+    set_jai_runtime_support_callbacks();
+
+    // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
+    global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
+
+    // Used for AP bootstrap.
+    global.large_pages[0].state = .RESERVED;
+
     {
         // Initialize cpu-local data really early, because it's useful to have e.g. core ID and interrupt_context_active available.
         core := space_for_processor_cores.data;
@@ -191,17 +141,8 @@ kernel_entry :: () #no_context {
             wrgsbase core;
         }
 
-        irq_disable();
+        core.irq_disable_count = 1; // Interrupt requests have been disabled by the bootloader, CPU local state needs to reflect that.
     }
-
-    write_string_callback = kernel_write_string;
-    set_default_context_callbacks();
-
-    // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
-    global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
-
-    // Used for AP bootstrap.
-    global.large_pages[0].state = .RESERVED;
 
     memory_map_index: int;
     for* page, page_index: global.large_pages {
@@ -257,15 +198,13 @@ kernel_entry :: () #no_context {
         }
     }
 
-    // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
-    init_tracing();
-    // global.trace_state.tracing_enabled = false;
-
     if global.physical_block_allocator.base_address == 0 {
         write_string("Could not find enough memory for the kernel...\n");
         while true #asm { cli; hlt; }
     }
 
+    // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
+    init_tracing();
 
     push_context {
         using global.framebuffer;
@@ -312,6 +251,9 @@ kernel_entry :: () #no_context {
         {
             temporary_buffer := talloc(0x8000);
             uacpi_setup_early_table_access(temporary_buffer, 0x8000);
+
+            status := uacpi_table_fadt(*global.fadt);
+            assert(status == .OK);
         }
 
         initialize_apic();
@@ -365,7 +307,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        user_mode_stress_test();
+        // #asm { int3; }
 
         simple_create_thread(() {
             sleep(10, .seconds);
@@ -509,160 +451,10 @@ END;
 
 
 
-get_rbp :: () -> u64 #foreign Assembly;
+set_jai_runtime_support_callbacks :: () #no_context {
+    write_string_callback = kernel_write_string;
 
-Call_Stack_Frame :: struct {
-    rbp: *Call_Stack_Frame;
-    return_address: u64;
-}
-
-set_stack_trace_sentinel :: inline () #no_context {
-    // We rely on this being inlined so it sees the correct rbp.
-    stack_frame := cast(*Call_Stack_Frame) get_rbp();
-    stack_frame.rbp = null;
-}
-
-do_stack_trace :: (output: [] u32) #no_context {
-    stack_frame := cast(*Call_Stack_Frame) get_rbp();
-
-    for 0..output.count-1 {
-        if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
-            // The stack frame is not in the kernel address space. We can't read it.
-            break;
-        }
-
-        if !stack_frame.rbp {
-            // Found the stack trace sentinel.
-            break;
-        }
-
-        if stack_frame.return_address >> 24 != 0xffff_ffff_80 {
-            // The return address doesn't point into kernel code, unless the kernel executable got really big.
-            break;
-        }
-
-        output[it] = cast,trunc(u32) stack_frame.return_address;
-        stack_frame = stack_frame.rbp;
-    }
-}
-
-append_formatted_stack_trace :: (builder: *String_Builder, trace: []u32) {
-    for trace {
-        if it == 0 break;
-
-        address := cast(u64)it + 0xffff_ffff_0000_0000;
-
-        proc_name, file, line := get_debug_info_for_address(address);
-
-        print(builder, "%. [%] %\n", it_index, formatInt(address, base=16), proc_name);
-
-        if file {
-            print(builder, "   at %:%\n", file, line);
-        }
-    }
-}
-
-read_debug_info :: () {
-    log_category("DWARF");
-
-    success, elf := parse_elf(cast(string)global.kernel_elf, "kernel");
-
-    if !success {
-        log_error("Failed to parse elf.");
-        return;
-    }
-
-    if !elf.debug_info_section || !elf.debug_abbrev_section || !elf.debug_line_section {
-        log_error("Failed to find debug sections in elf.");
-        return;
-    }
-
-    info   := get_section_data(elf, elf.debug_info_section);
-    abbrev := get_section_data(elf, elf.debug_abbrev_section);
-    line   := get_section_data(elf, elf.debug_line_section);
-    str    := get_section_data(elf, elf.debug_str_section);
-
-    success &= apply_relocations(elf, elf.debug_line_section_index, line);
-    success &= apply_relocations(elf, elf.debug_info_section_index, info);
-
-    if !success {
-        log_error("Failed to apply relocations.");
-        return;
-    }
-
-    {
-        // For some reason, parsing dwarf debug info uses a huge amount of memory.
-        pool := *global.debug_info_memory_pool;
-        pool.memblock_size  = 0x10_0000;
-        pool.oversized_size =  0x1_0000;
-
-        set_allocators(pool);
-        push_allocator(.{pool_allocator_proc, pool});
-
-        global.debug_info, success = parse_dwarf_debug_info(info, abbrev, line, str);
-    }
-
-    if !success {
-        log_error("Failed to parse debug info.");
-        return;
-    }
-}
-
-get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string, line: int {
-    // Copypasted from tools/tracer.jai
-
-    for cu: global.debug_info.compilation_units {
-        if address < cu.low_pc || address >= cu.high_pc continue;
-
-        proc_name: string;
-
-        for sp: cu.subprograms {
-            if address < sp.low_pc || address >= sp.high_pc continue;
-
-            proc_name = sp.name;
-            break;
-        }
-
-        for seq: cu.line_info.sequences {
-            first := seq.addresses[0];
-            last  := seq.addresses[seq.addresses.count-1];
-
-            if address < first || address >= last continue;
-
-            for< seq_addr: seq.addresses {
-                if seq_addr > address continue;
-
-                mapping   := seq.mappings[it_index];
-                file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
-
-                return proc_name, file_name, mapping.line;
-            }
-        }
-    }
-
-    return "(no debug info)", "", 0;
-}
-
-
-
-#program_export
-floating_point_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
-    mxcsr: Mxcsr;
-    pmxcsr := *mxcsr;
-
-    #asm {
-        stmxcsr [pmxcsr];
-    }
-
-    push_context {
-        core := get_current_core();
-        log("Floating point exception: % (thread %)", mxcsr, core.scheduler.current_task.id);
-    }
-} @InterruptRoutine
-
-set_default_context_callbacks :: () #no_context {
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
-
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         builder: String_Builder;
 
@@ -884,6 +676,142 @@ bluescreen :: () #no_context {
         cli;
         hlt;
     }
+}
+
+
+
+get_rbp :: () -> u64 #foreign Assembly;
+
+Call_Stack_Frame :: struct {
+    rbp: *Call_Stack_Frame;
+    return_address: u64;
+}
+
+set_stack_trace_sentinel :: inline () #no_context {
+    // We rely on this being inlined so it sees the correct rbp.
+    stack_frame := cast(*Call_Stack_Frame) get_rbp();
+    stack_frame.rbp = null;
+}
+
+do_stack_trace :: (output: [] u32) #no_context {
+    stack_frame := cast(*Call_Stack_Frame) get_rbp();
+
+    for 0..output.count-1 {
+        if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
+            // The stack frame is not in the kernel address space. We can't read it.
+            break;
+        }
+
+        if !stack_frame.rbp {
+            // Found the stack trace sentinel.
+            break;
+        }
+
+        if stack_frame.return_address >> 24 != 0xffff_ffff_80 {
+            // The return address doesn't point into kernel code, unless the kernel executable got really big.
+            break;
+        }
+
+        output[it] = cast,trunc(u32) stack_frame.return_address;
+        stack_frame = stack_frame.rbp;
+    }
+}
+
+append_formatted_stack_trace :: (builder: *String_Builder, trace: []u32) {
+    for trace {
+        if it == 0 break;
+
+        address := cast(u64)it + 0xffff_ffff_0000_0000;
+
+        proc_name, file, line := get_debug_info_for_address(address);
+
+        print(builder, "%. [%] %\n", it_index, formatInt(address, base=16), proc_name);
+
+        if file {
+            print(builder, "   at %:%\n", file, line);
+        }
+    }
+}
+
+read_debug_info :: () {
+    log_category("DWARF");
+
+    success, elf := parse_elf(cast(string)global.kernel_elf, "kernel");
+
+    if !success {
+        log_error("Failed to parse elf.");
+        return;
+    }
+
+    if !elf.debug_info_section || !elf.debug_abbrev_section || !elf.debug_line_section {
+        log_error("Failed to find debug sections in elf.");
+        return;
+    }
+
+    info   := get_section_data(elf, elf.debug_info_section);
+    abbrev := get_section_data(elf, elf.debug_abbrev_section);
+    line   := get_section_data(elf, elf.debug_line_section);
+    str    := get_section_data(elf, elf.debug_str_section);
+
+    success &= apply_relocations(elf, elf.debug_line_section_index, line);
+    success &= apply_relocations(elf, elf.debug_info_section_index, info);
+
+    if !success {
+        log_error("Failed to apply relocations.");
+        return;
+    }
+
+    {
+        // For some reason, parsing dwarf debug info uses a huge amount of memory.
+        pool := *global.debug_info_memory_pool;
+        pool.memblock_size  = 0x10_0000;
+        pool.oversized_size =  0x1_0000;
+
+        set_allocators(pool);
+        push_allocator(.{pool_allocator_proc, pool});
+
+        global.debug_info, success = parse_dwarf_debug_info(info, abbrev, line, str);
+    }
+
+    if !success {
+        log_error("Failed to parse debug info.");
+        return;
+    }
+}
+
+get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string, line: int {
+    // Copypasted from tools/tracer.jai
+
+    for cu: global.debug_info.compilation_units {
+        if address < cu.low_pc || address >= cu.high_pc continue;
+
+        proc_name: string;
+
+        for sp: cu.subprograms {
+            if address < sp.low_pc || address >= sp.high_pc continue;
+
+            proc_name = sp.name;
+            break;
+        }
+
+        for seq: cu.line_info.sequences {
+            first := seq.addresses[0];
+            last  := seq.addresses[seq.addresses.count-1];
+
+            if address < first || address >= last continue;
+
+            for< seq_addr: seq.addresses {
+                if seq_addr > address continue;
+
+                mapping   := seq.mappings[it_index];
+                file_name := get_filename_for_file_id(cu.line_info, mapping.file_id);
+
+                return proc_name, file_name, mapping.line;
+            }
+        }
+    }
+
+    return "(no debug info)", "", 0;
 }
 
 
@@ -1622,9 +1550,10 @@ free_small_object :: (address: *void) {
         // Insert the free slot into the page-local freelist.
         (.*) cast(*s16) address = header.freelist;
 
-        object_offset := cast(s16)(address & (PAGE_SIZE-1));
+        object_offset := cast(s64) address & (PAGE_SIZE-1);
         object_index  := (object_offset - header.objects_size) / header.objects_size;
-        header.freelist = object_index;
+
+        header.freelist = cast(s16)object_index;
     }
 
     release(*bucket.lock);
@@ -2515,3 +2444,62 @@ fill_random :: (buffer: []u8) {
         buffer[buffer.count-remainder + it] = xx random_get();
     }
 }
+
+
+
+#import "Basic";
+#import "Machine_X64";
+using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
+#import "Hash_Table";
+#import "String";
+#import "Random";
+#import "Hash";
+
+#import "debug_info";
+#import "executable_formats";
+
+#import "Bucket_Array";
+
+array_add :: bucket_array_add;
+array_add :: (array: *Bucket_Array) -> *array.type {
+    loc, item := bucket_array_add(array, .{});
+    return item;
+}
+
+#import "Bitfield"(true);
+
+set          :: bitfield_set;
+get          :: bitfield_get;
+set_bit      :: bitfield_set_bit;
+get_bit      :: bitfield_get_bit;
+clear_bit    :: bitfield_clear_bit;
+set_in_place :: bitfield_set_in_place;
+get_in_place :: bitfield_get_in_place;
+
+#import "Ring_Buffer";
+#import "ASN1";
+#import "Aes";
+#import "Jai_Crypto";
+
+get_calendar_time :: () -> Calendar_Time {
+    apollo := get_monotonic_time();
+    calendar := native_apollo_to_calendar(apollo);
+    return calendar;
+}
+
+#import,file "../modules/FAT16.jai"(get_calendar_time);
+
+Curve25519 :: #import "Curve25519";
+
+#load "../boot_data.jai";
+
+#load "apic.jai";
+#load "x64.jai";
+#load "network.jai";
+#load "pci_express.jai";
+#load "multitasking.jai";
+#load "time.jai";
+#load "file_system.jai";
+
+TRACE_INCLUDE_RUNTIME_CODE :: true;
+#load "trace.jai";
