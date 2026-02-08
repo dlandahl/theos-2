@@ -182,7 +182,7 @@ CH  :: (x: $T, y: T, z: T) -> T { return (x & y) ^ ( (~x) & z); }
 MAJ :: (x: $T, y: T, z: T) -> T { return (x & y) ^ (x & z) ^ (y & z); }
 
 
-shabase :: ($T: Type, data: string, initialization_vector: [8]T) -> [8]T {
+shabase :: ($T: Type, data: string, initialization_vector: [8]T) -> [8]T #no_aoc {
     #if T == u32 {
         // Config for SHA256 and SHA224.
         WORD :: 32;

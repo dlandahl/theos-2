@@ -29,14 +29,14 @@ Usage example:
 
 #scope_export
 
-bitfield_set :: inline (bitfield: *$B, flag: $F, value: s64, $loc := #caller_location, $call := #caller_code) #modify {
+bitfield_set :: (bitfield: *$B, flag: $F, value: s64, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     #if ENABLE_RUNTIME_ERROR_CHECKS {
         max_value := bit_mask >> bit_offset;
-        assert(value <= max_value, "The bitfield slot does not have enough bits to represent the value %. It can maximally represent %.", value, max_value);
+        assert(cast,no_check(u64)value <= cast,no_check(u64)max_value, "The bitfield slot does not have enough bits to represent the value %. It can maximally represent %.", value, max_value);
     }
 
     // Don't dereference the pointer twice to mask out and set the new value.
@@ -47,7 +47,7 @@ bitfield_set :: inline (bitfield: *$B, flag: $F, value: s64, $loc := #caller_loc
     bitfield.* = temp;
 }
 
-bitfield_get :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #caller_location, $call := #caller_code) -> R #modify {
+bitfield_get :: (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #caller_location, $call := #caller_code) -> R #modify {
     result := handle_as(*B, *F);
 
     // Todo: This doesn't work with auto-dereference.
@@ -72,7 +72,7 @@ bitfield_get :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #ca
  * Manipulate single bits using bools.
  */
 
-bitfield_set_bit :: inline (bitfield: *$B, flag: $F, value: bool, $loc := #caller_location, $call := #caller_code) #modify {
+bitfield_set_bit :: (bitfield: *$B, flag: $F, value: bool, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
     if value {
@@ -82,7 +82,7 @@ bitfield_set_bit :: inline (bitfield: *$B, flag: $F, value: bool, $loc := #calle
     }
 }
 
-bitfield_set_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
+bitfield_set_bit :: (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
     bit_mask :: #run get_single_bit_mask(B, loc, call);
@@ -90,7 +90,7 @@ bitfield_set_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $
     bitfield.* |= bit_mask;
 }
 
-bitfield_clear_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
+bitfield_clear_bit :: (bitfield: *$B, flag: $F, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
     bit_mask :: cast(B) #run get_single_bit_mask(B, loc, call);
@@ -98,7 +98,7 @@ bitfield_clear_bit :: inline (bitfield: *$B, flag: $F, $loc := #caller_location,
     bitfield.* &= ~bit_mask;
 }
 
-bitfield_get_bit :: inline (bitfield: $B, flag: $F, $loc := #caller_location, $call := #caller_code) -> bool #modify {
+bitfield_get_bit :: (bitfield: $B, flag: $F, $loc := #caller_location, $call := #caller_code) -> bool #modify {
     return handle_as(*B, *F);
 } {
     bit_mask :: #run get_single_bit_mask(B, loc, call);
@@ -113,7 +113,7 @@ bitfield_get_bit :: inline (bitfield: $B, flag: $F, $loc := #caller_location, $c
  * Todo: Really, this is a property of the specific member. So maybe we can do it with a note, if notes are allowed on enum members in the future.
  */
 
-bitfield_set_in_place :: inline (bitfield: *$B, flag: $F, value: $V, $loc := #caller_location, $call := #caller_code) #modify {
+bitfield_set_in_place :: (bitfield: *$B, flag: $F, value: $V, $loc := #caller_location, $call := #caller_code) #modify {
     return handle_as(*B, *F);
 } {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
@@ -130,7 +130,7 @@ bitfield_set_in_place :: inline (bitfield: *$B, flag: $F, value: $V, $loc := #ca
     bitfield.* = temp;
 }
 
-bitfield_get_in_place :: inline (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #caller_location, $call := #caller_code) -> R #modify {
+bitfield_get_in_place :: (bitfield: $B, flag: $F, return_type: $R = 0, $loc := #caller_location, $call := #caller_code) -> R #modify {
     result := handle_as(*B, *F);
 
     // Todo: This doesn't support auto-dereference.

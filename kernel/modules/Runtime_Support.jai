@@ -382,7 +382,6 @@ debug_break :: () #no_context {
     if #compile_time {
         compile_time_debug_break();
     } else {
-        push_context { runtime_support_assertion_failed(.{}, "Debug Break."); }
         // Break into the debugger, or stop the running process.
         #if OS == .PS5 {
             #asm { int 0x41; }

@@ -30,10 +30,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         TOP_2_GB : u64 : 0xffff_ffff_8000_0000;
 
+        // Memory for the loaded kernel executable and kernel stack.
         KERNEL_EXE_LARGE_PAGES :: 8;
         kernel_base: *void;
 
-        // Memory for the loaded kernel executable and kernel stack.
         EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x20_0000 * (KERNEL_EXE_LARGE_PAGES+1), *kernel_base));
         // Aligning this to 2MB is necessary because we map it as large pages, but this potentially wastes a lot of memory.
         // Maybe we can use one of the other UEFI allocators.
@@ -213,9 +213,19 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
                 pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
-                // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
                 for 0..KERNEL_EXE_LARGE_PAGES-1 {
                     address := cast(u64) kernel_base + cast(u64) it * 0x20_0000;
+
+                    {
+                        stack_base  := cast(u64) kernel_base + KERNEL_EXE_LARGE_PAGES * 0x20_0000;
+
+                        if address == stack_base - 0x40_0000 {
+                            display("Creating kernel main thread stack guard... ", address);
+                            pd[it] = 0;
+                            continue;
+                        }
+                    }
+
                     pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 }
 

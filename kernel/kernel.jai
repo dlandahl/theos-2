@@ -108,6 +108,8 @@ Kernel_Globals :: struct {
     nvme: Nvme_Controller;
 
     pci_devices: [..] Pci_Device;
+
+    bluescreen_occurred: bool;
 }
 
 global: Kernel_Globals;
@@ -307,8 +309,6 @@ kernel_entry :: () #no_context {
             }
         }
 
-        // #asm { int3; }
-
         simple_create_thread(() {
             sleep(10, .seconds);
 
@@ -316,6 +316,19 @@ kernel_entry :: () #no_context {
             trace_event_count := write_trace_buffers();
             log("=== Wrote % trace events. ===", trace_event_count);
         });
+
+        tree := create_maple_tree(0, 100);
+
+        maple_add(*tree, 12, 18,  null);
+        maple_add(*tree, 5,  6,   null);
+        maple_add(*tree, 7,  7,   null);
+        maple_add(*tree, 8,  9,   null);
+        maple_add(*tree, 19, 100, null);
+
+        entry_count := get(tree.meta, .entry_count);
+        assert(entry_count >= 1);
+
+        visualize_maple_tree_node(*tree);
 
         while true {
             schedule_tasks();
@@ -363,7 +376,7 @@ disk_test :: () {
 }
 
 network_test :: () -> string {
-    USE_DNS :: true;
+    USE_DNS :: false;
 
     log_category("TLS Test");
     log("Starting.");
@@ -420,14 +433,13 @@ network_test :: () -> string {
 
     builder: String_Builder;
 
-    for 1..4 {
+    for 1..2 {
         response := tls_receive_application_data(*tls, seconds_to_apollo(5));
         append(*builder, response);
 
         log("Got HTTPS response: %", response);
     }
 
-    log(builder_to_string(*builder));
     // Todo: TLS Close Notify.
 
     tcp_close(connection);
@@ -463,7 +475,7 @@ set_jai_runtime_support_callbacks :: () #no_context {
             append(*builder, "Message: ");
             append(*builder, message);
         }
-        append(*builder, "\n");
+        append(*builder, "\n\n");
 
         buffer: [32] u32;
         do_stack_trace(buffer);
@@ -582,6 +594,8 @@ init_processor_core :: () {
         tss_desc.base_address_3 = cast,trunc(u32, tss_address >> 32);
         tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
 
+        core.task_state_segment.ist[0] = allocate_large_page() + DIRECT_MAPPING_BASE;
+
         using Gdt_Entry;
 
         core.global_descriptor_table = Global_Descriptor_Table.{
@@ -672,6 +686,8 @@ bluescreen :: () #no_context {
         }
     }
 
+    global.bluescreen_occurred = true;
+
     while true #asm {
         cli;
         hlt;
@@ -680,7 +696,7 @@ bluescreen :: () #no_context {
 
 
 
-get_rbp :: () -> u64 #foreign Assembly;
+get_rbp :: () -> *void #foreign Assembly;
 
 Call_Stack_Frame :: struct {
     rbp: *Call_Stack_Frame;
@@ -693,8 +709,9 @@ set_stack_trace_sentinel :: inline () #no_context {
     stack_frame.rbp = null;
 }
 
-do_stack_trace :: (output: [] u32) #no_context {
-    stack_frame := cast(*Call_Stack_Frame) get_rbp();
+do_stack_trace :: (output: [] u32, rbp := null) #no_context {
+
+    stack_frame := cast(*Call_Stack_Frame) ifx rbp else get_rbp();
 
     for 0..output.count-1 {
         if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
@@ -717,11 +734,16 @@ do_stack_trace :: (output: [] u32) #no_context {
     }
 }
 
-append_formatted_stack_trace :: (builder: *String_Builder, trace: []u32) {
+append_formatted_stack_trace :: (builder: *String_Builder, trace: []u32, use_debug_info := true) {
     for trace {
         if it == 0 break;
 
         address := cast(u64)it + 0xffff_ffff_0000_0000;
+
+        if !use_debug_info {
+            print(builder, "%. [%]\n", it_index, formatInt(address, base=16));
+            continue;
+        }
 
         proc_name, file, line := get_debug_info_for_address(address);
 
@@ -1563,8 +1585,8 @@ free_small_object :: (address: *void) {
 
 Maple_Tree_Node :: struct {
     Meta :: enum s64 {
-        entry_count    :: 3;
-        unused         :: 4;
+        entry_count    :: 4; // Counts both free and used slots, so all trees always have at least an entry_count of 1. Todo: If we make this a 0s based value (where 0 means 1 entry), then we only need three bits for the current 8 entry version.
+        unused         :: 3;
         parent_address :: 57;
     }
 
@@ -1586,11 +1608,6 @@ Maple_Entry :: enum s64 {
     content :: 2;
     unused  :: 5; // Could put search marks here.
 
-    // We could save a lot of bits by storing nodes in an array that can be accessed by index, and then only storing the index in nonleaf nodes. But just making it work for now.
-    // It would have to be a specially implemented array that just uses large pages, because I don't want this tree to have to go to the physical block allocator to get more memory,
-    // because that would prevent us from:
-    //   A) Using this as part of a memory debug mode where all block-allocator allocations are guarded with virtual memory guard pages by default.
-    //   B) Using this when block allocator physical memory runs out / is too fragmented to support a large allocation. Don't really care about this case that much.
     address :: 57;
 }
 
@@ -1642,6 +1659,8 @@ each_range :: (node: *Maple_Tree_Node_Expanded, body: Code, flags: For_Flags) #e
 maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, value: *void) {
     assert(range_min <= range_max);
 
+    visualize_maple_tree_node(node);
+
     for :each_range node {
         // Find the child node or entry that currently contains this range.
 
@@ -1650,6 +1669,8 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
             continue;
         }
 
+        log("\nAdding %-%, looking at %-%", range_min, range_max, it_min, it_max);
+
         // If we get here we know that at least the left half of the range we want overlaps with this entry.
         // But it might overlap multiple entries, which in my version of the tree is not allowed. e.g.
         //
@@ -1657,13 +1678,14 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
         // Entries: |  |  | it |   |     |   |
         // it_max:             ^
         //
-        assert(it_max >= range_max);
+        assert(it_max > range_max-1, "Cannot add range %-% to the tree. It overlaps with range %-%.", range_min, range_max, it_min, it_max);
 
         // This entry should be free or a child node.
         content := cast(Maple_Entry_Content) get(it.*, .content);
-        assert(content != .USER_VALUE);
+        assert(content != .USER_VALUE, "Cannot add range %-% to the tree, it is already allocated (%-%).", range_min, range_max, it_min, it_max);
 
         if content == .CHILD_NODE {
+            assert(false);
             // If it's a child node, recurse into it.
             child_address := get_in_place(it.*, .address);
 
@@ -1694,8 +1716,7 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
         entry_count := get(node.meta, .entry_count);
         new_entry_count := entry_count + new_free_entries_needed;
 
-        // This would split the node. Todo.
-        assert(new_entry_count <= 8);
+        assert(new_entry_count <= 8, "Todo: Maple Tree node must be split.");
 
         new_node := New(Maple_Tree_Node,, global.small_objects);
 
@@ -1725,17 +1746,94 @@ maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, v
             // We need a free entry after the one we've added.
 
             new_node.entries[it_index + new_free_entries_needed] = 0;
-            new_node.pivots [it_index + new_free_entries_needed - 1] = range_max;
+            new_node.pivots [it_index + new_free_entries_needed - 1] = range_max + 1;
         }
 
         // Copy the entries after the new ones from the old node.
-        for it_index..entry_count {
-            new_node.entries;
+        for it_index..entry_count-1 {
+            index_in_new_node := it + new_free_entries_needed;
+            new_node.entries[index_in_new_node] = node.entries[it];
+
+            if index_in_new_node < 7 {
+                new_node.pivots[index_in_new_node] = node.pivots[it];
+            }
         }
+
+        set(*new_node.meta, .entry_count, new_entry_count);
+        node.node = new_node;
+        return;
     }
 
-    // If we get here, the range is not represented in the tree at all. This is a bug in the tree code.
-    assert(false);
+    assert(false, "The requested range (%-%) is not represented in the maple tree.", range_min, range_max);
+}
+
+maple_remove :: (node: *Maple_Tree_Node_Expanded, range_min: s64) {
+    visualize_maple_tree_node(node);
+
+    for :each_range node {
+        if it_max < range_min {
+            // The wanted range is entirely to the right of this entry.
+            continue;
+        }
+
+        log("\nRemoving %, looking at %-%", range_min, it_min, it_max);
+
+        assert(it_min == range_min, "The value % is not the start of a range stored in the tree. It overlaps %-%.", range_min, it_min, it_max);
+
+        content := cast(Maple_Entry_Content) get(it.*, .content);
+        assert(content != .FREE, "Trying to remove an unallocated range (%-%) from the tree.", it_min, it_max);
+
+        if content == .CHILD_NODE {
+            assert(false);
+            // Recurse into child node.
+            child_address := get_in_place(it.*, .address);
+
+            child: Maple_Tree_Node_Expanded;
+            child.node = cast(*Maple_Tree_Node) child_address;
+            child.implicit_min = it_min;
+            child.implicit_max = it_max;
+
+            maple_remove(*child, range_min);
+            return;
+        }
+
+        // We found a value we want to remove. We may need to coalesce adjacent free ranges.
+        // Todo: Think about how to coalesce ranges across multiple nodes in the tree.
+
+    }
+}
+
+visualize_maple_tree_node :: (node: *Maple_Tree_Node_Expanded) {
+    b: String_Builder;
+
+    print(*b, "[%] ", node.implicit_min);
+
+    entry_count := get(node.meta, .entry_count);
+    assert(entry_count >= 1);
+
+    for 0..entry_count-1 {
+
+        entry := node.entries[it];
+        used := cast(Maple_Entry_Content) get(entry, .content) == .USER_VALUE;
+
+        pivot := ifx it == entry_count-1 then node.implicit_max else node.pivots[it];
+
+        print(*b, "(%) [%] ", ifx used then "X" else " ", pivot);
+    }
+
+    log(builder_to_string(*b));
+}
+
+create_maple_tree :: (min: s64, max: s64) -> Maple_Tree_Node_Expanded {
+    root := New(Maple_Tree_Node,, global.small_objects);
+    set(*root.meta, .entry_count, 1);
+
+    expanded: Maple_Tree_Node_Expanded;
+    expanded.node = root;
+    expanded.implicit_min = min;
+    expanded.implicit_max = max;
+
+    return expanded;
 }
 
 
@@ -2019,7 +2117,8 @@ acquire :: (lock: *Spinlock) #no_context {
         interrupt_context_active := cpu_local_read("interrupt_context_active");
 
         if interrupt_context_active > 0 && lock.lock_type != .IRQ {
-            push_context { assert(false, "Non-IRQ lock used in interrupt context."); }
+            // Todo: This needs to be clarified. Are software (non-IRQ) interrupts allowed to use non-IRQ spinlocks? Spinlocks do nothing to prevent software interrupts, but it needs to be certain that this doesn't cause the lock to be reentered on the same core.
+            // push_context { assert(false, "Non-IRQ lock used in interrupt context."); }
         }
     }
 
@@ -2290,6 +2389,12 @@ draw_text :: (text: string) #no_context {
             // Inefficient when printing strings with many newlines.
             memcpy(framebuffer.buffer + target, framebuffer.buffer + source, count * size_of(u32));
 
+            if global.bluescreen_occurred {
+                for 0..count-1 {
+                    framebuffer.buffer[target + it] |= 0xff;
+                }
+            }
+
             cursor_y -= 1;
             screen_y -= line_height;
         }
@@ -2303,12 +2408,15 @@ draw_text :: (text: string) #no_context {
                 pixel_in_font   := source_top_left + char_x + char_y * font.width;
                 pixel_on_screen := target_top_left + char_x + char_y * framebuffer.stride;
 
-                c := cast(u32) font.data[pixel_in_font];
+                value := cast(u32) font.data[pixel_in_font];
+
+                pixel_color := value | (value << 8) | (value << 16) | (value << 24);
+                if global.bluescreen_occurred pixel_color |= 0xff;
 
                 red   := cast(int) (0xa0 * (1.0 / framebuffer.y_resolution) * (screen_y + char_y));
                 green := cast(int) (0xa0 * (1.0 / framebuffer.x_resolution) * (screen_x + char_x));
 
-                framebuffer.buffer[pixel_on_screen]  = (c) | (c << 8) | (c << 16) | (c << 24);
+                framebuffer.buffer[pixel_on_screen] = pixel_color;
             }
         }
 

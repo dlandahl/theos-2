@@ -250,10 +250,10 @@ schedule_tasks :: () {
     current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
     current.on_core.task_state_segment.rsp[0] = next.kernel_stack;
 
+    trace(.context_switch, current.id, next.id);
+
     scheduler.last_task_switch_timestamp = time_now;
     scheduler.current_task = next;
-
-    trace(.context_switch, current.id, next.id);
 
     context_switch(current, next);
 

@@ -139,7 +139,7 @@ initialize_apic :: () {
     register_interrupt_gate(isr__debug_exception,          1,  true);
     register_interrupt_gate(isr__breakpoint_handler,       3,  true);
     register_interrupt_gate(isr__general_protection_fault, 13, true);
-    register_interrupt_gate(isr__page_fault,               14, true);
+    register_interrupt_gate(isr__page_fault,               14, true, ist = 1);
     register_interrupt_gate(isr__floating_point_exception, 19, true);
 
     //
@@ -435,7 +435,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
         ps.use_newlines_if_long_form = true;
         ps.base = 16;
 
-        print(*b, "\nBreakpoint hit. Context:\n%\n", stack.*);
+        print(*b, "\nBreakpoint hit. Context:\n%\n\n", stack.*);
     }
 
     buffer: [32] u32;
@@ -487,6 +487,14 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     }
 
 
+    buffer: [32] u32;
+    do_stack_trace(buffer, cast(*void) stack.rbp);
+
+    append_formatted_stack_trace(*b, buffer);
+
+    write_builder(*b);
+
+
     acquire(*global.guarded_memory.spinlock);
 
     g := find_guarded_memory(cast(*void) cr2);
@@ -497,12 +505,6 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     }
 
     release(*global.guarded_memory.spinlock);
-
-
-    buffer: [32] u32;
-    do_stack_trace(buffer);
-
-    append_formatted_stack_trace(*b, buffer);
 
     write_builder(*b);
 

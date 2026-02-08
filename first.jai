@@ -214,7 +214,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
 
-        // options.arithmetic_overflow_check = .FATAL;
+        options.arithmetic_overflow_check = .FATAL;
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");
