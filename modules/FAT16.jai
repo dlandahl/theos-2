@@ -148,7 +148,7 @@ fat16_create_disk_image :: (size_bytes: int, set_oem_name := "JaiFAT16", set_vol
 
     {
         // Setup the boot sector.
-        using bootsector := cast(*Fat16_Bootsector)all_file_data.data;
+        using bootsector := cast(*Fat16_Bootsector) all_file_data.data;
 
         jmp = .[235, 60, 144];
         memcpy(*oem_name, set_oem_name.data, 8);
@@ -198,7 +198,7 @@ fat16_parse_disk_image :: (file_data: string) -> Fat16_Disk_Image {
     bootsector = cast(*Fat16_Bootsector) file_data.data;
     using bootsector;
 
-    bytes_per_cluster = cast(int)bytes_per_sector * sectors_per_cluster;
+    bytes_per_cluster = cast(int) bytes_per_sector * sectors_per_cluster;
 
     // Find the file allocation table.
     fat_offset_bytes := reserved_sectors * bytes_per_sector;
@@ -238,9 +238,6 @@ fat16_change_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> bool
     while remainder {
         _, left:, remainder = split_from_left_by_any(remainder, "\\/");
 
-        // Todo: Handle long names.
-        assert(left.count < 8);
-
         short_entry := fat16_find_directory_entry(current_directory, left);
 
         if !short_entry {
@@ -276,7 +273,12 @@ fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat1
     new_directory.cluster = entry.cluster;
 
     for each_entry(new_directory, skip_unused = false) {
-        it.* = .{};
+        if it.first_long_entry {
+            long_entry_bytes := cast(u64) it.short_entry - cast(u64) it.first_long_entry;
+            memset(it.first_long_entry, 0, cast(s64) long_entry_bytes);
+        }
+
+        it.short_entry.* = .{};
     }
 
     self_link := fat16_find_or_create_directory_entry(new_directory, ".");
@@ -439,8 +441,6 @@ parse_path :: (relative_to: Fat16_Tree_Cursor, path: string) -> parent_folder: F
 fat16_find_directory_entry :: (parent: Fat16_Tree_Cursor, file_name: string) -> *Fat16_Short_Entry {
 
     _, base_name, extension := split_from_left(file_name, #char ".");
-    assert(base_name.count <= 8);
-    assert(extension.count <= 3);
 
     for each_entry(parent) {
         other_name, other_extension := fat16_get_name(it);
@@ -480,7 +480,7 @@ fat16_find_or_create_directory_entry :: (relative_to: Fat16_Tree_Cursor, path: s
 
 
     for each_entry(parent, skip_unused = false) {
-        first_byte := (.*) cast(*u8) it;
+        first_byte := (.*) cast(*u8) it.short_entry;
 
         if first_byte && first_byte != 0xe5 {
             continue;
@@ -524,12 +524,47 @@ fat16_find_or_create_directory_entry :: (relative_to: Fat16_Tree_Cursor, path: s
     return null, false, parent;
 }
 
-fat16_get_name :: (entry: *Fat16_Short_Entry) -> string, string {
+fat16_get_name :: (item: Fat16_Directory_Iterator.Item) -> string, string {
+
+    if item.first_long_entry {
+        distance := cast(u64)item.short_entry - cast(u64)item.first_long_entry;
+        entry_count := cast(s64)distance / size_of(Fat16_LFN_Entry);
+
+        CHARS_PER_ENTRY :: 13;
+        max_chars := CHARS_PER_ENTRY * entry_count;
+
+        buffer: *u8 = talloc(max_chars);
+        char_index  := 0;
+
+        for< entry_index: 0..entry_count-1 {
+            current_entry := item.first_long_entry + entry_index;
+
+            append_chars :: (chars: []u16) #expand {
+                for chars {
+                    if it == 0 break entry_index;
+
+                    buffer[char_index] = ifx it > 0xff then #char "?" else cast(u8) it;
+
+                    char_index += 1;
+                }
+            }
+
+            append_chars(current_entry.characters_1);
+            append_chars(current_entry.characters_2);
+            append_chars(current_entry.characters_3);
+        }
+
+        result: string;
+        result.count = char_index;
+        result.data  = buffer;
+
+        return result, "";
+    }
+
     // Remove spaces from the end, FAT16 filenames get padded with spaces.
-    // Todo: Handle long names.
 
     base_name: string;
-    base_name.data  = entry.name.data;
+    base_name.data  = item.name.data;
     base_name.count = 8;
 
     while base_name.count > 0 && base_name.data[base_name.count-1] == #char " " {
@@ -537,7 +572,7 @@ fat16_get_name :: (entry: *Fat16_Short_Entry) -> string, string {
     }
 
     extension: string;
-    extension.data  = entry.extension.data;
+    extension.data  = item.extension.data;
     extension.count = 3;
 
     while extension.count > 0 && extension.data[extension.count-1] == #char " " {
@@ -564,6 +599,11 @@ fat16_allocate_fat_entry :: (using disk: *Fat16_Disk_Image) -> u16 {
 Fat16_Directory_Iterator :: struct {
     handle: Fat16_Tree_Cursor;
     skip_unused: bool;
+
+    Item :: struct {
+        #as using short_entry: *Fat16_Short_Entry;
+        first_long_entry:      *Fat16_LFN_Entry;
+    }
 }
 
 each_entry :: (directory: Fat16_Tree_Cursor, skip_unused := true) -> Fat16_Directory_Iterator {
@@ -574,31 +614,31 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
     assert(flags == 0);
 
     // Iterates directory contents. Doesn't recurse into subdirectories.
-    // Todo: Handle long names.
 
     is_root := handle.cluster == 0;
     disk    := handle.disk_image;
 
-    directory_entries_per_cluster := disk.bytes_per_cluster / 0x20;
+    entries_per_cluster := disk.bytes_per_cluster / 0x20;
 
     next_cluster := handle.cluster;
-    // If it's the root directory (handle.cluster = 0) then we don't actually use next_cluster, because root directory clusters are implicit and contiguous. But this 'if' prevents AOC from triggering in that case.
-    if next_cluster != 0 next_cluster -= 2;
+    #no_aoc { next_cluster -= 2; }
 
     directory_data: *Fat16_Short_Entry;
     if is_root directory_data = disk.root_directory_area;
 
     `it_index := -1;
+    `it: Fat16_Directory_Iterator.Item;
 
-    while true {
+    while outer := true {
         it_index += 1;
+        it.first_long_entry = null;
 
         if is_root {
             if it_index >= disk.bootsector.max_root_dir_entries {
                 break;
             }
         } else {
-            if it_index % directory_entries_per_cluster == 0 {
+            if it_index % entries_per_cluster == 0 {
                 if next_cluster >= 0xfff8 {
                     // Found the end of the cluster chain.
                     break;
@@ -609,34 +649,146 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
             }
         }
 
-        `it := directory_data + it_index;
+        it.short_entry = directory_data + it_index;
 
-        first_byte := (.*) cast(*u8) it;
+        first_byte := (.*) cast(*u8) it.short_entry;
 
         if first_byte == 0xe5 if skip_unused continue;
         if first_byte == 0    if skip_unused break;
 
-        if it.attributes == .LFN_ENTRY continue;
+        if it.attributes == .LFN_ENTRY {
+            // Go through the sequence of long file name entries.
+
+            first_long_entry := cast(*Fat16_LFN_Entry) it.short_entry;
+
+            if first_long_entry.record_sequence & 0x40 == 0 {
+                // LFN is corrupted.
+                continue;
+            }
+
+            sequence_number := first_long_entry.record_sequence & ~0x40;
+
+            while true {
+                current_long_entry := cast(*Fat16_LFN_Entry) (directory_data + it_index);
+
+                if current_long_entry.record_sequence != sequence_number && current_long_entry != first_long_entry {
+                    log("LFN sequence mismatch. Directory entry may have become corrupted by driver without LFN support.");
+                    continue outer;
+                }
+
+                if current_long_entry.attributes != .LFN_ENTRY {
+                    // Not marked LFN even though we expected more entries due to the sequence number. Skip.
+                    log("Found partial sequence of LFN entries. Directory entry may have become corrupted by driver without LFN support.");
+                    continue outer;
+                }
+
+                if (it_index+1) % entries_per_cluster == 0 {
+                    // LFN entries should not be spread over different clusters. This might be the last one but we still need a slot for the short entry.
+                    log("LFN entries are not physically contiguous. Directory entry may have become corrupted by driver without LFN support.");
+                    continue outer;
+                }
+
+                it_index += 1;
+
+                if sequence_number == 1 {
+                    // This was the last LFN entry in the list. Next is the short entry.
+                    it.short_entry = directory_data + it_index;
+
+                    if it.attributes == .LFN_ENTRY {
+                        log("Expected short entry. Directory entry may have become corrupted by driver without LFN support.");
+                        continue outer;
+                    }
+
+                    it.first_long_entry = first_long_entry;
+                    break;
+                }
+
+                sequence_number -= 1;
+            }
+        }
 
         #insert body;
     }
 }
 
-fat16_print_directory_tree :: (root: Fat16_Tree_Cursor, depth := 0) {
-    for each_entry(root) {
-        name := fat16_get_name(it);
-        if it.name[0] == #char "." continue;
+fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
 
-        for 1..depth print("| ");
-        print("%\n", name);
+    Dir_Stack_Entry :: struct {
+        total_entries: int;
+        entries_printed: int;
 
-        if it.attributes & .DIRECTORY {
-            success, sub := fat16_change_directory(root, name);
-            assert(success);
+        cursor: Fat16_Tree_Cursor;
+    }
 
-            fat16_print_directory_tree(sub, depth + 1);
+    stack: [..] Dir_Stack_Entry;
+
+    root_stack_entry := array_add(*stack);
+    root_stack_entry.cursor = root;
+
+    for each_entry(root_stack_entry.cursor) {
+        root_stack_entry.total_entries += 1;
+    }
+
+    print("\n   root\n");
+
+    while true {
+        top := peek_pointer(stack);
+
+        if top.entries_printed == top.total_entries {
+            pop(*stack);
+            if stack.count == 0 break;
+
+            continue;
+        }
+
+        for stack {
+            is_top       := it_index == stack.count-1;
+            last_entry   := it.entries_printed == it.total_entries-1;
+            more_entries := it.entries_printed <  it.total_entries;
+
+            if last_entry && is_top {
+                print("   └");
+            } else if more_entries && is_top {
+                print("   ├");
+            } else if more_entries {
+                print("   │");
+            } else {
+                print("    ");
+            }
+        }
+
+        index: int;
+        for each_entry(top.cursor) {
+
+            name := fat16_get_name(it);
+            if equal_nocase(name, ".") || equal_nocase(name, "..") continue;
+
+            if index == top.entries_printed {
+
+                print("── %\n", to_lower_copy(name,, temp));
+                top.entries_printed += 1;
+
+                if it.attributes & .DIRECTORY {
+                    new := array_add(*stack);
+
+                    new.cursor.cluster = it.cluster;
+                    new.cursor.disk_image = root.disk_image;
+
+                    for each_entry(new.cursor) {
+                        new.total_entries += 1;
+                    }
+
+                    new.total_entries -= 2; // . and ..
+                }
+
+                break;
+            }
+
+            index += 1;
         }
     }
+
+    print("\n");
 }
 
 

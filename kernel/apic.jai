@@ -276,11 +276,7 @@ ap_entry_point :: () #c_call {
         assert(cpu_local_read("irq_disable_count") == 0);
         #asm { sti; }
 
-        while true {
-            schedule_tasks();
-            assert(get_rflags() & .IF__interrupt > 0);
-            #asm { hlt; }
-        }
+        cpu_idle_loop();
     }
 }
 
@@ -295,10 +291,6 @@ get_current_core :: inline () -> *X64_Core #no_context {
 }
 
 get_core_id :: () -> int #no_context {
-    if !global.multiprocessing_initialized {
-        return 0; // This is valid, if we haven't started multiprocessing then we know we're on core 0.
-    }
-
     return cpu_local_read("id");
 }
 
@@ -320,28 +312,28 @@ get_task_id :: () -> int #no_context {
 
 
 cpu_local_read :: inline ($field_name: string) -> s64 #no_context {
-    offset := offset_of(X64_Core, field_name);
+    offset := inline offset_of(X64_Core, field_name);
 
     gs_relative_read :: (offset: int) -> s64 #foreign Assembly;
     return gs_relative_read(offset);
 }
 
 cpu_local_write :: inline ($field_name: string, value: s64) #no_context {
-    offset := offset_of(X64_Core, field_name);
+    offset := inline offset_of(X64_Core, field_name);
 
     gs_relative_write :: (offset: int, value: s64) #foreign Assembly;
     gs_relative_write(offset, s64);
 }
 
 cpu_local_increment :: inline ($field_name: string) #no_context {
-    offset := offset_of(X64_Core, field_name);
+    offset := inline offset_of(X64_Core, field_name);
 
     gs_relative_inc :: (offset: int) #foreign Assembly;
     gs_relative_inc(offset);
 }
 
 cpu_local_decrement :: inline ($field_name: string) #no_context {
-    offset := offset_of(X64_Core, field_name);
+    offset := inline offset_of(X64_Core, field_name);
 
     gs_relative_dec :: (offset: int) #foreign Assembly;
     gs_relative_dec(offset);

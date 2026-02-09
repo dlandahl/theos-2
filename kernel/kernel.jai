@@ -121,7 +121,7 @@ kernel_entry :: () #no_context {
 
     set_stack_trace_sentinel();
 
-    set_jai_runtime_support_callbacks();
+    set_runtime_support_callbacks();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
@@ -310,7 +310,7 @@ kernel_entry :: () #no_context {
         }
 
         simple_create_thread(() {
-            sleep(10, .seconds);
+            sleep(5, .seconds);
 
             log("=== Writing trace buffers. ===");
             trace_event_count := write_trace_buffers();
@@ -331,9 +331,15 @@ kernel_entry :: () #no_context {
         visualize_maple_tree_node(*tree);
 
         while true {
-            schedule_tasks();
-            assert(get_rflags() & .IF__interrupt > 0);
-            #asm { hlt; }
+            disk_test();
+            disk_test();
+            disk_test();
+            network_test();
+        }
+
+        {
+            get_current_task().blocked = true;
+            yield_execution();
         }
     }
 }
@@ -365,7 +371,6 @@ disk_test :: () {
     // assert(success);
     // log(data);
 
-    fat16_print_directory_tree(root);
     fat16_copy_fat_table(*disk_image);
 
     for 0..transfers-1 {
@@ -463,7 +468,7 @@ END;
 
 
 
-set_jai_runtime_support_callbacks :: () #no_context {
+set_runtime_support_callbacks :: () #no_context {
     write_string_callback = kernel_write_string;
 
     // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.

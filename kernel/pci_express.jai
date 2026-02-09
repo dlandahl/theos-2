@@ -1452,6 +1452,9 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
 
     assert(number_of_blocks <= maximum_transfer_size_in_blocks);
 
+    pages_allocated: [..] u64;
+    pages_allocated.allocator = temp;
+
     command: Nvme_Submission_Queue_Entry;
     command.OPC__opcode = ifx direction == .READ then .READ else .WRITE;
 
@@ -1477,6 +1480,8 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
         page_index := 1;
 
         next_prp_list_phys_base := get_4k_page();
+        array_add(*pages_allocated, next_prp_list_phys_base);
+
         prp_list := cast(*u64) (next_prp_list_phys_base + DIRECT_MAPPING_BASE);
 
         command.DPTR__data_pointer[1] = next_prp_list_phys_base;
@@ -1499,6 +1504,8 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
 
             if !is_final_prp_list {
                 next_prp_list_phys_base = get_4k_page();
+                array_add(*pages_allocated, next_prp_list_phys_base);
+
                 prp_list[511] = next_prp_list_phys_base;
                 prp_list = cast(*u64) (next_prp_list_phys_base + DIRECT_MAPPING_BASE);
             }
@@ -1511,7 +1518,7 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
 
     nvme_send_command(*nvme.io_queue, command);
 
-    // Todo: Free PRP list.
+    for pages_allocated free_4k_page(it);
 }
 
 

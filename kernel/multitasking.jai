@@ -96,16 +96,9 @@ core_begin_multitasking :: () {
     if core.id == 0 {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
 
-        idle :: () {
-            while true {
-                assert(get_rflags() & .IF__interrupt > 0);
-                #asm { hlt; }
-                schedule_tasks();
-            }
-        }
-
-        idle_task = create_task(idle, 0x8000, name = "Idle (Core 0)");
+        idle_task = create_task(cpu_idle_loop, 0x4000, name = "Idle (Core 0)");
         idle_task.on_core = core;
+
         current_task.name = "Kernel Main";
     }
 
@@ -120,6 +113,18 @@ core_begin_multitasking :: () {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
         configure_apic_timer_interrupt(0x2000000, global.scheduling_interrupt_gate);
+    }
+}
+
+cpu_idle_loop :: () {
+    while true {
+        assert(get_rflags() & .IF__interrupt > 0);
+
+        preempt_disable(); // Maybe this is dumb, but if the interrupt that causes 'hlt' to resume is the scheduling clock, we don't need the clock handler to call the scheduler because it will happen anyway.
+        #asm { hlt; }
+        preempt_restore();
+
+        schedule_tasks();
     }
 }
 

@@ -343,6 +343,11 @@ format_disk :: () -> bool {
     fat16_write_file(root, "kernel", kernel);
     fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
 
+    fat16_create_directory(root, "THEOS");
+    fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
+
+    fat16_print_directory_tree(root);
+
     fat16_copy_fat_table(*disk_image);
 
     write_entire_file("disk_image.img", disk_image.all_file_data);
@@ -378,6 +383,11 @@ align 0x8
 isr__%1:
     push_all
 
+    ; For now, let's not have interrupt requests while other interrupt handlers are running.
+    ; Todo: Very important to clarify this in the future.
+    inc qword [gs:irq_disable_count]
+    cli
+
     mov rdi, rsp
 
     ; Manually create a call stack frame that will tell the stack tracing code where the interrupt happened.
@@ -394,6 +404,8 @@ isr__%1:
     dec qword [gs:interrupt_context_active]
 
     add rsp, 16
+
+    dec qword [gs:irq_disable_count]
 
     pop_all
     %2

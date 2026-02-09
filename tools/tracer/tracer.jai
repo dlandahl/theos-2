@@ -578,7 +578,7 @@ draw_one_frame :: (dt: float) {
               case .contended_spinlock;
                 time_ns := cast(float)it.user[1] / cast(float)trace_data.tsc_frequency;
 
-                text = tprint("Contention level: %, blocked for %ns", it.user[0], cast(int)(time_ns * 1_000_000_000));
+                text = tprint("Contention level: %, blocked for %us", it.user[0], cast(int)(time_ns * 1_000_000));
                 label(label_rect, text, lt);
 
               case .irq_disable; #through;
