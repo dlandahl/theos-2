@@ -385,8 +385,8 @@ isr__%1:
 
     ; For now, let's not have interrupt requests while other interrupt handlers are running.
     ; Todo: Very important to clarify this in the future.
-    inc qword [gs:irq_disable_count]
     cli
+    inc qword [gs:irq_disable_count]
 
     mov rdi, rsp
 

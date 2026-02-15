@@ -554,6 +554,12 @@ draw_one_frame :: (dt: float) {
                 text = tprint("Preempt disable count: %", it.user[0]);
                 label(label_rect, text, lt);
 
+              case .nvme_FAILURE; #through;
+              case .nvme_SUCCESS; #through;
+              case .nvme_enqueue;
+                text = tprint("Queue index: %, id = %", it.user[0], it.user[1]);
+                label(label_rect, text, lt);
+
               case .syscall;
                 syscall_names := string.["Zero (Invalid)", "Yield", "CPU Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex", "Free Memory"];
                 label(label_rect, tprint("Syscall '%'", syscall_names[it.user[0]]), lt);
@@ -780,6 +786,12 @@ update_highlighted_trace_entries :: () {
                 array_add(*highlighted_trace_entries, it);
                 break;
             }
+
+          case .nvme_enqueue;
+            if (other.tag == .nvme_SUCCESS || other.tag == .nvme_FAILURE) && other.user[1] == sel.user[1] {
+                array_add(*highlighted_trace_entries, it);
+                break;
+            }
         }
     }
 
@@ -795,6 +807,13 @@ update_highlighted_trace_entries :: () {
                     array_add(*highlighted_trace_entries, it);
                     if other.tag == .block_alloc break;
                 }
+            }
+
+          case .nvme_SUCCESS; #through;
+          case .nvme_FAILURE;
+            if other.tag == .nvme_enqueue && other.user[1] == sel.user[1] {
+                array_add(*highlighted_trace_entries, it);
+                break;
             }
 
           case .small_object_free;

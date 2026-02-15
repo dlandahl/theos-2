@@ -274,8 +274,8 @@ fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat1
 
     for each_entry(new_directory, skip_unused = false) {
         if it.first_long_entry {
-            long_entry_bytes := cast(u64) it.short_entry - cast(u64) it.first_long_entry;
-            memset(it.first_long_entry, 0, cast(s64) long_entry_bytes);
+            long_entry_bytes := pointer_distance_bytes(it.short_entry, it.first_long_entry);
+            memset(it.first_long_entry, 0, long_entry_bytes);
         }
 
         it.short_entry.* = .{};
@@ -292,7 +292,7 @@ fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat1
     self_link.attributes = .DIRECTORY;
     back_link.attributes = .DIRECTORY;
 
-    return .{relative_to.disk_image, entry.cluster}; // Todo, we could warn if it's not a directory, etc.
+    return .{relative_to.disk_image, entry.cluster};
 }
 
 fat16_write_file :: (relative_to: Fat16_Tree_Cursor, path: string, content: string) -> bool {
@@ -470,7 +470,7 @@ fat16_find_or_create_directory_entry :: (relative_to: Fat16_Tree_Cursor, path: s
     assert(extension.count <= 3);
 
     if base_name.count == 0 {
-        // It was a . or .. link directory.
+        // It was a . or .. link directory. Todo: Clean this up.
         base_name = file_name;
         extension = "\x20\x20\x20";
     }
@@ -527,14 +527,13 @@ fat16_find_or_create_directory_entry :: (relative_to: Fat16_Tree_Cursor, path: s
 fat16_get_name :: (item: Fat16_Directory_Iterator.Item) -> string, string {
 
     if item.first_long_entry {
-        distance := cast(u64)item.short_entry - cast(u64)item.first_long_entry;
-        entry_count := cast(s64)distance / size_of(Fat16_LFN_Entry);
+        entry_count := pointer_distance_bytes(item.short_entry, item.first_long_entry) / size_of(Fat16_LFN_Entry);
 
         CHARS_PER_ENTRY :: 13;
         max_chars := CHARS_PER_ENTRY * entry_count;
 
         buffer: *u8 = talloc(max_chars);
-        char_index  := 0;
+        char_index := 0;
 
         for< entry_index: 0..entry_count-1 {
             current_entry := item.first_long_entry + entry_index;
@@ -836,4 +835,12 @@ calendar_to_dostime :: (cal: Calendar_Time) -> DOSDATE, DOSTIME {
     t := cast(DOSTIME) ((hour << 11) | (minute << 5) | (second));
 
     return d, t;
+}
+
+#scope_file
+
+pointer_distance_bytes :: (a: *void, b: *void) -> s64 {
+    if a > b return cast(s64) (cast(u64) a - cast(u64) b);
+
+    return cast(s64) (cast(u64) b - cast(u64) a);
 }

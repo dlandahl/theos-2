@@ -291,7 +291,6 @@ write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context
 #scope_module;
 
 my_panic :: () #no_context {
-    write_string("Panic.\n", to_standard_error = true);
     debug_break();
 }
 

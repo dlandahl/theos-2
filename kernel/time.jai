@@ -611,7 +611,7 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 500_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
+    max_error := 0; // This value will be decided after the first calibration run, because then we know roughly how fast the clock is. Since for very fast clocks we want a much larger value here than for slow clocks.
     delta: [3] int;
 
     // HPET is off-chip and therefore high latency (1-2us), but it doesn't look like there's a better alternative.
@@ -648,7 +648,13 @@ calibrate_tsc :: () -> hz: u64 {
 
         if verbose log("Run % delta %", it, delta[0]);
 
-        if it < 2 continue;
+        if it < 3 {
+            if it == 1 {
+                max_error = delta[0] / 100;
+                if verbose log("Max error set at %", max_error);
+            }
+            continue;
+        }
 
         abs :: (a: int) -> int {
             if a < 0 return -a;

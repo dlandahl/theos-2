@@ -241,7 +241,7 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) -> e
         table_offset      := device.msi_x.table_offset   & ~0b111;
         pending_offset    := device.msi_x.pending_offset & ~0b111;
 
-        // Todo: this BAR might be one that has already been mapped, or will be mapped for other purposes by the driver.
+        // Todo: This BAR might be one that has already been mapped, or will be mapped for other purposes by the driver.
         // Need to add a general system for detecting when a BAR is already mapped and returning the existing memory region.
         // Mapping a BAR twice should in theory not cause errors, it just "wastes" virtual memory. Maybe all base address
         // registers that have valid addresses should be mapped when the device is detected.
@@ -921,10 +921,13 @@ Nvme_Controller :: struct {
     identify: *Nvme_Identify_Controller_Structure;
 
     maximum_transfer_size_in_blocks: int;
+    maximum_queue_entries: int;
 
     // These are properties of the namespace, will need to be moved into a separate struct when we support multiple drives connected to the same controller.
     block_size: int;
     nsid: u32;
+
+    initialized: bool;
 }
 
 Nvme_Command_Queue :: struct {
@@ -938,6 +941,9 @@ Nvme_Command_Queue :: struct {
     cq: [] Nvme_Completion_Queue_Entry;
 
     current_phase: bool;
+    async_completion_enabled: bool;
+
+    next_command_id: u16;
 }
 
 Nvme_Property_Memory_Map :: struct {
@@ -1026,7 +1032,7 @@ Nvme_Admin_Queue_Attributes :: struct {
 Nvme_Submission_Queue_Entry :: struct {
     OPC__opcode: Nvme_Opcode;
     FUSE_and_PSDT: u8;
-    CID__command_id: u16;
+    CID__command_identifier: u16;
     NSID__namespace_id: u32;
 
     CDW2__command_dword_2: u32;
@@ -1046,8 +1052,15 @@ Nvme_Submission_Queue_Entry :: struct {
             QID__queue_identifier: u16;
             QSIZE__queue_size: u16;
 
-            PC__physically_contiguous: u16;
-            CQID__completion_queue_identifier: u16;
+            flags: enum_flags u16 {
+                PC__physically_contiguous :: 1;
+                IEN__interrupts_enabled   :: 2;
+            }
+
+            union {
+                CQID__completion_queue_identifier: u16; // For submission queues.
+                IV__interrupt_vector: u16;              // For completion queues.
+            }
         }
 
         struct {
@@ -1149,7 +1162,15 @@ Nvme_LBA_Format :: struct {
 
 #program_export
 nvme_interrupt :: (stack: *void) #c_call {
-    write_string("NVMe interrupt recieved.\n");
+    push_context,defer_pop;
+
+    if global.nvme.initialized {
+        queue := *global.nvme.io_queue;
+
+        if queue.async_completion_enabled {
+            nvme_dequeue_all_finished_commands(queue);
+        }
+    }
 
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
@@ -1167,7 +1188,6 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     enabled := enable_msi_or_msi_x(device, isr__nvme_interrupt);
     assert(enabled == .MSI_X);
-    // register_legacy_pci_interrupt(device, isr__nvme_interrupt);
 
     // Mask out the admin queue interrupt. Just spin on the phase bit for now
     // device.msi_x_table[0].vector_control |= .MASK;
@@ -1176,9 +1196,6 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
-
-    nvme.sq_size = 4096 / size_of(Nvme_Submission_Queue_Entry);
-    nvme.cq_size = 4096 / size_of(Nvme_Completion_Queue_Entry);
 
     nvme_reset_controller(*nvme);
 
@@ -1191,7 +1208,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         admin_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
         admin_command.DPTR__data_pointer[0] = identify_page;
 
-        nvme_send_command(*nvme.admin_queue, admin_command);
+        nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
 
         nvme.identify = cast(*Nvme_Identify_Controller_Structure) (identify_page + DIRECT_MAPPING_BASE);
 
@@ -1201,11 +1218,12 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         for mn if it == #char " " { mn.count = it_index; break; }
 
         mps_min := get(nvme.CAP__capabilities, .MPSMIN);
-        assert(mps_min == 0); // If minimum memory page size is not zero (4k), we need to calculate maximum transfer size differently. But should always be zero in practice.
+        assert(mps_min == 0); // Zero means 4k. Controller should always support 4k memory page size.
 
         nvme.maximum_transfer_size_in_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
+        nvme.maximum_queue_entries = cast(s64) get(nvme.CAP__capabilities, .MQES__maximum_queue_entries);
 
-        log("Found controller with serial number '%' and model number '%'. Maximum transfer size % blocks.", sn, mn, nvme.maximum_transfer_size_in_blocks);
+        log("Found controller with model number '%'. Maximum transfer size % blocks, maximum queue size % entries.", mn, nvme.maximum_transfer_size_in_blocks, nvme.maximum_queue_entries);
     }
 
     {
@@ -1217,7 +1235,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         admin_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
         admin_command.DPTR__data_pointer[0] = nsid_page;
 
-        nvme_send_command(*nvme.admin_queue, admin_command);
+        nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
 
         nsid_list := cast(*[1024] u32) (nsid_page + DIRECT_MAPPING_BASE);
 
@@ -1246,7 +1264,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         admin_command.NSID__namespace_id = nvme.nsid;
         admin_command.DPTR__data_pointer[0] = identify_page;
 
-        nvme_send_command(*nvme.admin_queue, admin_command);
+        nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
         identify := cast(*Nvme_Identify_Namespace_Structure) (identify_page + DIRECT_MAPPING_BASE);
 
         index := identify.FLBAS__formatted_lba_size & 0xf;
@@ -1259,19 +1277,26 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     {
         // Create IO queues.
-        io_cq_base := get_4k_page();
-        io_sq_base := get_4k_page();
+        space_for_queues := allocate_large_page();
+        queue_size       := cast(u64) min(0x4000, nvme.maximum_queue_entries+1);
+
+        assert(queue_size * size_of(Nvme_Submission_Queue_Entry) + queue_size * size_of(Nvme_Completion_Queue_Entry) < 0x20_0000);
+
+        io_sq_base := space_for_queues;
+        io_cq_base := space_for_queues + queue_size * size_of(Nvme_Submission_Queue_Entry);
 
         {
             admin_command: Nvme_Submission_Queue_Entry;
             admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
             admin_command.DPTR__data_pointer[0] = io_cq_base;
             admin_command.NSID__namespace_id = nvme.nsid;
-            admin_command.QSIZE__queue_size = cast(u16) nvme.cq_size-1;
+            admin_command.QSIZE__queue_size = cast(u16) queue_size-1;
             admin_command.QID__queue_identifier = 1;
-            admin_command.PC__physically_contiguous = 1;
+            admin_command.flags |= .PC__physically_contiguous;
+            admin_command.flags |= .IEN__interrupts_enabled;
+            admin_command.IV__interrupt_vector = 1;
 
-            nvme_send_command(*nvme.admin_queue, admin_command);
+            nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
         }
 
         {
@@ -1279,22 +1304,24 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
             admin_command.OPC__opcode = .CREATE_IO_SUBMISSION_QUEUE;
             admin_command.DPTR__data_pointer[0] = io_sq_base;
             admin_command.NSID__namespace_id = nvme.nsid;
-            admin_command.QSIZE__queue_size = cast(u16) nvme.sq_size-1;
+            admin_command.QSIZE__queue_size = cast(u16) queue_size-1;
             admin_command.QID__queue_identifier = 1;
             admin_command.CQID__completion_queue_identifier = 1;
-            admin_command.PC__physically_contiguous = 1;
+            admin_command.flags |= .PC__physically_contiguous;
 
-            nvme_send_command(*nvme.admin_queue, admin_command);
+            nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
         }
 
         nvme.io_queue.sq.data = xx (io_sq_base + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
         nvme.io_queue.cq.data = xx (io_cq_base + DIRECT_MAPPING_BASE);
 
-        nvme.io_queue.sq.count = nvme.sq_size;
-        nvme.io_queue.cq.count = nvme.cq_size;
+        nvme.io_queue.sq.count = cast(s64) queue_size;
+        nvme.io_queue.cq.count = cast(s64) queue_size;
 
         nvme.io_queue.tail_doorbell = *nvme.doorbell_base + 2 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
         nvme.io_queue.head_doorbell = *nvme.doorbell_base + 3 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
+
+        nvme.io_queue.async_completion_enabled = true;
     }
 
     {
@@ -1308,11 +1335,12 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_command.SLBA__starting_lba = 0;
         io_command.NLB__number_of_logical_blocks = 0; // This means 1 block.
 
-        nvme_send_command(*nvme.io_queue, io_command);
+        nvme_send_command_synchronous(*nvme.io_queue, io_command);
 
         assert((.*) cast(*u16) (buffer + 510 + DIRECT_MAPPING_BASE) == 0xaa55, "NVMe read bootsector test failed.");
     }
 
+    nvme.initialized = true;
     return nvme;
 }
 
@@ -1338,8 +1366,7 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
 
         nvme.AQA__admin_queue_attributes = .{
             // Subtract one, because the field is zero based.
-            cast(u16) nvme.sq_size-1,
-            cast(u16) nvme.cq_size-1
+            63, 63
         };
 
         nvme.ASQ__admin_sq = admin_sq;
@@ -1348,11 +1375,13 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
         nvme.admin_queue.sq.data = cast(*Nvme_Submission_Queue_Entry) (admin_sq + DIRECT_MAPPING_BASE);
         nvme.admin_queue.cq.data = cast(*Nvme_Completion_Queue_Entry) (admin_cq + DIRECT_MAPPING_BASE);
 
-        nvme.admin_queue.sq.count = nvme.sq_size;
-        nvme.admin_queue.cq.count = nvme.cq_size;
+        nvme.admin_queue.sq.count = 64;
+        nvme.admin_queue.cq.count = 64;
 
         nvme.admin_queue.tail_doorbell = *nvme.SQ0TDBL__submission_queue_0_tail_doorbell;
         nvme.admin_queue.head_doorbell = *nvme.CQ0HDBL__completion_queue_0_head_doorbell;
+
+        nvme.admin_queue.async_completion_enabled = true;
     }
 
     {
@@ -1394,39 +1423,53 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     }
 }
 
-nvme_send_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
+// Currently this queue API doesn't support multithreading. Also, NVMe interrupts must go to the core that owns the thread that owns the queue.
+
+nvme_enqueue_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
     log_category("NVMe");
 
-    {
-        // Enqueue the command in the submission queue.
+    trace(.nvme_enqueue, sq_tail, queue.next_command_id);
 
-        sq[sq_tail] = command;
+    sq[sq_tail] = command;
+    sq[sq_tail].CID__command_identifier = queue.next_command_id;
 
-        sq_tail += 1;
-        sq_tail %= cast(u32)sq.count;
-
-        barrier();
-        tail_doorbell.* = sq_tail;
+    #no_aoc {
+        queue.next_command_id += 1;
     }
 
-    command_has_been_processed :: #code get_bit(cq[cq_head].STATUS__status, .PHASE) != queue.current_phase;
-    assert(!Timeout(command_has_been_processed));
+    sq_tail += 1;
+    sq_tail %= cast(u32)sq.count;
 
-    {
-        // Report any errors generated by the controller.
+    barrier();
+    tail_doorbell.* = sq_tail;
+}
 
-        status := cq[cq_head].STATUS__status;
+nvme_dequeue_all_finished_commands :: (using queue: *Nvme_Command_Queue) {
+    log_category("NVMe");
+
+    while true {
+        cqe    := *cq[cq_head];
+        status := cqe.STATUS__status;
+
+        if get_bit(status, .PHASE) == queue.current_phase {
+            // This command has not finished yet, so we're done dequeueing commands.
+            break;
+        }
+
         clear_bit(*status, .PHASE);
 
         if status != 0 {
-            push_print_style().use_newlines_if_long_form = true;
-            s := to_string(status,, temp);
-            log_error("IO command failed with status: %", s);
-        }
-    }
+            trace(.nvme_FAILURE, cq_head, cqe.CID__command_identifier);
 
-    {
-        // Dequeue completion queue entry.
+            ps := push_print_style();
+            ps.use_newlines_if_long_form = true;
+            ps.base = 16;
+
+            s := to_string(status,, temp);
+            log_error("Command failed with status: %", s);
+        } else {
+            trace(.nvme_SUCCESS, cq_head, cqe.CID__command_identifier);
+        }
 
         cq_head += 1;
 
@@ -1434,10 +1477,36 @@ nvme_send_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission
             cq_head = 0;
             queue.current_phase = !queue.current_phase;
         }
-
-        barrier();
-        head_doorbell.* = cq_head;
     }
+
+    barrier();
+    head_doorbell.* = cq_head;
+}
+
+nvme_spin_drain_queue :: (using queue: *Nvme_Command_Queue) {
+
+    // Calling this only works if interrupts are enabled, and the queue is configured to get consumed by the interrupts.
+    assert(get_rflags() & .IF__interrupt > 0);
+    assert(queue.async_completion_enabled);
+
+    while cq_head != sq_tail {
+        #asm { pause; }
+    }
+}
+
+nvme_send_command_synchronous :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
+    log_category("NVMe");
+
+    nvme_spin_drain_queue(queue); // Wait for commands that will be asynchronously dequeued by interrupts.
+    queue.async_completion_enabled = false;
+
+    nvme_enqueue_command(queue, command);
+
+    command_has_been_processed :: #code get_bit(cq[cq_head].STATUS__status, .PHASE) != queue.current_phase;
+    assert(!Timeout(command_has_been_processed));
+
+    nvme_dequeue_all_finished_commands(queue);
+    queue.async_completion_enabled = true;
 }
 
 nvme_read :: (nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_blocks: int) {
@@ -1450,7 +1519,7 @@ nvme_write :: (nvme: *Nvme_Controller, starting_disk_block: u64, source_memory: 
 
 nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory_buffer: *void, number_of_blocks: int, direction: enum {READ; WRITE;}) {
 
-    assert(number_of_blocks <= maximum_transfer_size_in_blocks);
+    assert(number_of_blocks <= maximum_transfer_size_in_blocks, "NVMe transfer exceeds maximum transfer size.");
 
     pages_allocated: [..] u64;
     pages_allocated.allocator = temp;
@@ -1458,16 +1527,15 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
     command: Nvme_Submission_Queue_Entry;
     command.OPC__opcode = ifx direction == .READ then .READ else .WRITE;
 
-    // Fill in PRP (physical region page) list.
-    number_of_bytes := number_of_blocks * nvme.block_size;
-    number_of_pages := number_of_bytes / 4096;
+    // Fill in PRP (physical region page) list. Todo: This code is too hard to read.
 
-    offset_in_page := cast(s64)memory_buffer & 0xfff;
-    if offset_in_page > 0 || number_of_pages == 0 {
-        number_of_pages += 1;
-    }
+    number_of_bytes := number_of_blocks * nvme.block_size;
+
+    offset_in_page  := cast(s64) memory_buffer & 0xfff;
+    number_of_pages := (number_of_bytes + offset_in_page + 4095) / 4096;
 
     first_page := get_physical_address(memory_buffer);
+
     assert(first_page & 0b11 == 0);
     command.DPTR__data_pointer[0] = first_page;
 
@@ -1487,8 +1555,8 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
         command.DPTR__data_pointer[1] = next_prp_list_phys_base;
 
         while page_index < number_of_pages {
-            remaining_pages := number_of_pages - page_index;
 
+            remaining_pages   := number_of_pages - page_index;
             is_final_prp_list := remaining_pages <= 512;
 
             current_prp_list_length := min(remaining_pages, ifx is_final_prp_list then 512 else 511);
@@ -1516,9 +1584,9 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
     command.SLBA__starting_lba = starting_disk_block;
     command.NLB__number_of_logical_blocks = cast(u16)number_of_blocks-1;
 
-    nvme_send_command(*nvme.io_queue, command);
+    nvme_enqueue_command(*nvme.io_queue, command);
 
-    for pages_allocated free_4k_page(it);
+    // for pages_allocated free_4k_page(it);
 }
 
 

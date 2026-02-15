@@ -311,7 +311,6 @@ kernel_entry :: () #no_context {
 
         simple_create_thread(() {
             sleep(5, .seconds);
-
             log("=== Writing trace buffers. ===");
             trace_event_count := write_trace_buffers();
             log("=== Wrote % trace events. ===", trace_event_count);
@@ -321,8 +320,8 @@ kernel_entry :: () #no_context {
 
         maple_add(*tree, 12, 18,  null);
         maple_add(*tree, 5,  6,   null);
-        maple_add(*tree, 7,  7,   null);
         maple_add(*tree, 8,  9,   null);
+        maple_add(*tree, 7,  7,   null);
         maple_add(*tree, 19, 100, null);
 
         entry_count := get(tree.meta, .entry_count);
@@ -330,12 +329,16 @@ kernel_entry :: () #no_context {
 
         visualize_maple_tree_node(*tree);
 
-        while true {
-            disk_test();
-            disk_test();
-            disk_test();
-            network_test();
-        }
+        start := get_monotonic_time();
+        for 1..5 disk_test();
+        end   := get_monotonic_time();
+        log("Elapsed: %ms", to_milliseconds(end - start));
+
+        // while true {
+        //     disk_test();
+        //     disk_test();
+        //     network_test();
+        // }
 
         {
             get_current_task().blocked = true;
@@ -345,15 +348,20 @@ kernel_entry :: () #no_context {
 }
 
 disk_test :: () {
-    assert(global.nvme.mmio != null);
+    assert(global.nvme.initialized);
     buffer := cast(string) NewArray(0xa0_0000, u8);
 
     blocks_per_transfer := global.nvme.maximum_transfer_size_in_blocks;
     transfers := 0xa0_0000 / (blocks_per_transfer * global.nvme.block_size);
 
-    log("Blocks per transfer: %, transfers: %, total bytes: %",
-        hex(blocks_per_transfer), transfers, hex(transfers * blocks_per_transfer * global.nvme.block_size)
-       );
+    {
+        total_bytes := transfers * blocks_per_transfer * global.nvme.block_size;
+        assert(total_bytes == 0xa0_0000);
+
+        log("Blocks per transfer: %, transfers: %, total bytes: %",
+            hex(blocks_per_transfer), transfers, hex(total_bytes)
+           );
+    }
 
     for 0..transfers-1 {
         start_block   := it * blocks_per_transfer;
@@ -361,16 +369,15 @@ disk_test :: () {
         nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
     }
 
+    nvme_spin_drain_queue(*global.nvme.io_queue);
+
     disk_image := fat16_parse_disk_image(buffer);
     root       := fat16_get_root_directory(*disk_image);
 
     fat16_create_directory(root, "THEOS");
     fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
 
-    // success, data := fat16_read_file(root, "THEOS/TEST");
-    // assert(success);
-    // log(data);
-
+    fat16_print_directory_tree(root);
     fat16_copy_fat_table(*disk_image);
 
     for 0..transfers-1 {
@@ -378,6 +385,8 @@ disk_test :: () {
         memory_buffer := buffer.data + start_block * global.nvme.block_size;
         nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
     }
+
+    nvme_spin_drain_queue(*global.nvme.io_queue);
 }
 
 network_test :: () -> string {
@@ -477,10 +486,10 @@ set_runtime_support_callbacks :: () #no_context {
 
         append(*builder, "\n=== Assertion failure. ===\n");
         if message.count {
-            append(*builder, "Message: ");
-            append(*builder, message);
+            print(*builder, "Message: %\n", message);
         }
-        append(*builder, "\n\n");
+
+        append(*builder, "\n");
 
         buffer: [32] u32;
         do_stack_trace(buffer);
@@ -1203,6 +1212,11 @@ unmap_pages :: (virtual_address: *void, count: int) {
         if it.level != 0 continue;
 
         it.flags &= ~.PRESENT;
+
+        virtual := virtual_address + it_index * 4096;
+
+        pg := *virtual;
+        #asm { invlpg [pg]; }
     }
 }
 
@@ -2000,26 +2014,23 @@ serial_out :: (data: string, using serial_port: *Serial_Port) #no_context {
     release(*spinlock);
 }
 
-write_string_builder_to_serial_port :: (using builder: *String_Builder, serial_port: *Serial_Port, do_reset := true) -> s64 {
+write_string_builder_to_serial_port :: (using builder: *String_Builder, serial_port: *Serial_Port, do_reset := true) {
 
-    if !allocator.proc return 0;
+    if !allocator.proc return;
 
     buffer  := get_base_buffer(builder);
-    written := 0;
+
     while buffer {
         s: string = ---;
         s.data  = get_buffer_data(buffer);
         s.count = buffer.count;
 
         serial_out(s, serial_port);
-        written += s.count;
 
         buffer = buffer.next;
     }
 
     if do_reset reset(builder);
-
-    return written;
 }
 
 
@@ -2313,6 +2324,8 @@ Terse_Print_Style :: struct {
     using,except SHARED_FIELDS ps.default_format_float;
     using,except SHARED_FIELDS ps.default_format_struct;
 }
+
+#assert size_of(Terse_Print_Style) == size_of(Print_Style);
 
 push_print_style :: (style := context.print_style) -> *Terse_Print_Style #expand {
     // User may choose whether to use the input argument, return value, or neither

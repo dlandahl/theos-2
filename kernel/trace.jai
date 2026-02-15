@@ -10,7 +10,7 @@
 
 TRACE_ENTRIES_PER_BUFFER :: 0x20_0000 / size_of(Trace_Entry);
 
-Trace_Tag :: enum u16 {
+Trace_Tag :: enum_flags u32 {
     context_switch;
     start_task;
     scheduling_timer;
@@ -23,6 +23,9 @@ Trace_Tag :: enum u16 {
     contended_spinlock;
     irq_disable;
     irq_restore;
+    nvme_enqueue;
+    nvme_SUCCESS;
+    nvme_FAILURE;
 }
 
 Trace_Header :: struct {
@@ -47,15 +50,17 @@ KERNEL_TRACE_MAGIC_STRING :: "kerneltrace";
 Trace_Entry :: struct {
     tsc:     u64;
     task_id: u32;
-    core_id: u16;
+    core_id: u32;
     tag:     Trace_Tag;
+
+    padding: u32;
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
     user:        [2] u64;
-    stack_trace: [24] u32;
+    stack_trace: [22] u32;
 }
 
-#assert size_of(Trace_Entry) == 128;
+#assert size_of(Trace_Entry) == 128; // Two cache block.
 
 // This file will also be #load-ed by any trace analyser software we create, in which case we only need the above descriptions of the format.
 #if TRACE_INCLUDE_RUNTIME_CODE {
@@ -70,6 +75,7 @@ Trace_Entry :: struct {
         current_index: int;
 
         tracing_enabled: bool;
+        trace_tag_mask: Trace_Tag; // Set a bit to stop it from being recorded.
     }
 
     init_tracing :: () #no_context {
@@ -84,12 +90,19 @@ Trace_Entry :: struct {
         }
 
         tracing_enabled = true;
+
+        trace_tag_mask  = .irq_disable  | .irq_restore;
+        trace_tag_mask |= .nvme_enqueue | .nvme_SUCCESS | .nvme_FAILURE;
     }
 
     trace :: (tag: Trace_Tag, user_data: ..Any) #no_context {
         using global.trace_state;
 
         if !tracing_enabled {
+            return;
+        }
+
+        if tag & trace_tag_mask > 0 {
             return;
         }
 
