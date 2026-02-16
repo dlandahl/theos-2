@@ -10,7 +10,7 @@
 
 TRACE_ENTRIES_PER_BUFFER :: 0x20_0000 / size_of(Trace_Entry);
 
-Trace_Tag :: enum_flags u32 {
+Trace_Tag :: enum u16 {
     context_switch;
     start_task;
     scheduling_timer;
@@ -50,14 +50,12 @@ KERNEL_TRACE_MAGIC_STRING :: "kerneltrace";
 Trace_Entry :: struct {
     tsc:     u64;
     task_id: u32;
-    core_id: u32;
+    core_id: u16;
     tag:     Trace_Tag;
-
-    padding: u32;
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
     user:        [2] u64;
-    stack_trace: [22] u32;
+    stack_trace: [24] u32;
 }
 
 #assert size_of(Trace_Entry) == 128; // Two cache block.
@@ -75,7 +73,7 @@ Trace_Entry :: struct {
         current_index: int;
 
         tracing_enabled: bool;
-        trace_tag_mask: Trace_Tag; // Set a bit to stop it from being recorded.
+        trace_tag_mask: u32; // Set a bit to stop events with that tag from being recorded.
     }
 
     init_tracing :: () #no_context {
@@ -91,8 +89,10 @@ Trace_Entry :: struct {
 
         tracing_enabled = true;
 
-        trace_tag_mask  = .irq_disable  | .irq_restore;
-        trace_tag_mask |= .nvme_enqueue | .nvme_SUCCESS | .nvme_FAILURE;
+        // Disable the spammy tags by default.
+        using Trace_Tag;
+        trace_tag_mask  = (1 << irq_disable)  | (1 << irq_restore);
+        trace_tag_mask |= (1 << nvme_enqueue) | (1 << nvme_SUCCESS) | (1 << nvme_FAILURE);
     }
 
     trace :: (tag: Trace_Tag, user_data: ..Any) #no_context {
@@ -102,7 +102,7 @@ Trace_Entry :: struct {
             return;
         }
 
-        if tag & trace_tag_mask > 0 {
+        if (1 << tag) & trace_tag_mask > 0 {
             return;
         }
 

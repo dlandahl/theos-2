@@ -436,12 +436,14 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
 
     for ti.values if it == cast(int) status {
         enum_name := ti.names[it_index];
-        display("UEFI call failed on line ", loc.line_number, " with status ", enum_name);
+        display("UEFI call failed on line 0x", loc.line_number, " with status ", enum_name);
 
-        return;
+        while true {}
     }
 
-    display("UEFI call failed on line ", loc.line_number, " with unknown status code 0x", cast(u64) status);
+    display("UEFI call failed on line 0x", loc.line_number, " with unknown status code 0x", cast(u64) status);
+
+    while true {}
 }
 
 display :: (args: .. Any) {

@@ -343,9 +343,6 @@ format_disk :: () -> bool {
     fat16_write_file(root, "kernel", kernel);
     fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
 
-    fat16_create_directory(root, "THEOS");
-    fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
-
     fat16_print_directory_tree(root);
 
     fat16_copy_fat_table(*disk_image);

@@ -22,7 +22,7 @@ Task_Info :: struct {
 
     sleep_until: Apollo_Time;
 
-    #as queue_node: List_Queue(*Task_Info).Node;
+    #as using queue_node: List_Node(#this);
 
     on_core: *X64_Core;
 
@@ -33,8 +33,8 @@ Scheduler :: struct {
     current_task: *Task_Info;
     idle_task:    *Task_Info;
 
-    sleeping:       List_Queue(*Task_Info);
-    waiting_to_run: List_Queue(*Task_Info);
+    sleeping:       List_Node(Task_Info);
+    waiting_to_run: List_Node(Task_Info);
 
     spinlock: Spinlock(.IRQ);
 
@@ -89,7 +89,6 @@ core_begin_multitasking :: () {
     current_task._context = *context;
     current_task.name = sprint("Idle (Core %)", core.id);
     current_task.on_core = core;
-    current_task.queue_node.item = current_task;
 
     idle_task = current_task;
 
@@ -102,8 +101,11 @@ core_begin_multitasking :: () {
         current_task.name = "Kernel Main";
     }
 
-    waiting_to_run.name = sprint("Run Queue (Core %)", core.id);
-    sleeping.name       = sprint("Sleep Queue (Core %)", core.id);
+    // waiting_to_run.name = sprint("Run Queue (Core %)", core.id);
+    // sleeping.name       = sprint("Sleep Queue (Core %)", core.id);
+
+    list_init(*waiting_to_run);
+    list_init(*sleeping);
 
     core.online = true;
 
@@ -139,7 +141,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     }
 
     task.on_core = core;
-    queue_push(*scheduler.waiting_to_run, task);
+    list_append(*scheduler.waiting_to_run, task);
 
     release(*scheduler.spinlock);
 }
@@ -190,7 +192,6 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task.entry_point = entry_point;
     new_task.name = name;
     new_task.user_data = user_data;
-    new_task.queue_node.item = new_task;
 
     return new_task;
 }
@@ -213,16 +214,16 @@ schedule_tasks :: () {
         // Wake sleeping tasks.
         using scheduler;
 
-        for* sleeping {
+        for sleeping {
             if it.sleep_until > time_now break;
 
             it.sleeping = false;
 
-            remove it;
+            list_remove(it);
 
             // We can get here if the sleep time of the current task was so short that it wakes itself before context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the current task.
             if it != current {
-                queue_push(*waiting_to_run, it);
+                list_append(*waiting_to_run, it);
             }
         }
     }
@@ -232,8 +233,8 @@ schedule_tasks :: () {
 
     {
         // Pick next task to run.
-        if !queue_is_empty(scheduler.waiting_to_run) {
-            next = queue_pop(*scheduler.waiting_to_run).item;
+        if !is_empty(*scheduler.waiting_to_run) {
+            next = list_pop(*scheduler.waiting_to_run);
         }
 
         else if current_task_wants_to_run {
@@ -249,7 +250,7 @@ schedule_tasks :: () {
     }
 
     if current_task_wants_to_run {
-        queue_push(*scheduler.waiting_to_run, current);
+        list_append(*scheduler.waiting_to_run, current);
     }
 
     current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
@@ -351,23 +352,20 @@ prepare_task_sleep_until :: (time: Apollo_Time) {
     task := get_current_task();
     scheduler := lock_scheduler_for_task(task);
 
+    defer release(*scheduler.spinlock);
+
     task.sleeping = true;
     task.sleep_until = time;
 
-    inserted: bool;
-
     for* scheduler.sleeping {
         if it.sleep_until < time continue;
-        queue_insert(*scheduler.sleeping, it_prev, task);
-        inserted = true;
-        break;
+
+        insert_after(task, it.prev);
+
+        return;
     }
 
-    if !inserted {
-        queue_push(*scheduler.sleeping, task);
-    }
-
-    release(*scheduler.spinlock);
+    list_append(*scheduler.sleeping, task);
 }
 
 wake_task :: (task: *Task_Info) {
@@ -381,8 +379,8 @@ wake_task :: (task: *Task_Info) {
 
     task.sleeping = false;
 
-    queue_remove(*scheduler.sleeping, task);
-    queue_push(*scheduler.waiting_to_run, task);
+    list_remove(task);
+    list_append(*scheduler.waiting_to_run, task);
 
     release(*scheduler.spinlock);
 }
@@ -392,15 +390,17 @@ wake_task :: (task: *Task_Info) {
 Mutex :: struct {
     spinlock: Spinlock;
     held_by: *Task_Info;
-    queue: List_Queue(*Task_Info);
+    queue: List_Node(Task_Info);
 }
 
 acquire :: (using mutex: *Mutex) {
     acquire(*spinlock);
     task := get_current_task();
 
+    ensure_initialized(*queue);
+
     if held_by == null {
-        assert(queue_is_empty(queue));
+        assert(is_empty(*queue));
 
         held_by = task;
 
@@ -408,7 +408,7 @@ acquire :: (using mutex: *Mutex) {
         return;
     }
 
-    queue_push(*queue, task);
+    list_append(*queue, task);
     task.blocked = true;
 
     release(*spinlock);
@@ -419,15 +419,17 @@ release :: (using mutex: *Mutex) {
     acquire(*spinlock);
     task := get_current_task();
 
+    ensure_initialized(*queue);
+
     assert(held_by == task);
     held_by = null;
 
-    if queue_is_empty(queue) {
+    if is_empty(*queue) {
         release(*spinlock);
         return;
     }
 
-    next := queue_pop(*mutex.queue).item;
+    next := list_pop(*mutex.queue);
     held_by = next;
     release(*spinlock);
 
@@ -436,7 +438,7 @@ release :: (using mutex: *Mutex) {
     assert(next.blocked);
     next.blocked = false;
 
-    queue_push(*scheduler.waiting_to_run, next);
+    list_append(*scheduler.waiting_to_run, next);
     release(*scheduler.spinlock);
 }
 
@@ -445,8 +447,11 @@ trylock :: (using mutex: *Mutex) -> bool {
 
     task := get_current_task();
 
+
     if held_by == null {
-        assert(queue_is_empty(queue));
+
+        ensure_initialized(*queue);
+        assert(is_empty(*queue));
 
         held_by = get_current_task();
 
@@ -465,13 +470,15 @@ Semaphore :: struct {
     counter_max: int; // 0 means no max.
 
     Waiter :: struct {
+        #as using queue_node: List_Node(#this);
+
         task: *Task_Info;
 
         // This is to prevent a race. If we get signalled, but then timeout before being woken, this flag will tell us that this happened and that we're now holding the semaphore despite having timed out.
         signalled: bool;
     }
 
-    queue: List_Queue(Waiter);
+    queue: List_Node(Waiter);
     spinlock: Spinlock(Lock_Type.IRQ);
 }
 
@@ -486,12 +493,13 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
     }
 
     task := get_current_task();
-
     task.blocked = true;
 
-    waiter: queue.Node;
+    ensure_initialized(*queue);
+
+    waiter: Waiter;
     waiter.task = task;
-    queue_push(*queue, *waiter);
+    list_append(*queue, *waiter);
 
     end_time := get_monotonic_time() + timeout;
     remaining_timeout := timeout; // We need to track the timeout over multiple sleep calls due to spurious wakeups.
@@ -522,7 +530,8 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
             continue;
         }
 
-        queue_remove(*queue, *waiter);
+        list_remove(*waiter);
+
         release(*spinlock);
         return false; // Timeout hit.
     }
@@ -543,8 +552,9 @@ try_wait :: (using sem: *Semaphore) -> bool {
 
 signal :: (using sema: *Semaphore) {
     acquire(*spinlock);
+    ensure_initialized(*queue);
 
-    if queue_is_empty(queue) {
+    if is_empty(*queue) {
         counter += 1;
 
         if counter_max && counter > counter_max {
@@ -555,7 +565,7 @@ signal :: (using sema: *Semaphore) {
         return;
     }
 
-    waiter := queue_pop(*queue);
+    waiter := list_pop(*queue);
     waiter.signalled = true;
     waiter.task.blocked = false;
 
@@ -570,25 +580,32 @@ Condition_Variable :: struct {
     // Not using a mutex, so that we can notify in interrupt contexts.
     lock: Spinlock(.IRQ);
 
-    waiters: List_Queue(Semaphore);
+    Waiter :: struct {
+        semaphore: Semaphore;
+        queue_node: List_Node(#this);
+    }
+
+    wait_queue: List_Node(Waiter);
 }
 
 notify :: (using var: *Condition_Variable) {
     acquire(*lock);
+    ensure_initialized(*wait_queue);
 
-    waiter := queue_pop(*waiters);
-    signal(*waiter.item);
+    waiter := list_pop(*wait_queue);
+    signal(*waiter.semaphore);
 
     release(*lock);
 }
 
 notify_all :: (using var: *Condition_Variable) {
     acquire(*lock);
+    ensure_initialized(*wait_queue);
 
-    for* waiters {
+    for* wait_queue {
         // Remove before signal because waiters may become stale as soon as they get signalled.
-        remove it;
-        signal(*it.item);
+        list_remove(*it.queue_node);
+        signal(*it.semaphore);
     }
 
     release(*lock);
@@ -597,15 +614,17 @@ notify_all :: (using var: *Condition_Variable) {
 wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, timeout := INFINITE_TIMEOUT) -> bool {
     acquire(*lock);
 
-    waiter: waiters.Node;
-    waiter.item.counter_max = 1;
-    queue_push(*waiters, *waiter);
+    waiter: Waiter;
+    waiter.semaphore.counter_max = 1;
+
+    ensure_initialized(*wait_queue);
+    list_append(*wait_queue, *waiter.queue_node);
 
     release(*lock);
 
     release(user_lock);
 
-    signalled := wait_for(*waiter.item, timeout);
+    signalled := wait_for(*waiter.semaphore, timeout);
     if !signalled {
         // Timed out.
         return false;
@@ -917,174 +936,202 @@ task_do_work_in_ring_3 :: () #c_call {
 
 
 
-List_Queue :: struct (Item_Type: Type) {
-    Node :: struct {
-        next: *Node;
-        using item: Item_Type;
+// Circular doubly linked list.
 
-        in_list_queue: *List_Queue(Item_Type);
+
+List_Node :: struct (Item: Type) {
+    // The item type is only used by get_item and is otherwise a bit annoying, due to unnecessary code gen and complications in the debug macro.
+    next: *List_Node(Item);
+    prev: *List_Node(Item);
+
+    #if LIST_DEBUG {
+        metadata: *List_Debug_Metadata;
     }
-
-    first: *Node;
-    last:  *Node;
-
-    name: string;
 }
 
-for_expansion :: (queue: *List_Queue, body: Code, flags: For_Flags) #expand {
-    #assert !(flags & .REVERSE);
+get_item :: (node: *$T/List_Node) -> *T.Item {
 
-    `it_prev: *queue.Node;
+    offset :: #run -> int {
+        // Todo: Allow 'using'?
+        ti_item := type_info(T.Item);
+        ti_node := type_info(T);
 
-    `it := queue.first;
-    `it_index: int;
-
-    while true {
-        if it == null {
-            break;
-        }
-
-        assert(it.in_list_queue == queue);
-
-        // Inserted code must be allowed to edit it.next, e.g. to remove 'it' and put it into a different queue.
-        it_next := it.next;
-
-        removed: bool;
-
-        defer {
-            // Defer, to allow 'continue' to be #inserted below.
-
-            // If the item was removed, the previous item in the list is still the same one as the last iteration.
-            it_prev = ifx removed then it_prev else it;
-
-            it = it_next;
-            it_index += 1;
-        }
-
-        #insert (remove={
-            if it_prev it_prev.next = it.next;
-            else       queue.first  = it.next;
-
-            if queue.last == it {
-                queue.last = it_prev;
+        for ti_item.members {
+            if it.type == ti_node {
+                return it.offset_in_bytes;
             }
-
-            it.next = null;
-            it.in_list_queue = null;
-
-            removed = true;
-        }) body;
-    }
-}
-
-queue_insert :: (queue: *List_Queue, after: *queue.Node, item: *queue.Node) {
-
-    assert(item.in_list_queue == null);
-    item.in_list_queue = queue;
-
-    if queue.last == after {
-        queue.last = item;
-    }
-
-    if after == null {
-        // If 'after' is null, that means put it at as the first item in the queue. This enables calling 'queue_insert' using 'it_prev' from the for_expansion.
-        item.next = queue.first;
-        queue.first = item;
-
-        return;
-    }
-
-    assert(after.in_list_queue == queue);
-
-    item.next = after.next;
-    after.next = item;
-}
-
-queue_push :: (queue: *List_Queue, item: *queue.Node) {
-
-    assert(item.in_list_queue == null);
-    item.in_list_queue = queue;
-
-    if queue.first == null {
-        assert(queue.last == null);
-
-        queue.first = item;
-        queue.last = item;
-
-        return;
-    }
-
-    assert(queue.last != null);
-
-    queue.last.next = item;
-    queue.last      = item;
-}
-
-queue_pop :: (queue: *List_Queue) -> *queue.Node {
-
-    assert(queue.first != null);
-    result := queue.first;
-
-    queue.first = queue.first.next;
-    if queue.first == null queue.last = null;
-
-    assert(result.in_list_queue == queue);
-
-    result.in_list_queue = null;
-    result.next = null;
-    return result;
-}
-
-queue_remove :: (queue: *List_Queue, item: *queue.Node) {
-    for* queue.* if it == item {
-        remove it;
-        break;
-    }
-}
-
-queue_is_empty :: (queue: List_Queue) -> bool {
-    if queue.first == null {
-        assert(queue.last == null);
-        return true;
-    }
-
-    assert(queue.last != null);
-    return false;
-}
-
-
-
-#if 0 {
-    List_Queue :: struct (_Item_Type: Type) {
-        Node :: struct {
-            Item_Type :: _Item_Type;
-            next: *Node;
-
-            // For debugging:
-            in_list_queue: *List_Queue(Item_Type);
         }
 
-        first: *Node;
-        name: string;
+        return -1;
     }
 
-    get_container :: (node: *$T/List_Queue.Node) -> *T.Item_Type {
-        offset :: #run -> int {
-            // Todo: Allow 'using'?
-            ti_item := type_info(T.Item_Type);
-            ti_node := type_info(T);
+    #assert offset != -1;
 
-            for ti_item.members {
-                if it.type == ti_node {
-                    return it.offset_in_bytes;
-                }
+    return cast(*void) node - offset;
+}
+
+list_init :: (head: *List_Node) {
+    DEBUG(head);
+
+    head.next = head;
+    head.prev = head;
+}
+
+ensure_initialized :: inline (head: *List_Node) { // I guess inlining probably makes branch prediction worse.
+    if head.next == null {
+        list_init(head);
+    }
+}
+
+insert_after :: (node: *List_Node, prev: *List_Node) {
+    DEBUG(node, prev);
+
+    next := prev.next;
+
+    next.prev = node;
+    prev.next = node;
+
+    node.next = next;
+    node.prev = prev;
+}
+
+list_append :: (head: *List_Node, node: *List_Node) {
+    DEBUG(head, node);
+
+    insert_after(node, head);
+}
+
+list_prepend :: (head: *List_Node, node: *List_Node) {
+    DEBUG(head, node);
+
+    insert_after(node, head.prev);
+}
+
+list_remove :: (node: *List_Node) {
+    DEBUG(node);
+
+    next := node.next;
+    prev := node.prev;
+
+    next.prev = prev;
+    prev.next = next;
+
+    node.prev = null;
+    node.next = null;
+}
+
+list_pop :: (head: *List_Node) -> *head.Item {
+    if head.next == head return null;
+
+    last := head.prev;
+    list_remove(last);
+
+    return get_item(last);
+}
+
+is_empty :: (head: *List_Node) -> bool {
+    return head.next == head;
+}
+
+for_expansion :: (head: *List_Node, body: Code, flags: For_Flags) #expand {
+
+    `it_index := 0;
+
+    node := head.next;
+
+    while node != head {
+        next := node.next;
+        prefetch(next);
+
+        `it := get_item(node);
+
+        #insert body;
+
+        it_index += 1;
+        node = next;
+    }
+}
+
+
+
+LIST_DEBUG :: true;
+
+List_Debug_Metadata :: struct {
+    is_head: bool;
+    my_head: *void;
+
+    // Todo: We could track the caller location of where the node was added to its current list. Then report that (and the expected value) if there's an issue.
+}
+
+DEBUG :: (a: *List_Node, b: *List_Node) #expand {
+    #if LIST_DEBUG {
+
+        detect_corruption :: (node: *List_Node) {
+            assert(node.next != null);
+            assert(node.prev != null);
+
+            assert(node.next.prev == node);
+            assert(node.prev.next == node);
+            assert(node.prev.prev.next.next == node);
+            assert(node.next.next.prev.prev == node);
+        }
+
+        init_call         :: #procedure_of_call(list_init    (a));
+        insert_after_call :: #procedure_of_call(insert_after (a, b));
+        append_call       :: #procedure_of_call(list_append  (a, b));
+        prepend_call      :: #procedure_of_call(list_prepend (a, b));
+        remove_call       :: #procedure_of_call(list_remove  (a));
+
+        // Can't use a case statement because I can't get the procedures to be constants with the same type as #this.
+
+        if #this == xx init_call {
+            assert(a.metadata == null);
+
+            // Not ideal to use small objects for this because it needs to work in interrupt handlers.
+            // Maybe we can use temporary storage.
+
+            a.metadata = New(List_Debug_Metadata,, global.small_objects);
+            a.metadata.is_head = true;
+            a.metadata.my_head = a;
+        }
+
+        if #this == xx insert_after_call {
+            detect_corruption(b);
+
+            // Todo: We can't validate the metadata here, because it may or may not have been set up by append/prepend.
+
+            if !a.metadata {
+                a.metadata = New(List_Debug_Metadata,, global.small_objects);
+                a.metadata.my_head = b.metadata.my_head;
             }
-
-            return -1;
         }
 
-        #assert offset != -1;
+        if #this == xx append_call || #this == xx prepend_call {
+            detect_corruption(a);
 
-        return cast(*void) node - offset;
+            assert(b.metadata == null);
+
+            assert(a.metadata.is_head);
+            assert(a.metadata.my_head == a);
+
+            b.metadata = New(List_Debug_Metadata,, global.small_objects);
+            b.metadata.my_head = a;
+        }
+
+        if #this == xx remove_call {
+            detect_corruption(a);
+
+            assert(a.metadata != null);
+
+            assert(!a.metadata.is_head);
+            assert(a.metadata.my_head != null);
+
+            free(a.metadata,, global.small_objects);
+            a.metadata = null;
+        }
     }
+}
+
+DEBUG :: (a: *List_Node) #expand { // Can't use a default null argument because of crazy polymorphism.
+    DEBUG(a, cast(type_of(a)) null);
 }

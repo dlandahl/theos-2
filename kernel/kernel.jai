@@ -44,7 +44,7 @@ Kernel_Globals :: struct {
     small_objects: Small_Objects_Allocator;
 
     guarded_memory: struct { // Temporary to help debugging.
-        allocations: List_Queue(Guarded_Allocation);
+        allocations_list: List_Node(Guarded_Allocation);
 
         spinlock: Spinlock;
 
@@ -494,7 +494,8 @@ set_runtime_support_callbacks :: () #no_context {
         buffer: [32] u32;
         do_stack_trace(buffer);
 
-        append_formatted_stack_trace(*builder, buffer);
+        view := array_view(buffer, 3); // Get rid of the top 3 entries which are just assertion handler forwarding.
+        append_formatted_stack_trace(*builder, view);
 
         write_builder(*builder);
 
@@ -1860,6 +1861,8 @@ create_maple_tree :: (min: s64, max: s64) -> Maple_Tree_Node_Expanded {
 // A temporary system to help detect memory bugs.
 
 Guarded_Allocation :: struct {
+    queue_node: List_Node(#this);
+
     client_address: *void; // The part of the allocation the caller can use normally.
 
     physical_base: u64;    // So the allocator knows how to free the physical memory.
@@ -1889,16 +1892,18 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
     map_pages(client_address, physical_aligned, physical_pages);
 
     {
-        node := New(allocations.Node,, global.small_objects);
+        ensure_initialized(*allocations_list);
 
-        node.created_at      = caller_location;
-        node.physical_base   = physical;
-        node.virtual_base    = cast(*void) virtual;
-        node.physical_pages  = physical_pages;
-        node.client_address  = client_address;
+        guarded := New(Guarded_Allocation,, global.small_objects);
+
+        guarded.created_at      = caller_location;
+        guarded.physical_base   = physical;
+        guarded.virtual_base    = cast(*void) virtual;
+        guarded.physical_pages  = physical_pages;
+        guarded.client_address  = client_address;
 
         acquire(*spinlock);
-        queue_push(*allocations, node);
+        list_append(*allocations_list, *guarded.queue_node);
         release(*spinlock);
     }
 
@@ -1908,13 +1913,13 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
 free_guarded_memory :: (client_address: *void) {
     using global.guarded_memory;
 
-    guarded: Guarded_Allocation;
+    guarded: *Guarded_Allocation;
 
     acquire(*spinlock);
 
-    for* allocations if it.client_address == client_address {
-        guarded = it.item;
-        remove it;
+    for* allocations_list if it.client_address == client_address {
+        guarded = it;
+        list_remove(*it.queue_node);
         break;
     }
 
@@ -1926,6 +1931,8 @@ free_guarded_memory :: (client_address: *void) {
 
     free_block(*global.physical_block_allocator,           guarded.physical_base);
     free_block(*global.virtual\_block_allocator, cast(u64) guarded.virtual_base);
+
+    free_small_object(guarded); // Todo: Page fault handler could theoretically be looking at this pointer still.
 }
 
 find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
@@ -1933,7 +1940,7 @@ find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
 
     assert(is_held(spinlock), "Caller should take the lock.");
 
-    for* allocations {
+    for* allocations_list {
         // Calculate the total number of pages by comparing the base address of the whole virtual memory region to the client address. We could also just store this number with the other alloction info.
 
         guard_region_size  := cast(u64) (it.client_address - it.virtual_base);
@@ -1945,7 +1952,7 @@ find_guarded_memory :: (address: *void) -> *Guarded_Allocation {
         limit := it.virtual_base + total_pages * 4096;
 
         if base <= address && address < limit {
-            return *it.item;
+            return it;
         }
     }
 
@@ -2045,7 +2052,9 @@ barrier :: () #expand {
     #asm { mfence; }
 }
 
-
+prefetch :: (address: *void) #expand {
+    #asm { prefetcht0 [address]; }
+}
 
 fetch_add :: (value: *$T, add: T) -> T #no_context {
     #asm {

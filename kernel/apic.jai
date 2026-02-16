@@ -476,6 +476,8 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         print(*b, "RSP: 0x%\n", stack.sp);
         print(*b, "SS: %\n", stack.ss);
         print(*b, "CS: %\n", stack.cs);
+
+        print(*b, "\n");
     }
 
 
@@ -640,9 +642,13 @@ uACPI_State :: struct {
         type:    uacpi_work_type;
         handler: uacpi_work_handler;
         ctx:     uacpi_handle;
+
+        queue_node: List_Node(#this);
     }
 
-    work_queue: List_Queue(Work_Item);
+    // Todo: Should way simplify how this synchronization is done.
+
+    work_queue: List_Node(Work_Item);
     work_queue_lock: Spinlock(.IRQ);
     work_thread: *Task_Info;
     work_in_progress: bool;
@@ -655,12 +661,14 @@ uACPI_State :: struct {
 
         log_category("uACPI");
 
+        list_init(*work_queue);
+
         while true {
             wait_for(*work_added);
 
             acquire(*work_queue_lock);
 
-            item := queue_pop(*work_queue);
+            item := list_pop(*work_queue);
             work_in_progress = true;
 
             release(*work_queue_lock);
@@ -674,7 +682,7 @@ uACPI_State :: struct {
             free_small_object(item);
 
             work_in_progress = false;
-            if queue_is_empty(work_queue) {
+            if is_empty(*work_queue) {
                 notify_all(*work_completed);
             }
 
@@ -970,13 +978,13 @@ uacpi_kernel_schedule_work :: (type: uacpi_work_type, handler: uacpi_work_handle
     using global.uacpi_state;
 
     push_context {
-        item := New(work_queue.Node,, global.small_objects); // Todo: Allocation in interrupt handler.
+        item := New(Work_Item,, global.small_objects); // Todo: Allocation in interrupt handler.
         item.type = type;
         item.handler = handler;
         item.ctx = ctx;
 
         acquire(*work_queue_lock);
-        queue_push(*work_queue, item);
+        list_append(*work_queue, *item.queue_node);
         release(*work_queue_lock);
 
         signal(*work_added);
@@ -996,7 +1004,7 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
 
         acquire(*work_queue_lock);
 
-        predicate :: #code queue_is_empty(work_queue) && !work_in_progress;
+        predicate :: #code is_empty(*work_queue) && !work_in_progress;
         wait_for(*work_completed, *work_queue_lock, predicate);
 
         release(*work_queue_lock);
