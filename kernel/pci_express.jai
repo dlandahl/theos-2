@@ -893,7 +893,7 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
     desc.length = cast(u16) packet.length;
     desc.command = .RS__report_status | .IFCS__insert_fcs | .EOP__end_of_packet;
 
-    barrier();
+    memory_fence();
 
     nic.tx_queue_tail += 1;
     nic.TDT__transmit_descriptor_tail = nic.tx_queue_tail;
@@ -911,9 +911,6 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
 
 Nvme_Controller :: struct {
     using mmio: *Nvme_Property_Memory_Map;
-
-    sq_size: u32;
-    cq_size: u32;
 
     admin_queue: Nvme_Command_Queue;
     io_queue:    Nvme_Command_Queue;
@@ -1440,7 +1437,7 @@ nvme_enqueue_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submiss
     sq_tail += 1;
     sq_tail %= cast(u32)sq.count;
 
-    barrier();
+    memory_fence();
     tail_doorbell.* = sq_tail;
 }
 
@@ -1479,7 +1476,7 @@ nvme_dequeue_all_finished_commands :: (using queue: *Nvme_Command_Queue) {
         }
     }
 
-    barrier();
+    memory_fence();
     head_doorbell.* = cq_head;
 }
 
@@ -1587,6 +1584,10 @@ nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory
     nvme_enqueue_command(*nvme.io_queue, command);
 
     // for pages_allocated free_4k_page(it);
+}
+
+nvme_fence :: (using nvme: *Nvme_Controller) {
+    nvme_spin_drain_queue(*io_queue);
 }
 
 
@@ -1858,7 +1859,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         return;
     }
 
-    barrier();
+    memory_fence();
     assert(!(controller.port.CI__command_issue & 1));
     controller.port.CI__command_issue |= 1;
 
@@ -2150,7 +2151,7 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
         // Reset controller.
 
         set_bit(*hda.GCTL__global_control, .CRST__controller_reset);
-        barrier();
+        memory_fence();
 
         if Timeout(get_bit(hda.GCTL__global_control, .CRST__controller_reset)) {
             log_error("Failed to reset (CRST remains low).");

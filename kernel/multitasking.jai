@@ -95,14 +95,11 @@ core_begin_multitasking :: () {
     if core.id == 0 {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
 
-        idle_task = create_task(cpu_idle_loop, 0x4000, name = "Idle (Core 0)");
+        idle_task = create_task(cpu_idle_loop, 0x8000, name = "Idle (Core 0)");
         idle_task.on_core = core;
 
         current_task.name = "Kernel Main";
     }
-
-    // waiting_to_run.name = sprint("Run Queue (Core %)", core.id);
-    // sleeping.name       = sprint("Sleep Queue (Core %)", core.id);
 
     list_init(*waiting_to_run);
     list_init(*sleeping);
@@ -122,7 +119,7 @@ cpu_idle_loop :: () {
     while true {
         assert(get_rflags() & .IF__interrupt > 0);
 
-        preempt_disable(); // Maybe this is dumb, but if the interrupt that causes 'hlt' to resume is the scheduling clock, we don't need the clock handler to call the scheduler because it will happen anyway.
+        preempt_disable(); // Maybe this is dumb, but if the interrupt that causes 'hlt' to resume is the scheduling clock, we don't need the clock handler to call the scheduler because it will happen anyway. In the future, maybe interrupts should be able to report to whether they require the scheduler to run.
         #asm { hlt; }
         preempt_restore();
 
@@ -668,6 +665,17 @@ fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Cod
 
 
 
+simple_create_thread :: (proc: (), core_id := 1, user_data := null, name := "Simple", format: ..Any) {
+    task := create_task(proc, name = tprint(name, .. format), user_data = user_data);
+
+    core := *global.processor_cores[core_id];
+    assert(core.online);
+
+    put_task_on_core(task, core);
+}
+
+
+
 // In the future we should generate these using metaprogramming, from a table.
 
 yield_from_user_mode :: () #no_context {
@@ -877,7 +885,7 @@ user_mode_stress_test :: (threads_per_core := 4) {
     thread_index := 1;
 
     for *core: global.processor_cores {
-        if core.id != 0 continue;
+        // if core.id != 0 continue;
 
         for 1..threads_per_core {
             name := tprint("Do Work %:%", core.id, thread_index);
@@ -887,15 +895,6 @@ user_mode_stress_test :: (threads_per_core := 4) {
             thread_index += 1;
         }
     }
-}
-
-simple_create_thread :: (proc: (), core_id := 1) {
-    task := create_task(proc, name = "Simple");
-
-    core := *global.processor_cores[core_id];
-    assert(core.online);
-
-    put_task_on_core(task, core);
 }
 
 task_do_work_in_ring_3 :: () #c_call {
@@ -929,7 +928,12 @@ task_do_work_in_ring_3 :: () #c_call {
             ms := random_get() % 2500;
 
             print_from_user_mode("Sleeping for % ms.\n", ms);
+
+            start := get_monotonic_time();
             sleep_from_user_mode(milliseconds_to_apollo(xx ms));
+            end   := get_monotonic_time();
+
+            print_from_user_mode("Sleep time error: %ms\n", to_milliseconds(end - start) - cast(s64) ms);
         }
     }
 }
@@ -938,21 +942,20 @@ task_do_work_in_ring_3 :: () #c_call {
 
 // Circular doubly linked list.
 
-
 List_Node :: struct (Item: Type) {
     // The item type is only used by get_item and is otherwise a bit annoying, due to unnecessary code gen and complications in the debug macro.
+
     next: *List_Node(Item);
     prev: *List_Node(Item);
 
     #if LIST_DEBUG {
-        metadata: *List_Debug_Metadata;
+        using metadata: List_Debug_Metadata;
     }
 }
 
 get_item :: (node: *$T/List_Node) -> *T.Item {
 
     offset :: #run -> int {
-        // Todo: Allow 'using'?
         ti_item := type_info(T.Item);
         ti_node := type_info(T);
 
@@ -998,13 +1001,13 @@ insert_after :: (node: *List_Node, prev: *List_Node) {
 list_append :: (head: *List_Node, node: *List_Node) {
     DEBUG(head, node);
 
-    insert_after(node, head);
+    insert_after(node, head.prev);
 }
 
 list_prepend :: (head: *List_Node, node: *List_Node) {
     DEBUG(head, node);
 
-    insert_after(node, head.prev);
+    insert_after(node, head);
 }
 
 list_remove :: (node: *List_Node) {
@@ -1034,27 +1037,29 @@ is_empty :: (head: *List_Node) -> bool {
 }
 
 for_expansion :: (head: *List_Node, body: Code, flags: For_Flags) #expand {
+    DEBUG(head);
 
     `it_index := 0;
 
     node := head.next;
 
     while node != head {
-        next := node.next;
-        prefetch(next);
+        DEBUG(head, node);
 
         `it := get_item(node);
+
+        node = node.next;
+        prefetch(node);
 
         #insert body;
 
         it_index += 1;
-        node = next;
     }
 }
 
 
 
-LIST_DEBUG :: true;
+LIST_DEBUG :: false;
 
 List_Debug_Metadata :: struct {
     is_head: bool;
@@ -1076,58 +1081,60 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
             assert(node.next.next.prev.prev == node);
         }
 
-        init_call         :: #procedure_of_call(list_init    (a));
-        insert_after_call :: #procedure_of_call(insert_after (a, b));
-        append_call       :: #procedure_of_call(list_append  (a, b));
-        prepend_call      :: #procedure_of_call(list_prepend (a, b));
-        remove_call       :: #procedure_of_call(list_remove  (a));
+        init      :: #procedure_of_call(list_init    (a));
+        insert    :: #procedure_of_call(insert_after (a, b));
+        append    :: #procedure_of_call(list_append  (a, b));
+        prepend   :: #procedure_of_call(list_prepend (a, b));
+        delete    :: #procedure_of_call(list_remove  (a));
 
-        // Can't use a case statement because I can't get the procedures to be constants with the same type as #this.
+        // Can't use a case statement because I can't get the procedures to be constants with the same type as #this. Using compile-time #if == { would be much better though.
 
-        if #this == xx init_call {
-            assert(a.metadata == null);
+        if #this == xx init {
+            assert(a.my_head == null);
 
-            // Not ideal to use small objects for this because it needs to work in interrupt handlers.
-            // Maybe we can use temporary storage.
-
-            a.metadata = New(List_Debug_Metadata,, global.small_objects);
-            a.metadata.is_head = true;
-            a.metadata.my_head = a;
+            a.is_head = true;
+            a.my_head = a;
         }
 
-        if #this == xx insert_after_call {
+        else if #this == xx insert {
             detect_corruption(b);
 
-            // Todo: We can't validate the metadata here, because it may or may not have been set up by append/prepend.
+            assert(a.my_head == null);
+            assert(!a.is_head);
 
-            if !a.metadata {
-                a.metadata = New(List_Debug_Metadata,, global.small_objects);
-                a.metadata.my_head = b.metadata.my_head;
+            a.my_head = b.my_head;
+        }
+
+        else if #this == xx append || #this == xx prepend {
+            assert(a.is_head);
+            assert(a.my_head == a);
+        }
+
+        else if #this == xx delete {
+            detect_corruption(a);
+
+            assert(a.my_head != null);
+            assert(!a.is_head);
+
+            a.my_head = null;
+        }
+
+        else {
+            // A bit brittle, but here we know it's the for expansion as that's the only other place the macro is expanded.
+
+            if b == null {
+                // It's the first DEBUG call, verify the head.
+                detect_corruption(a);
+
+                assert(a.is_head);
+                assert(a.my_head == a);
+            } else {
+                // It's one of the subsequent calls, verify the node against the head.
+                detect_corruption(b);
+
+                assert(!b.is_head);
+                assert(b.my_head == a);
             }
-        }
-
-        if #this == xx append_call || #this == xx prepend_call {
-            detect_corruption(a);
-
-            assert(b.metadata == null);
-
-            assert(a.metadata.is_head);
-            assert(a.metadata.my_head == a);
-
-            b.metadata = New(List_Debug_Metadata,, global.small_objects);
-            b.metadata.my_head = a;
-        }
-
-        if #this == xx remove_call {
-            detect_corruption(a);
-
-            assert(a.metadata != null);
-
-            assert(!a.metadata.is_head);
-            assert(a.metadata.my_head != null);
-
-            free(a.metadata,, global.small_objects);
-            a.metadata = null;
         }
     }
 }

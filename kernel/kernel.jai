@@ -316,29 +316,7 @@ kernel_entry :: () #no_context {
             log("=== Wrote % trace events. ===", trace_event_count);
         });
 
-        tree := create_maple_tree(0, 100);
-
-        maple_add(*tree, 12, 18,  null);
-        maple_add(*tree, 5,  6,   null);
-        maple_add(*tree, 8,  9,   null);
-        maple_add(*tree, 7,  7,   null);
-        maple_add(*tree, 19, 100, null);
-
-        entry_count := get(tree.meta, .entry_count);
-        assert(entry_count >= 1);
-
-        visualize_maple_tree_node(*tree);
-
-        start := get_monotonic_time();
-        for 1..5 disk_test();
-        end   := get_monotonic_time();
-        log("Elapsed: %ms", to_milliseconds(end - start));
-
-        // while true {
-        //     disk_test();
-        //     disk_test();
-        //     network_test();
-        // }
+        user_mode_stress_test();
 
         {
             get_current_task().blocked = true;
@@ -363,13 +341,17 @@ disk_test :: () {
            );
     }
 
+    start := get_monotonic_time();
+
     for 0..transfers-1 {
         start_block   := it * blocks_per_transfer;
         memory_buffer := buffer.data + start_block * global.nvme.block_size;
         nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
+
+        if it % global.nvme.maximum_queue_entries == 0 nvme_fence(*global.nvme);
     }
 
-    nvme_spin_drain_queue(*global.nvme.io_queue);
+    nvme_fence(*global.nvme);
 
     disk_image := fat16_parse_disk_image(buffer);
     root       := fat16_get_root_directory(*disk_image);
@@ -384,9 +366,29 @@ disk_test :: () {
         start_block   := it * blocks_per_transfer;
         memory_buffer := buffer.data + start_block * global.nvme.block_size;
         nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
+
+        if it % global.nvme.maximum_queue_entries == 0 nvme_fence(*global.nvme);
     }
 
-    nvme_spin_drain_queue(*global.nvme.io_queue);
+    nvme_fence(*global.nvme);
+    
+    end   := get_monotonic_time();
+    log("Elapsed: %ms", to_milliseconds(end - start));
+}
+
+maple_tree_test :: () {
+    tree := create_maple_tree(0, 100);
+
+    maple_add(*tree, 12, 18,  null);
+    maple_add(*tree, 5,  6,   null);
+    maple_add(*tree, 8,  9,   null);
+    maple_add(*tree, 7,  7,   null);
+    maple_add(*tree, 19, 100, null);
+
+    entry_count := get(tree.meta, .entry_count);
+    assert(entry_count >= 1);
+
+    visualize_maple_tree_node(*tree);
 }
 
 network_test :: () -> string {
@@ -2048,7 +2050,7 @@ kernel_write_string :: (text: string) #no_context {
 }
 
 
-barrier :: () #expand {
+memory_fence :: () #expand {
     #asm { mfence; }
 }
 
@@ -2246,22 +2248,22 @@ sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
 
             #asm { pause; }
         }
-        barrier(); // These fences are full hardware barriers, but in fact on modern x64, only compiler barriers are needed. Not sure if they are needed in Jai, or how to insert them.
+        memory_fence(); // These fences are full hardware barriers, but in fact on modern x64, only compiler barriers are needed. Not sure if they are needed in Jai, or how to insert them.
 
         #insert body;
 
-        barrier();
+        memory_fence();
         if lock.* == sequence break;
     }
 }
 
 sequence_write :: (lock: *Sequence_Lock, body: Code) #expand {
     lock.* += 1;
-    barrier();
+    memory_fence();
 
     #insert body;
 
-    barrier();
+    memory_fence();
     lock.* += 1;
 }
 

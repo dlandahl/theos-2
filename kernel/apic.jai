@@ -493,7 +493,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
 
     g := find_guarded_memory(cast(*void) cr2);
     if g {
-        print(*b, "This was a guarded allocation requested at %:%.\n",
+        print(*b, "\nThis was a guarded allocation requested at %:%.\n",
               g.created_at.fully_pathed_filename,
               g.created_at.line_number);
     }
