@@ -357,27 +357,82 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, entry: 
 
 
 #insert #run,host -> string {
-    builder: String_Builder;
-    for 0..31 {
-        print(*builder, DEFAULT_ISA_FAULT_HANDLER, it);
-        print(*builder, "\n");
+    Isa_Exception_Definition :: struct {
+        name: string;
+        error_code: bool;
     }
+
+    // Todo: Many of these don't happen in 64-bit mode anyway.
+    exceptions :: Isa_Exception_Definition.[
+        { "Division Error",                    false },
+        { "Debug",                             false },
+        { "Non-maskable Interrupt",            false },
+        { "Breakpoint",                        false },
+        { "Overflow",                          false },
+        { "Bound Range Exceeded",              false },
+        { "Invalid Opcode",                    false },
+        { "Device Not Available",              false },
+        { "Double Fault",                      true  },
+        { "Coprocessor Segment Overrun",       false },
+        { "Invalid TSS",                       true  },
+        { "Segment Not Present",               true  },
+        { "Stack-Segment Fault",               true  },
+        { "General Protection Fault",          true  },
+        { "Page Fault",                        true  },
+        { "Reserved",                          false },
+        { "x87 Floating-Point Exception",      false },
+        { "Alignment Check",                   true  },
+        { "Machine Check",                     false },
+        { "SIMD Floating-Point Exception",     false },
+        { "Virtualization Exception",          false },
+        { "Control Protection Exception",      true  },
+        { "", false }, { "", false }, { "", false }, { "", false }, { "", false }, { "", false },
+        { "Reserved",                          false },
+        { "Hypervisor Injection Exception",    false },
+        { "VMM Communication Exception",       true  },
+        { "Security Exception",                true  },
+    ];
+
+    builder: String_Builder;
+
+    for exceptions {
+        print(*builder, DEFAULT_ISA_FAULT_HANDLER, it_index, it.error_code, ifx it.error_code "WithErrorCode", it.name);
+        append(*builder, "\n");
+    }
+
     return builder_to_string(*builder);
 };
 
-DEFAULT_ISA_FAULT_HANDLER :: #string END
+DEFAULT_ISA_FAULT_HANDLER :: #string,\% END
 #program_export
-default_isa_fault_handler_%1 :: (stack: *void) #c_call {
+default_isa_fault_handler_%1 :: (stack: *Interrupt_Stack_Frame(%2)) #c_call {
+    push_context,defer_pop;
+    push_print_style().base = 16;
+
+    b: String_Builder;
 
     core := get_current_core();
-    write_string("Something bad happened (%1) on core ");
-    write_number(core.id);
-    write_string(" running thread ");
-    write_string(core.scheduler.current_task.name);
-    write_string("\n");
+
+    print(*b, "\nAn ISA exception (%4) occurred.\n");
+    print(*b, "Core ID \%, running thread '\%'.\n", core.id, core.scheduler.current_task.name);
+    print(*b, "\n");
+
+    print(*b, "CPU Context:\n");
+    print(*b, "    RIP: 0x\%\n", stack.ip);
+    print(*b, "    RSP: 0x\%\n", stack.sp);
+    print(*b, "    CS: \%\n", stack.cs);
+    print(*b, "\n");
+
+    buffer: [32] u32;
+    do_stack_trace(buffer);
+
+    print(*b, "Stack Trace:\n");
+    append_formatted_stack_trace(*b, buffer);
+
+    write_builder(*b);
 
     bluescreen();
-} @InterruptRoutine
+} @InterruptRoutine%3
 END;
 
 #program_export
@@ -1012,7 +1067,7 @@ uacpi_kernel_wait_for_work_completion :: () #c_call {
 }
 
 
-do_uacpi_kernel_io_read :: (device: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #c_call {
+do_uacpi_kernel_io_read :: inline (device: uacpi_handle, offset: uacpi_size, value: *$T) -> uacpi_status #c_call {
     #asm {
         mov address: gpr === d, device;
         add address, offset;
@@ -1040,7 +1095,7 @@ uacpi_kernel_io_read32 :: (device: uacpi_handle, offset: uacpi_size, value: *u32
 
 
 
-do_uacpi_kernel_io_write :: (device: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #c_call {
+do_uacpi_kernel_io_write :: inline (device: uacpi_handle, offset: uacpi_size, value: $T) -> uacpi_status #c_call {
     #asm {
         mov address: gpr === d, device;
         add address, offset;

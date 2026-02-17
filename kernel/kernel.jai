@@ -316,8 +316,6 @@ kernel_entry :: () #no_context {
             log("=== Wrote % trace events. ===", trace_event_count);
         });
 
-        user_mode_stress_test();
-
         {
             get_current_task().blocked = true;
             yield_execution();
