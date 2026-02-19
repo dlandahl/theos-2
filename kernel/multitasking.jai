@@ -20,6 +20,8 @@ Task_Info :: struct {
     sleeping: bool;
     blocked: bool;
 
+    priority: Task_Priority;
+
     sleep_until: Apollo_Time;
 
     #as using queue_node: List_Node(#this);
@@ -29,12 +31,19 @@ Task_Info :: struct {
     cpu_time: Apollo_Time;
 }
 
+Task_Priority :: enum {
+    Low;
+    Normal;
+    High;
+    Count;
+}
+
 Scheduler :: struct {
     current_task: *Task_Info;
     idle_task:    *Task_Info;
 
-    sleeping:       List_Node(Task_Info);
-    waiting_to_run: List_Node(Task_Info);
+    sleeping: List_Node(Task_Info);
+    waiting_to_run: [Task_Priority.Count] List_Node(Task_Info);
 
     spinlock: Spinlock(.IRQ);
 
@@ -59,6 +68,15 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
     }
 
     return null;
+}
+
+queue_to_run :: (task: *Task_Info) {
+    scheduler := task.on_core.scheduler;
+
+    assert(is_held(scheduler.spinlock), "Caller should take the lock.");
+
+    run_queue := *scheduler.waiting_to_run[task.priority];
+    list_append(run_queue, task);
 }
 
 get_current_task :: () -> *Task_Info #no_context {
@@ -99,9 +117,10 @@ core_begin_multitasking :: () {
         idle_task.on_core = core;
 
         current_task.name = "Kernel Main";
+        current_task.priority = .Normal;
     }
 
-    list_init(*waiting_to_run);
+    for *waiting_to_run list_init(it);
     list_init(*sleeping);
 
     core.online = true;
@@ -138,7 +157,8 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     }
 
     task.on_core = core;
-    list_append(*scheduler.waiting_to_run, task);
+
+    queue_to_run(task);
 
     release(*scheduler.spinlock);
 }
@@ -189,6 +209,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task.entry_point = entry_point;
     new_task.name = name;
     new_task.user_data = user_data;
+    new_task.priority = .Normal;
 
     return new_task;
 }
@@ -220,25 +241,32 @@ schedule_tasks :: () {
 
             // We can get here if the sleep time of the current task was so short that it wakes itself before context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the current task.
             if it != current {
-                list_append(*waiting_to_run, it);
+                queue_to_run(it);
             }
         }
     }
 
     next: *Task_Info;
-    current_task_wants_to_run := !current.sleeping && !current.blocked && current != scheduler.idle_task;
+    current_task_still_wants_to_run := !current.sleeping && !current.blocked && current != scheduler.idle_task;
 
-    {
-        // Pick next task to run.
-        if !is_empty(*scheduler.waiting_to_run) {
-            next = list_pop(*scheduler.waiting_to_run);
+    // Pick next task to run.
+
+    for<* run_queue: scheduler.waiting_to_run {
+        if current_task_still_wants_to_run {
+            run_queue_priority := cast(Task_Priority) it_index;
+
+            if run_queue_priority < current.priority {
+                break;
+            }
         }
 
-        else if current_task_wants_to_run {
-            next = current;
-        }
+        next = list_pop(run_queue);
+        if next break;
+    }
 
-        else next = scheduler.idle_task;
+    if !next {
+        // Didn't find a task on any run queue.
+        next = ifx current_task_still_wants_to_run then current else scheduler.idle_task;
     }
 
     if next == current {
@@ -246,21 +274,33 @@ schedule_tasks :: () {
         return;
     }
 
-    if current_task_wants_to_run {
-        list_append(*scheduler.waiting_to_run, current);
+    if current_task_still_wants_to_run {
+        queue_to_run(current);
     }
 
-    current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
     current.on_core.task_state_segment.rsp[0] = next.kernel_stack;
+
+    current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
+    scheduler.last_task_switch_timestamp = time_now;
 
     trace(.context_switch, current.id, next.id);
 
-    scheduler.last_task_switch_timestamp = time_now;
     scheduler.current_task = next;
 
     context_switch(current, next);
 
     release(*scheduler.spinlock);
+}
+
+get_task_cpu_time_slow :: () -> Apollo_Time {
+    task := get_current_task();
+    scheduler := lock_scheduler_for_task(task);
+
+    runtime_this_tick := get_monotonic_time() - scheduler.last_task_switch_timestamp;
+    total_time := task.cpu_time + runtime_this_tick;
+
+    release(*scheduler.spinlock);
+    return total_time;
 }
 
 context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
@@ -352,6 +392,8 @@ prepare_task_sleep_until :: (time: Apollo_Time) {
     defer release(*scheduler.spinlock);
 
     task.sleeping = true;
+
+    assert(time > get_monotonic_time());
     task.sleep_until = time;
 
     for* scheduler.sleeping {
@@ -377,7 +419,11 @@ wake_task :: (task: *Task_Info) {
     task.sleeping = false;
 
     list_remove(task);
-    list_append(*scheduler.waiting_to_run, task);
+    queue_to_run(task);
+
+    if task.priority > scheduler.current_task.priority {
+        // Send IPI.
+    }
 
     release(*scheduler.spinlock);
 }
@@ -435,7 +481,7 @@ release :: (using mutex: *Mutex) {
     assert(next.blocked);
     next.blocked = false;
 
-    list_append(*scheduler.waiting_to_run, next);
+    queue_to_run(next);
     release(*scheduler.spinlock);
 }
 
@@ -665,13 +711,33 @@ fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Cod
 
 
 
-simple_create_thread :: (proc: (), core_id := 1, user_data := null, name := "Simple", format: ..Any) {
-    task := create_task(proc, name = tprint(name, .. format), user_data = user_data);
+simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2) {
+    simple_thread_entry :: () {
+        task := get_current_task();
+        user_data: T = (.*) cast(*T) task.user_data;
+
+        inline proc(user_data);
+    }
+
+    data := alloc(size_of(T));
+    memcpy(data, *user_data, size_of(T));
+
+    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data);
 
     core := *global.processor_cores[core_id];
     assert(core.online);
 
     put_task_on_core(task, core);
+
+}
+
+simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2) {
+    wrapper :: (param: void) {
+        inline proc();
+    }
+
+    x: void;
+    simple_create_thread(wrapper, x, name, format, core_id);
 }
 
 
@@ -925,7 +991,7 @@ task_do_work_in_ring_3 :: () #c_call {
                 unlock_from_user_mode(*ring_3_work_mutex);
             }
 
-            ms := random_get() % 2500;
+            ms := random_get() % 2000 + 500;
 
             print_from_user_mode("Sleeping for % ms.\n", ms);
 
@@ -943,7 +1009,6 @@ task_do_work_in_ring_3 :: () #c_call {
 // Circular doubly linked list.
 
 List_Node :: struct (Item: Type) {
-    // The item type is only used by get_item and is otherwise a bit annoying, due to unnecessary code gen and complications in the debug macro.
 
     next: *List_Node(Item);
     prev: *List_Node(Item);
@@ -980,7 +1045,7 @@ list_init :: (head: *List_Node) {
     head.prev = head;
 }
 
-ensure_initialized :: inline (head: *List_Node) { // I guess inlining probably makes branch prediction worse.
+ensure_initialized :: no_inline (head: *List_Node) {
     if head.next == null {
         list_init(head);
     }
@@ -1024,7 +1089,7 @@ list_remove :: (node: *List_Node) {
 }
 
 list_pop :: (head: *List_Node) -> *head.Item {
-    if head.next == head return null;
+    if is_empty(head) return null;
 
     last := head.prev;
     list_remove(last);
@@ -1033,27 +1098,26 @@ list_pop :: (head: *List_Node) -> *head.Item {
 }
 
 is_empty :: (head: *List_Node) -> bool {
+    DEBUG(head);
     return head.next == head;
 }
 
 for_expansion :: (head: *List_Node, body: Code, flags: For_Flags) #expand {
     DEBUG(head);
 
-    `it_index := 0;
-
+   `it_index := -1;
     node := head.next;
 
     while node != head {
         DEBUG(head, node);
 
-        `it := get_item(node);
+       `it := get_item(node);
+        it_index += 1;
 
         node = node.next;
         prefetch(node);
 
         #insert body;
-
-        it_index += 1;
     }
 }
 
@@ -1077,8 +1141,8 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
 
             assert(node.next.prev == node);
             assert(node.prev.next == node);
-            assert(node.prev.prev.next.next == node);
-            assert(node.next.next.prev.prev == node);
+            assert(node.prev.prev.next == node.prev);
+            assert(node.next.next.prev == node.next);
         }
 
         init      :: #procedure_of_call(list_init    (a));
@@ -1086,6 +1150,7 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
         append    :: #procedure_of_call(list_append  (a, b));
         prepend   :: #procedure_of_call(list_prepend (a, b));
         delete    :: #procedure_of_call(list_remove  (a));
+        is_empty  :: #procedure_of_call(is_empty     (a));
 
         // Can't use a case statement because I can't get the procedures to be constants with the same type as #this. Using compile-time #if == { would be much better though.
 
@@ -1105,7 +1170,10 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
             a.my_head = b.my_head;
         }
 
-        else if #this == xx append || #this == xx prepend {
+        else if #this == xx append || #this == xx prepend || #this == xx is_empty {
+            // 'b' is not in the list yet, or not used in the case of is_empty. 'a' is always a list head, so validate that.
+            detect_corruption(a);
+
             assert(a.is_head);
             assert(a.my_head == a);
         }

@@ -717,10 +717,12 @@ receive_tcp_segment :: (tcp: *Tcp_Connection, segment: *Tcp_Header, bytes: int) 
     transmit_tcp_segment(tcp, .ACK);
 }
 
-HTTP_SERVER_PORT :: 80;
+HTTP_SERVER_PORT  :: 80;
 HTTPS_SERVER_PORT :: 443;
 
 
+// Good thread about scheduling.
+// https://news.ycombinator.com/item?id=13102721
 
 // The TLS protocol includes 24 bit integers. This type will be detected
 // by the byteswapping code and be handled correctly.
@@ -1585,7 +1587,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
             return;
         }
 
-        fulfill_condition(*dhcp_completed, #code dhcp_handshake_state = .COMPLETED);
+        fulfill_condition(*dhcp_completed, #code { dhcp_handshake_state = .COMPLETED; });
 
       case .NAK;
         dhcp_handshake_state = .NOT_STARTED;

@@ -310,7 +310,7 @@ kernel_entry :: () #no_context {
         }
 
         simple_create_thread(() {
-            sleep(5, .seconds);
+            sleep(20, .seconds);
             log("=== Writing trace buffers. ===");
             trace_event_count := write_trace_buffers();
             log("=== Wrote % trace events. ===", trace_event_count);
@@ -320,6 +320,46 @@ kernel_entry :: () #no_context {
             get_current_task().blocked = true;
             yield_execution();
         }
+    }
+}
+
+test_test :: () {
+    disk_test();
+    user_mode_stress_test();
+    for 1..5 network_test();
+    disk_test();
+    disk_test();
+    disk_test();
+}
+
+priority_test :: () {
+    proc :: (priority: Task_Priority) {
+        task := get_current_task();
+        task.priority = priority;
+
+        start_cpu_time := get_task_cpu_time_slow();
+
+        start := get_kernel_timestamp();
+        end   := start + seconds_to_apollo(5);
+
+        while get_kernel_timestamp() < end {
+            sleep(100, .milliseconds);
+
+            for 1..1000 {
+                if get_kernel_timestamp() >= end break;
+                busy_wait(100);
+            }
+        }
+
+        end_cpu_time := get_task_cpu_time_slow();
+
+        cpu_time := end_cpu_time - start_cpu_time;
+        log("% priority %ms", priority, to_milliseconds(cpu_time));
+    }
+
+    for 0..5 {
+        priority := cast(Task_Priority) (it / 2);
+        simple_create_thread(proc, priority);
     }
 }
 
@@ -2046,6 +2086,7 @@ kernel_write_string :: (text: string) #no_context {
     serial_out(text, *global.COM1);
     draw_text(text);
 }
+
 
 
 memory_fence :: () #expand {
