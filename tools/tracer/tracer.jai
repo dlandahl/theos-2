@@ -517,13 +517,19 @@ draw_one_frame :: (dt: float) {
                 row_theme.frame_color = .{0.24, 0.12, 0.12, 0.8};
             }
 
+            label_rect := row_rect;
+            lt := *row_theme.label_theme;
+
+            if it.tag == .section_break {
+                text := tprint("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+                label(label_rect, text, lt);
+                continue;
+            }
+
             if button(row_rect, "", *row_theme, it_index) {
                 selected_entry = it_index;
                 update_highlighted_trace_entries();
             }
-
-            label_rect := row_rect;
-            lt := *row_theme.label_theme;
 
             time_seconds := cast(float)it.tsc / cast(float)trace_data.tsc_frequency;
             text := tprint("%", formatFloat(time_seconds, trailing_width=3, zero_removal=.NO));

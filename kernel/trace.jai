@@ -26,6 +26,7 @@ Trace_Tag :: enum u16 {
     nvme_enqueue;
     nvme_SUCCESS;
     nvme_FAILURE;
+    section_break;
 }
 
 Trace_Header :: struct {

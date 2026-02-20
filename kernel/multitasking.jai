@@ -71,7 +71,7 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
 }
 
 queue_to_run :: (task: *Task_Info) {
-    scheduler := task.on_core.scheduler;
+    scheduler := *task.on_core.scheduler;
 
     assert(is_held(scheduler.spinlock), "Caller should take the lock.");
 
@@ -634,7 +634,7 @@ notify_all :: (using var: *Condition_Variable) {
     acquire(*lock);
     ensure_initialized(*wait_queue);
 
-    for* wait_queue {
+    for wait_queue {
         // Remove before signal because waiters may become stale as soon as they get signalled.
         list_remove(*it.queue_node);
         signal(*it.semaphore);
@@ -1174,7 +1174,7 @@ for_expansion :: (head: *List_Node, body: Code, flags: For_Flags) #expand {
 
 
 
-LIST_DEBUG :: false;
+LIST_DEBUG :: true;
 
 List_Debug_Metadata :: struct {
     is_head: bool;
@@ -1201,7 +1201,7 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
         append    :: #procedure_of_call(list_append  (a, b));
         prepend   :: #procedure_of_call(list_prepend (a, b));
         delete    :: #procedure_of_call(list_remove  (a));
-        is_empty  :: #procedure_of_call(is_empty     (a));
+        empty     :: #procedure_of_call(is_empty     (a));
 
         // Can't use a case statement because I can't get the procedures to be constants with the same type as #this. Using compile-time #if == { would be much better though.
 
@@ -1221,7 +1221,7 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
             a.my_head = b.my_head;
         }
 
-        else if #this == xx append || #this == xx prepend || #this == xx is_empty {
+        else if #this == xx append || #this == xx prepend || #this == xx empty {
             // 'b' is not in the list yet, or not used in the case of is_empty. 'a' is always a list head, so validate that.
             detect_corruption(a);
 
