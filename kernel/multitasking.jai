@@ -292,17 +292,6 @@ schedule_tasks :: () {
     release(*scheduler.spinlock);
 }
 
-get_task_cpu_time_slow :: () -> Apollo_Time {
-    task := get_current_task();
-    scheduler := lock_scheduler_for_task(task);
-
-    runtime_this_tick := get_monotonic_time() - scheduler.last_task_switch_timestamp;
-    total_time := task.cpu_time + runtime_this_tick;
-
-    release(*scheduler.spinlock);
-    return total_time;
-}
-
 context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
 
 new_task_start :: () #no_context {
@@ -959,6 +948,68 @@ user_mode_stress_test :: (threads_per_core := 4) {
             put_task_on_core(task, core);
 
             thread_index += 1;
+        }
+    }
+}
+
+
+memory_test :: () {
+    proc :: () {
+        task := get_current_task();
+
+        random_seed(rdtsc() ^ (cast(u64)task.id) ^ cast(u64)(task & 0xffff_ffff));
+
+        memory_buffers: [4] struct {
+            used: bool;
+            size: int;
+            data: *void;
+            sentinel_value: u8;
+        };
+
+        total_clicks: u64;
+
+        for 1..10_000_000 {
+            r := random_get() % memory_buffers.count;
+            buf := *memory_buffers[r];
+
+            log("Managing memory. Buf = %\n", buf.*);
+
+            start := rdtsc();
+
+            if buf.used {
+                for 0..buf.size-1 {
+                    assert((.*) (cast(*u8) buf.data + it) == buf.sentinel_value);
+                }
+
+                free_guarded_memory(buf.data);
+            } else {
+                buf.size = cast(s64) (random_get() % 2000) * 4096;
+                buf.data = allocate_guarded_memory(buf.size, 0x1_0000);
+
+                buf.sentinel_value = cast,trunc(u8) random_get();
+
+                for 0..buf.size-1 {
+                    (.*) (cast(*u8) buf.data + it) = buf.sentinel_value;
+                }
+            }
+
+            end := rdtsc();
+            total_clicks += end - start;
+
+            average_ms := ((total_clicks / cast(u64)it) * 1_000) / global.tsc_frequency;
+            log("Running average: %ms", average_ms);
+
+            buf.used = !buf.used;
+        }
+    }
+
+    threads_per_core := 3;
+
+    for *core: global.processor_cores {
+        for 1..threads_per_core {
+            task := create_task(proc, kernel_stack_size = 0x4_0000, name = "Memory Tester");
+            put_task_on_core(task, core);
+
         }
     }
 }

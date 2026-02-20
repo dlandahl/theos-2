@@ -1,4 +1,7 @@
 
+// Todo: Proper fuzzing and performance measurements converting both directions on all operating systems.
+// Todo: Include perf results here in a comment.
+
 #import "Basic";
 #import "Random";
 

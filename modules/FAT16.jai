@@ -1,8 +1,10 @@
 
-#module_parameters(get_calendar_time := () -> Calendar_Time {
-    apollo := current_time_consensus();
-    return to_calendar(apollo);
-});
+#module_parameters(
+    get_calendar_time := () -> Calendar_Time {
+        apollo := current_time_consensus();
+        return to_calendar(apollo);
+    }
+);
 
 Fat16_Media_Descriptor :: enum u8 {
     FLOPPY     :: 0xf0;

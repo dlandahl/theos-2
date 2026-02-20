@@ -419,7 +419,7 @@ blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIME
     cursor: int;
 
     while true {
-        cursor += read_ring_buffer(*tcp.in_stream, buffer + cursor, bytes - cursor);
+        cursor += read_ring_buffer_copy(*tcp.in_stream, buffer + cursor, bytes - cursor);
 
         if cursor == bytes break;
 
@@ -437,7 +437,7 @@ blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TI
     while true {
         to_write := string.{bytes.count - cursor, bytes.data + cursor};
 
-        cursor += write_ring_buffer(*tcp.out_stream, to_write);
+        cursor += write_ring_buffer_copy(*tcp.out_stream, to_write);
 
         if cursor == bytes.count break;
 
@@ -539,8 +539,8 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     tcp.sequence_number = sequence_number;
     tcp.ack_number = 0;
 
-    tcp.in\_stream.buffer = NewArray(0x1000, u8);
-    tcp.out_stream.buffer = NewArray(0x1000, u8);
+    allocate_ring_buffer(*tcp.in\_stream, 0x1000);
+    allocate_ring_buffer(*tcp.out_stream, 0x1000);
 
     tcp.in\_data.counter_max = 1;
     tcp.out_data.counter_max = 1;
@@ -589,7 +589,7 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
             payload: string;
             payload.data = talloc(bytes_per_packet);
 
-            bytes := read_ring_buffer(*tcp.out_stream, payload.data, bytes_per_packet);
+            bytes := read_ring_buffer_copy(*tcp.out_stream, payload.data, bytes_per_packet);
             payload.count = bytes;
 
             if bytes {
@@ -709,7 +709,7 @@ receive_tcp_segment :: (tcp: *Tcp_Connection, segment: *Tcp_Header, bytes: int) 
     packet_data.data = cast(*u8) (segment + 1);
     packet_data.count = bytes;
 
-    written := write_ring_buffer(*tcp.in_stream, packet_data);
+    written := write_ring_buffer_copy(*tcp.in_stream, packet_data);
 
     signal(*tcp.in_data);
 
@@ -2291,4 +2291,109 @@ network_thread :: () {
             }
         }
     }
+}
+
+
+
+// SPSC ring buffer based on multiple articles by F.G.
+//     https://fgiesen.wordpress.com/2012/07/21/the-magic-ring-buffer
+//     https://fgiesen.wordpress.com/2010/12/14/ring-buffers-and-queues
+//
+// Size must be a power of 2 and a multiple of the page size.
+
+Ring_Buffer :: struct {
+    buffer: [] u8;
+
+    physical_base: u64;
+
+    read_cursor:       int;
+    read_reserve_size: int;    
+
+    _: void #align 64; // Put stuff that each thread writes to into separate cache blocks.
+    write_cursor:       int;
+    write_reserve_size: int;
+}
+
+allocate_ring_buffer :: (ring: *Ring_Buffer, size: int) {
+    // Todo: Think about implications (TLB shootdowns) of creating arbitrary custom memory mappings in the kernel. Because this data structure explicitly has two users (reader and writer) it's hopefully easy to track/clean up TLB.
+
+    assert(size % 4096 == 0);
+    page_count := size / 4096;
+
+    physical_base, physical := allocate_page_aligned_physical_memory(size);
+    virtual := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) size * 2);
+
+    map_pages(virtual,        physical, page_count);
+    map_pages(virtual + size, physical, page_count);
+
+    ring.buffer.count = size;
+    ring.buffer.data  = virtual;
+    ring.physical_base = physical_base;
+}
+
+ring_buffer_start_write :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
+    // Note to user: If there is not enough space, just wait and call this again later. It will replace the old reservation.
+
+    wrapped := ring.write_cursor & (ring.buffer.count-1);
+    base_address := ring.buffer.data + wrapped;
+
+    available := get_space_available(ring);
+    ring.write_reserve_size = min(size, available);
+
+    return base_address, available;
+}
+
+ring_buffer_finish_write :: (ring: *Ring_Buffer) {
+    ring.write_cursor += ring.write_reserve_size;
+    ring.write_reserve_size = 0;
+}
+
+ring_buffer_start_read :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
+    wrapped := ring.write_cursor & (ring.buffer.count-1);
+    base_address := ring.buffer.data + wrapped;
+
+    // As with writing regarding available space.
+    available := get_data_available(ring);
+    ring.read_reserve_size = min(size, available);
+
+    return base_address, ring.read_reserve_size;
+}
+
+ring_buffer_finish_read :: (ring: *Ring_Buffer) {
+    ring.read_cursor += ring.read_reserve_size;
+    ring.read_reserve_size = 0;
+}
+
+// API for when buffer read/write is just a memcpy.
+
+write_ring_buffer_copy :: (ring: *Ring_Buffer, data: $T/.[[]u8, string]) -> bytes_written: int {
+    assert(ring.write_reserve_size == 0);
+
+    to_write := min(data.count, get_space_available(ring));
+    wrapped  := ring.write_cursor & (ring.buffer.count-1);
+
+    memcpy(ring.buffer.data + wrapped, data.data, to_write);
+
+    ring.write_cursor += to_write;
+    return to_write;
+}
+
+read_ring_buffer_copy :: (ring: *Ring_Buffer, output: *u8, bytes_wanted: int) -> bytes_read: int {
+    assert(ring.read_reserve_size == 0);
+
+    to_read := min(bytes_wanted, get_data_available(ring));
+    wrapped := ring.read_cursor & (ring.buffer.count-1);
+
+    memcpy(output, ring.buffer.data + wrapped, to_read);
+
+    ring.read_cursor += to_read;
+    return to_read;
+}
+
+get_space_available :: inline (ring: Ring_Buffer) -> int {
+    return ring.buffer.count - (ring.write_cursor - ring.read_cursor);
+}
+
+get_data_available :: inline (ring: Ring_Buffer) -> int {
+    return ring.write_cursor - ring.read_cursor;
 }

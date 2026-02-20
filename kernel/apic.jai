@@ -70,12 +70,38 @@ Apic_Register :: enum {
     EXTENDED_FEATURE          :: 0x400;
 }
 
+Apic_Interrupt_Command :: union {
+    struct {
+        command:     u32;
+        destination: u32;
+    };
+
+    #as _: enum u64 {
+        vector           :: 8;
+        delivery_mode    :: 3;
+        destination_mode :: 1;
+        delivery_status  :: 1;
+        _                :: 1;
+        level            :: 1;
+        trigger_mode     :: 1;
+        _                :: 2;
+        destination_shorthand :: 2;
+        _                :: 36;
+        destination      :: 8;
+    }
+}
+
+send_apic_interrupt_command :: (icr: Apic_Interrupt_Command) {
+    write_apic_register(.DES__INTERRUPT_DEST,    icr.destination);
+    write_apic_register(.ICR__INTERRUPT_COMMAND, icr.command);
+}
+
 read_apic_register :: (register: Apic_Register) -> u32 #no_context {
     if global.apic == null {
         bluescreen();
     }
 
-    return cast(*u32, global.apic + cast(u64) register).*;
+    return (.*) cast(*u32) (global.apic + cast(u64) register);
 }
 
 write_apic_register :: (register: Apic_Register, value: u32) #no_context {
@@ -83,7 +109,7 @@ write_apic_register :: (register: Apic_Register, value: u32) #no_context {
         bluescreen();
     }
 
-    cast(*u32, global.apic + cast(u64) register).* = value;
+    (.*) cast(*u32) (global.apic + cast(u64) register) = value;
 }
 
 initialize_apic :: () {
@@ -236,18 +262,23 @@ startup_application_processors :: () {
         // Todo: Maybe this needs a timeout in case a core fails to start.
         acquire(*ap_startup_spinlock);
 
-        ap_startup_data.stack = alloc(0x8_0000) + 0x8_0000;
+        stack_size :: 0x1_0000;
+        guard_size :: 0x1_0000;
+        ap_startup_data.stack = allocate_guarded_memory(stack_size, guard_size) + stack_size;
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
 
-        // Todo: People online are saying these sometimes need to be executed multiple times per core.
-        // Todo: Magic numbers
-        command: u32;
-        command = (0b101 << 8) | (1 << 14); // INIT IPI
-        write_apic_register(.ICR__INTERRUPT_COMMAND, command);
+        init: Apic_Interrupt_Command;
+        set(*init, .delivery_mode, 0b101);
+        set(*init, .level, 1);
+        set(*init, .destination, it.local_apic_id);
+        send_apic_interrupt_command(init);
 
-        command = (0b110 << 8) | 8; // STARTUP IPI
-        write_apic_register(.ICR__INTERRUPT_COMMAND, command);
+        ipi: Apic_Interrupt_Command;
+        set(*ipi, .delivery_mode, 0b110);
+        set(*ipi, .vector, 8);
+        set(*ipi, .destination, it.local_apic_id);
+        send_apic_interrupt_command(ipi);
     }
 }
 
@@ -594,7 +625,7 @@ general_protection_fault :: (stack: *Interrupt_Stack_Frame(with_error_code = tru
         table       :=            bitfield_get(selector_error, .descriptor_table_kind);
         index       :=            bitfield_get(selector_error, .selector_index);
 
-        print(*b, "Error code: external=%, table=%, index=% (0x%)\n", is_external, table_names[table], formatInt(index, base=10), index);
+        print(*b, "\nError code: external=%, table=%, index=% (0x%)\n\n", is_external, table_names[table], formatInt(index, base=10), index);
 
         buffer: [32] u32;
         do_stack_trace(buffer);

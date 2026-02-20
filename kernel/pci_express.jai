@@ -1603,7 +1603,7 @@ Ahci_Controller :: struct {
 }
 
 #program_export
-ahci_interrupt :: (data: *void) {
+ahci_interrupt :: (data: *void) #c_call {
     write_string("Handling AHCI Interrupt.\n");
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine

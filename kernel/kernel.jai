@@ -309,11 +309,23 @@ kernel_entry :: () #no_context {
             }
         }
 
+        gate := allocate_interrupt_gate();
+        register_interrupt_gate(isr__ipi_handler, gate);
+
+        for global.processor_cores {
+            icr: Apic_Interrupt_Command;
+            set(*icr, .destination, it.local_apic_id);
+            set(*icr, .vector, gate);
+            send_apic_interrupt_command(icr);
+        }
+
+        test_test();
+
         simple_create_thread(() {
-            sleep(20, .seconds);
-            log("=== Writing trace buffers. ===");
+            sleep(5, .seconds);
+            log("\n=== Writing trace buffers. ===\n\n");
             trace_event_count := write_trace_buffers();
-            log("=== Wrote % trace events. ===", trace_event_count);
+            log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
         {
@@ -323,16 +335,41 @@ kernel_entry :: () #no_context {
     }
 }
 
+#program_export
+ipi_handler :: (stack: *void) #c_call {
+    push_context,defer_pop;
+
+    core := get_current_core();
+    log("Received IPI. Core: %.", core.id);
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+} @InterruptRoutine
+
 test_test :: () {
     disk_test();
-    user_mode_stress_test();
-    for 1..5 network_test();
+    user_mode_stress_test(3);
+    priority_test();
+    network_test();
     disk_test();
     disk_test();
+    network_test();
     disk_test();
+    network_test();
 }
 
 priority_test :: () {
+
+    get_task_cpu_time_slow :: () -> Apollo_Time {
+        task := get_current_task();
+        scheduler := lock_scheduler_for_task(task);
+
+        runtime_this_tick := get_monotonic_time() - scheduler.last_task_switch_timestamp;
+        total_time := task.cpu_time + runtime_this_tick;
+
+        release(*scheduler.spinlock);
+        return total_time;
+    }
+
     proc :: (priority: Task_Priority) {
         task := get_current_task();
         task.priority = priority;
@@ -359,7 +396,7 @@ priority_test :: () {
 
     for 0..5 {
         priority := cast(Task_Priority) (it / 2);
-        simple_create_thread(proc, priority);
+        simple_create_thread(proc, priority, name = "% priority", priority);
     }
 }
 
@@ -731,7 +768,7 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 bluescreen :: () #no_context {
-    write_string("\nBluescreen!\n");
+    write_string("Bluescreen!\n");
 
     using global.framebuffer;
 
@@ -1106,6 +1143,23 @@ free_4k_page :: (address: u64) {
     free_small_object(cast(*void)address + DIRECT_MAPPING_BASE);
 }
 
+
+
+allocate_page_aligned_physical_memory :: (size_bytes: s64) -> base: u64, aligned: u64 {
+
+    assert(size_bytes % 4096 == 0);
+
+    // Physical block allocator doesn't return page aligned memory, so overallocate by the maximum offset that we may need to apply to align. This is bad because the caller needs to track the base address of the whole physical region in order to free it, not just the aligned address that they wanted.
+
+    guaranteed_alignment := global.physical_block_allocator.alignment;
+    padded_size          := size_bytes + 4096 - guaranteed_alignment;
+
+    allocated_base := alloc_block(*global.physical_block_allocator, cast(u64)padded_size);
+    aligned := align(4096, allocated_base);
+
+    // When freeing this memory, call free_block on allocated_base.
+    return allocated_base, aligned;
+}
 
 
 Page_Flags :: enum_flags u64 {
@@ -1918,15 +1972,12 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
     assert(size              % 4096 == 0, "Guarded allocation size must be a multiple of 4KB.");
     assert(guard_region_size % 4096 == 0, "Guarded allocation size must be a multiple of 4KB.");
 
-    // Physical block allocator doesn't return page aligned memory, so worst case we have to offset by 4095 bytes to align the returned memory.
-    padded_size  := size + 4095;
-    virtual_size := padded_size + 2 * guard_region_size; // Put guard regions on both sides because why not?
+    physical_base, physical_aligned := allocate_page_aligned_physical_memory(size);
 
-    physical := alloc_block(*global.physical_block_allocator, cast(u64) padded_size);
-    virtual  := alloc_block(*global.virtual_block_allocator,  cast(u64) virtual_size);
+    virtual_size := size + 2 * guard_region_size;
+    virtual      := alloc_block(*global.virtual_block_allocator,  cast(u64) virtual_size);
 
-    physical_pages    := padded_size / 4096;
-    physical_aligned  := align(4096, physical);
+    physical_pages    := size / 4096;
     client_address    := cast(*void) virtual + guard_region_size;
 
     map_pages(client_address, physical_aligned, physical_pages);
@@ -1937,7 +1988,7 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
         guarded := New(Guarded_Allocation,, global.small_objects);
 
         guarded.created_at      = caller_location;
-        guarded.physical_base   = physical;
+        guarded.physical_base   = physical_base;
         guarded.virtual_base    = cast(*void) virtual;
         guarded.physical_pages  = physical_pages;
         guarded.client_address  = client_address;
@@ -2652,7 +2703,6 @@ clear_bit    :: bitfield_clear_bit;
 set_in_place :: bitfield_set_in_place;
 get_in_place :: bitfield_get_in_place;
 
-#import "Ring_Buffer";
 #import "ASN1";
 #import "Aes";
 #import "Jai_Crypto";
@@ -2675,7 +2725,6 @@ Curve25519 :: #import "Curve25519";
 #load "pci_express.jai";
 #load "multitasking.jai";
 #load "time.jai";
-#load "file_system.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";
