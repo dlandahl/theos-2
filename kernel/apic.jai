@@ -91,7 +91,7 @@ Apic_Interrupt_Command :: union {
     }
 }
 
-send_apic_interrupt_command :: (icr: Apic_Interrupt_Command) {
+apic_execute_ipi :: (icr: Apic_Interrupt_Command) {
     write_apic_register(.DES__INTERRUPT_DEST,    icr.destination);
     write_apic_register(.ICR__INTERRUPT_COMMAND, icr.command);
 }
@@ -162,11 +162,15 @@ initialize_apic :: () {
         return builder_to_string(*builder);
     };
 
+    // For consistency maybe we should also consider ISA exceptions as reserved interrupt gate numbers.
     register_interrupt_gate(isr__debug_exception,          1,  true);
     register_interrupt_gate(isr__breakpoint_handler,       3,  true);
     register_interrupt_gate(isr__general_protection_fault, 13, true);
     register_interrupt_gate(isr__page_fault,               14, true, ist = 1);
     register_interrupt_gate(isr__floating_point_exception, 19, true);
+
+    register_interrupt_gate(isr__ipi_handler__procedure_call, cast(s64) Interrupt_Gate.PROCEDURE_CALL_IPI);
+    register_interrupt_gate(isr__ipi_handler__reschedule,     cast(s64) Interrupt_Gate.RESCHEDULE_IPI);
 
     //
     // Iterate interrupt controller structures
@@ -272,13 +276,13 @@ startup_application_processors :: () {
         set(*init, .delivery_mode, 0b101);
         set(*init, .level, 1);
         set(*init, .destination, it.local_apic_id);
-        send_apic_interrupt_command(init);
+        apic_execute_ipi(init);
 
         ipi: Apic_Interrupt_Command;
         set(*ipi, .delivery_mode, 0b110);
         set(*ipi, .vector, 8);
         set(*ipi, .destination, it.local_apic_id);
-        send_apic_interrupt_command(ipi);
+        apic_execute_ipi(ipi);
     }
 }
 
@@ -384,6 +388,86 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, entry: 
     global.io_apic[0] = register_index+1;
     global.io_apic[4] = 0;
 }
+
+
+
+execute_ipi :: (gate: Interrupt_Gate, target: *X64_Core) {
+    // Slightly higher level version of "apic_execute_ipi" for callers that
+    // don't want to be concerned with the interrupt command bitfield.
+
+    ipi: Apic_Interrupt_Command;
+    set(*ipi, .vector,      xx gate);
+    set(*ipi, .destination, target.local_apic_id);
+    apic_execute_ipi(ipi);
+}
+
+
+
+Procedure_Call_Info :: struct {
+    list_node: List_Node(#this);
+
+    procedure: (*void);
+    parameter: *void;
+    completed: bool;
+}
+
+do_procedure_call_ipi_synchronous :: (procedure: (*void), parameter: *void, core_id: int) {
+
+    call: Procedure_Call_Info;
+    call.procedure = procedure;
+    call.parameter = parameter;
+
+    core       := *global.processor_cores[core_id];
+    queue      := *core.procedure_calls;
+    queue_lock := *core.procedure_call_queue_lock;
+
+    acquire(queue_lock);
+
+    ensure_initialized(queue);
+    list_append(queue, *call.list_node);
+
+    release(queue_lock);
+
+    execute_ipi(.PROCEDURE_CALL_IPI, core);
+
+    while !call.completed {
+        #asm { pause; }
+    }
+}
+
+#program_export
+ipi_handler__procedure_call :: (stack: *void) #c_call {
+    push_context,defer_pop;
+
+    core := get_current_core();
+
+    while true {
+        acquire(*core.procedure_call_queue_lock);
+        call := list_pop(*core.procedure_calls);
+        release(*core.procedure_call_queue_lock);
+
+        if !call break;
+
+        call.procedure(call.parameter);
+        call.completed = true;
+    }
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+} @InterruptRoutine
+
+#program_export
+ipi_handler__reschedule :: (stack: *void) #c_call {
+    push_context,defer_pop;
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+
+    if cpu_local_read("preempt_disable_count") > 0 {
+        // Todo: We need to reschedule once preemption is enabled.
+        return;
+    }
+
+    schedule_tasks();
+} @InterruptRoutine
 
 
 

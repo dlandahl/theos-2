@@ -421,7 +421,7 @@ wake_task :: (task: *Task_Info) {
     queue_to_run(task);
 
     if task.priority > scheduler.current_task.priority {
-        // Send IPI.
+        execute_ipi(.RESCHEDULE_IPI, task.on_core); // Maybe task_info should store the ID of the core rather than a pointer.
     }
 
     release(*scheduler.spinlock);

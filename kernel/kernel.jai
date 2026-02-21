@@ -11,14 +11,15 @@ X64_Core :: struct {
     scheduler: Scheduler;
 
     preempt_disable_count: s64;
-
     interrupt_context_active: s64;
-
     irq_disable_count: s64;
 
     online: bool; // The core has called core_begin_multitasking, so we can put threads on it.
 
     mcs_node: MCS_Node;
+
+    procedure_call_queue_lock: Spinlock(.IRQ);
+    procedure_calls: List_Node(Procedure_Call_Info);
 }
 
 // This can't be in Kernel_Globals, or else, due to the size of the IOPB, the compiler will
@@ -309,23 +310,10 @@ kernel_entry :: () #no_context {
             }
         }
 
-        gate := allocate_interrupt_gate();
-        register_interrupt_gate(isr__ipi_handler, gate);
-
-        for global.processor_cores {
-            icr: Apic_Interrupt_Command;
-            set(*icr, .destination, it.local_apic_id);
-            set(*icr, .vector, gate);
-            send_apic_interrupt_command(icr);
-        }
-
-        test_test();
-
         simple_create_thread(() {
             get_current_task().priority = .High;
 
             sleep(5, .seconds);
-
             log("\n=== Writing trace buffers. ===\n\n");
             trace_event_count := write_trace_buffers();
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
@@ -338,19 +326,68 @@ kernel_entry :: () #no_context {
     }
 }
 
-#program_export
-ipi_handler :: (stack: *void) #c_call {
-    push_context,defer_pop;
+tlb_shootdown_test :: () {
 
-    core := get_current_core();
-    log("Received IPI. Core: %.", core.id);
+    First_Sentinel_Value  : s64 : 0xcafebabe;
+    Second_Sentinel_Value : s64 : 0xfacedbaddecaf;
 
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
-} @InterruptRoutine
+    Shared_Data :: struct {
+        first:  Semaphore;
+        second: Semaphore;
+
+        virtual_page: *void;
+    }
+    shared: Shared_Data;
+
+    first_thread :: (shared: *Shared_Data) {
+        physical_page := get_4k_page();
+
+        shared.virtual_page = cast(*void) alloc_block(*global.virtual_block_allocator, 4096);
+
+        map_pages(shared.virtual_page, physical_page, 1);
+
+        (.*) cast(*s64) shared.virtual_page = First_Sentinel_Value;
+
+        signal(*shared.first);
+        wait_for(*shared.second);
+
+        new_physical_page := get_4k_page();
+        unmap_pages(shared.virtual_page, 1);
+        map_pages(shared.virtual_page, new_physical_page, 1);
+
+        // TLB entry will have been flushed by map_pages.
+        (.*) cast(*s64) shared.virtual_page = Second_Sentinel_Value;
+
+        signal(*shared.first);
+        wait_for(*shared.second);
+    }
+
+    second_thread :: (shared: *Shared_Data) {
+        wait_for(*shared.first);
+
+        address: *s64 = shared.virtual_page;
+        assert(address.* == First_Sentinel_Value);
+
+        signal(*shared.second);
+        wait_for(*shared.first);
+
+        assert(address.* == First_Sentinel_Value);
+
+        signal(*shared.second);
+        wait_for(*shared.first);
+
+        // Todo.
+    }
+
+    simple_create_thread(first_thread,  *shared, "First",  core_id = 1);
+    simple_create_thread(second_thread, *shared, "Second", core_id = 2);
+
+    while true {}
+}
 
 test_test :: () {
     disk_test();
-    // user_mode_stress_test(3, 0b1100);
+    user_mode_stress_test(3, 0b1100);
     priority_test();
     network_test();
     disk_test();
@@ -2401,10 +2438,19 @@ LRU_TAIL      :: -1;
 
 
 
+Interrupt_Gate :: enum {
+    FIRST_RESERVED :: 0xa0;
+
+    PROCEDURE_CALL_IPI :: FIRST_RESERVED;
+    RESCHEDULE_IPI;
+
+    SPURIOUS :: 0xff;
+}
+
 allocate_interrupt_gate :: () -> int {
     using global;
 
-    assert(next_free_interrupt_gate < 0xff);
+    assert(next_free_interrupt_gate < cast(s64) Interrupt_Gate.FIRST_RESERVED, "Registering too many interrupts dynamically.");
 
     result := next_free_interrupt_gate;
     next_free_interrupt_gate += 1;
