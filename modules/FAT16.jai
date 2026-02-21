@@ -714,6 +714,8 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
 
 fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
 
+    b: String_Builder;
+
     Dir_Stack_Entry :: struct {
         total_entries: int;
         entries_printed: int;
@@ -730,7 +732,7 @@ fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
         root_stack_entry.total_entries += 1;
     }
 
-    print("\n   root\n");
+    print(*b, "\n   root\n");
 
     while true {
         top := peek_pointer(stack);
@@ -748,13 +750,13 @@ fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
             more_entries := it.entries_printed <  it.total_entries;
 
             if last_entry && is_top {
-                print("   └");
+                print(*b, "   └");
             } else if more_entries && is_top {
-                print("   ├");
+                print(*b, "   ├");
             } else if more_entries {
-                print("   │");
+                print(*b, "   │");
             } else {
-                print("    ");
+                print(*b, "    ");
             }
         }
 
@@ -766,7 +768,7 @@ fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
 
             if index == top.entries_printed {
 
-                print("── %\n", to_lower_copy(name,, temp));
+                print(*b, "── %\n", to_lower_copy(name,, temp));
                 top.entries_printed += 1;
 
                 if it.attributes & .DIRECTORY {
@@ -789,7 +791,8 @@ fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
         }
     }
 
-    print("\n");
+    print(*b, "\n");
+    write_builder(*b);
 }
 
 

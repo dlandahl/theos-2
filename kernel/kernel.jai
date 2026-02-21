@@ -322,14 +322,17 @@ kernel_entry :: () #no_context {
         test_test();
 
         simple_create_thread(() {
+            get_current_task().priority = .High;
+
             sleep(5, .seconds);
+
             log("\n=== Writing trace buffers. ===\n\n");
             trace_event_count := write_trace_buffers();
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
         {
-            get_current_task().blocked = true;
+            set_flag(.stopped, get_current_task());
             yield_execution();
         }
     }
@@ -347,7 +350,7 @@ ipi_handler :: (stack: *void) #c_call {
 
 test_test :: () {
     disk_test();
-    user_mode_stress_test(3);
+    // user_mode_stress_test(3, 0b1100);
     priority_test();
     network_test();
     disk_test();
@@ -649,6 +652,40 @@ set_runtime_support_callbacks :: () #no_context {
     }
 }
 
+// A bit messy as these are only called in new_task_start. For the main boot thread, temporary storage is required so early that get_current_task is not possible yet. For AP threads, temporary storage is not used so we don't allocate it.
+
+setup_temporary_storage :: () {
+    ts_data := alloc(TEMPORARY_STORAGE_SIZE);
+
+    ts := New(Temporary_Storage,, global.small_objects);
+    set_initial_data(ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
+
+    context.temporary_storage = ts;
+
+    // Storing TS on the task_info is mainly used to reactivate the same temporary storage when a syscall is made.
+    task := get_current_task();
+    task.temporary_storage = ts;
+}
+
+shutdown_temporary_storage :: () {
+    ts := context.temporary_storage;
+    assert(ts != null);
+
+    free(ts.original_data);
+
+    overflow := ts.overflow_pages;
+    while overflow {
+        next := overflow.next;
+        free(overflow,, overflow.allocator);
+        overflow = next;
+    }
+
+    free(ts,, global.small_objects);
+
+    task := get_current_task();
+    task.temporary_storage = null;
+}
+
 init_processor_core :: () {
     core: *X64_Core;
 
@@ -664,7 +701,7 @@ init_processor_core :: () {
             }
         }
 
-        assert(core != null, "APIC id not found: %", my_local_apic_id);
+        assert(core != null, "APIC ID not found: %", my_local_apic_id);
 
         #asm FSGSBASE { wrgsbase core; }
     }

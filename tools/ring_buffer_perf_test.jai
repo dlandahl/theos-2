@@ -46,7 +46,7 @@ main :: () {
             buffer.count = bytes_to_write;
             buffer.data  = cast(*u8)source.data + produced * 8;
 
-            written := write_ring_buffer(*ring, buffer);
+            written := write_ring_buffer_copy(*ring, buffer);
 
             produced += written / 8;
         }
@@ -68,7 +68,7 @@ main :: () {
 
             output := cast(*u8)target.data + consumed * 8;
 
-            read := read_ring_buffer(*ring, output, bytes_to_read);
+            read := read_ring_buffer_copy(*ring, output, bytes_to_read);
 
             consumed += read / 8;
         }
@@ -119,97 +119,94 @@ Ring_Buffer :: struct {
 
     physical_base: u64;
 
-    _: void #align 64; // Cache block that the reader thread writes to.
-    read_cursor:  int;
-    reserved_read_bytes: int;    
+    read_cursor:       int;
+    read_reserve_size: int;    
 
-    _: void #align 64; // Cache block that the writer thread writes to.
-    write_cursor: int #align 64;
-    reserved_write_bytes: int;
+    _: void #align 64; // Put stuff that each thread writes to into separate cache blocks.
+    write_cursor:       int;
+    write_reserve_size: int;
 }
 
 allocate_ring_buffer :: (ring: *Ring_Buffer, size: int) {
-    path: [128] u8;
-    static := "/dev/shm/ring-buffer-XXXXXX\0";
-    memcpy(path.data, static.data, static.count);
+    // Todo: Think about implications (TLB shootdowns) of creating arbitrary custom memory mappings in the kernel. Because this data structure explicitly has two users (reader and writer) it's hopefully easy to track/clean up TLB.
 
-    file_descriptor := mkstemp(path.data);
-    assert(file_descriptor > 0);
-    assert(unlink(path.data) == 0);
+    assert(size % 4096 == 0);
+    page_count := size / 4096;
+
+    physical_base, physical := allocate_page_aligned_physical_memory(size);
+    virtual := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) size * 2);
+
+    map_pages(virtual,        physical, page_count);
+    map_pages(virtual + size, physical, page_count);
 
     ring.buffer.count = size;
-
-    assert(ftruncate(file_descriptor, size) == 0);
-
-    ring.buffer.data = mmap(null, xx (size * 2), PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-
-    address_0 := mmap(ring.buffer.data, xx size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, file_descriptor, 0);
-    assert(address_0 == ring.buffer.data);
-
-    address_1 := mmap(ring.buffer.data + size, xx size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, file_descriptor, 0);
-    assert(address_1 == ring.buffer.data + size);
-
-    close(file_descriptor);
+    ring.buffer.data  = virtual;
+    ring.physical_base = physical_base;
 }
 
 ring_buffer_start_write :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
+    // Note to user: If there is not enough space, just wait and call this again later. It will replace the old reservation.
+
     wrapped := ring.write_cursor & (ring.buffer.count-1);
     base_address := ring.buffer.data + wrapped;
 
-    ring.reserved_write_bytes = size;
+    available := get_space_available(ring);
+    ring.write_reserve_size = min(size, available);
 
-    // If there is not enough space, just wait and call this again later. It will replace the old reservation.
-    return base_address, get_space_available(ring);
+    return base_address, available;
 }
 
 ring_buffer_finish_write :: (ring: *Ring_Buffer) {
-    ring.write_cursor += ring.reserved_write_bytes;
-    ring.reserved_write_bytes = 0;
+    ring.write_cursor += ring.write_reserve_size;
+    ring.write_reserve_size = 0;
 }
 
 ring_buffer_start_read :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
     wrapped := ring.write_cursor & (ring.buffer.count-1);
     base_address := ring.buffer.data + wrapped;
 
-    ring.reserved_read_bytes = size;
+    // As with writing regarding available space.
+    available := get_data_available(ring);
+    ring.read_reserve_size = min(size, available);
 
-    // Same as writing with regards to not having got enough space in the reservation.
-    return base_address, get_data_available(ring);
+    return base_address, ring.read_reserve_size;
 }
 
 ring_buffer_finish_read :: (ring: *Ring_Buffer) {
-    ring.read_cursor += ring.reserved_read_bytes;
-    ring.reserved_read_bytes = 0;
+    ring.read_cursor += ring.read_reserve_size;
+    ring.read_reserve_size = 0;
 }
 
-// Slow and dumb API for code that's so.
+// API for when buffer read/write is just a memcpy.
 
-write_ring_buffer_copy :: (using ring: *Ring_Buffer, data: $T/.[[]u8, string]) -> bytes_written: int {
+write_ring_buffer_copy :: (ring: *Ring_Buffer, data: $T/.[[]u8, string]) -> bytes_written: int {
+    assert(ring.write_reserve_size == 0);
 
     to_write := min(data.count, get_space_available(ring));
-    wrapped  := write_cursor & (buffer.count-1);
+    wrapped  := ring.write_cursor & (ring.buffer.count-1);
 
-    memcpy(buffer.data + wrapped, data.data, to_write);
+    memcpy(ring.buffer.data + wrapped, data.data, to_write);
 
-    write_cursor += to_write;
+    ring.write_cursor += to_write;
     return to_write;
 }
 
-read_ring_buffer_copy :: (using ring: *Ring_Buffer, output: *u8, bytes_wanted: int) -> bytes_read: int {
+read_ring_buffer_copy :: (ring: *Ring_Buffer, output: *u8, bytes_wanted: int) -> bytes_read: int {
+    assert(ring.read_reserve_size == 0);
 
     to_read := min(bytes_wanted, get_data_available(ring));
-    wrapped := read_cursor & (buffer.count-1);
+    wrapped := ring.read_cursor & (ring.buffer.count-1);
 
-    memcpy(output, buffer.data + wrapped, to_read);
+    memcpy(output, ring.buffer.data + wrapped, to_read);
 
-    read_cursor += to_read;
+    ring.read_cursor += to_read;
     return to_read;
 }
 
-get_space_available :: inline (using ring: Ring_Buffer) -> int {
-    return write_cursor - read_cursor;
+get_space_available :: inline (ring: Ring_Buffer) -> int {
+    return ring.buffer.count - (ring.write_cursor - ring.read_cursor);
 }
 
-get_data_available :: inline (using ring: Ring_Buffer) -> int {
-    return buffer.count - (write_cursor - read_cursor);
+get_data_available :: inline (ring: Ring_Buffer) -> int {
+    return ring.write_cursor - ring.read_cursor;
 }

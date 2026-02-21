@@ -12,13 +12,12 @@ Task_Info :: struct {
     entry_point: ();
     user_data: *void;
 
-    _context: *#Context;
+    temporary_storage: *Temporary_Storage;
 
     user_stack:   *void;
     kernel_stack: *void;
 
-    sleeping: bool;
-    blocked: bool;
+    flags: Task_Flags;
 
     priority: Task_Priority;
 
@@ -36,6 +35,12 @@ Task_Priority :: enum {
     Normal;
     High;
     Count;
+}
+
+Task_Flags :: enum_flags {
+    sleeping;
+    blocked;
+    stopped;
 }
 
 Scheduler :: struct {
@@ -83,6 +88,19 @@ get_current_task :: () -> *Task_Info #no_context {
     return cast(*Task_Info) cpu_local_read("scheduler.current_task");
 }
 
+set_flag :: (flag: Task_Flags, task: *Task_Info) {
+    offset := offset_of(Task_Info, "flags");
+    #asm { lock_or?Task_Flags [task + offset], flag; }
+}
+
+unset_flag :: (flag: Task_Flags, task: *Task_Info) {
+    offset := offset_of(Task_Info, "flags");
+    #asm {
+        not?Task_Flags flag;
+        lock_and?Task_Flags [task + offset], flag;
+    }
+}
+
 allocate_task_info :: () -> *Task_Info {
     using global;
 
@@ -104,7 +122,6 @@ core_begin_multitasking :: () {
 
     current_task = allocate_task_info();
     current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
-    current_task._context = *context;
     current_task.name = sprint("Idle (Core %)", core.id);
     current_task.on_core = core;
 
@@ -113,7 +130,7 @@ core_begin_multitasking :: () {
     if core.id == 0 {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
 
-        idle_task = create_task(cpu_idle_loop, 0x8000, name = "Idle (Core 0)");
+        idle_task = create_task(cpu_idle_loop, 0x8000, name = current_task.name);
         idle_task.on_core = core;
 
         current_task.name = "Kernel Main";
@@ -230,12 +247,11 @@ schedule_tasks :: () {
 
     {
         // Wake sleeping tasks.
-        using scheduler;
 
-        for sleeping {
+        for scheduler.sleeping {
             if it.sleep_until > time_now break;
 
-            it.sleeping = false;
+            unset_flag(.sleeping, it);
 
             list_remove(it);
 
@@ -247,7 +263,9 @@ schedule_tasks :: () {
     }
 
     next: *Task_Info;
-    current_task_still_wants_to_run := !current.sleeping && !current.blocked && current != scheduler.idle_task;
+
+    current_task_still_wants_to_run := current != scheduler.idle_task;
+    current_task_still_wants_to_run &&= current.flags & (.sleeping | .blocked | .stopped) == 0;
 
     // Pick next task to run.
 
@@ -298,27 +316,19 @@ new_task_start :: () #no_context {
     set_stack_trace_sentinel();
 
     push_context {
-
         core := get_current_core();
         release(*core.scheduler.spinlock);
 
         trace(.start_task);
 
-        ts_data := alloc(TEMPORARY_STORAGE_SIZE);
-
-        ts: Temporary_Storage;
-        set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, ts_data);
-        context.temporary_storage = *ts;
+        setup_temporary_storage();
 
         task := get_current_task();
-        task._context = *context;
-
         task.entry_point();
 
-        free(ts_data);
+        shutdown_temporary_storage();
 
-        // Todo: Hack. This stops the scheduler from putting the task back on the run queue.
-        task.blocked = true;
+        set_flag(.stopped, task);
         yield_execution();
     }
 }
@@ -380,7 +390,7 @@ prepare_task_sleep_until :: (time: Apollo_Time) {
 
     defer release(*scheduler.spinlock);
 
-    task.sleeping = true;
+    set_flag(.sleeping, task);
 
     assert(time > get_monotonic_time());
     task.sleep_until = time;
@@ -400,12 +410,12 @@ wake_task :: (task: *Task_Info) {
     scheduler := lock_scheduler_for_task(task);
 
     // By the time we got the lock, the task might not be sleeping anymore.
-    if !task.sleeping {
+    if !(task.flags & .sleeping) {
         release(*scheduler.spinlock);
         return;
     }
 
-    task.sleeping = false;
+    unset_flag(.sleeping, task);
 
     list_remove(task);
     queue_to_run(task);
@@ -441,7 +451,7 @@ acquire :: (using mutex: *Mutex) {
     }
 
     list_append(*queue, task);
-    task.blocked = true;
+    set_flag(.blocked, task);
 
     release(*spinlock);
     yield_execution();
@@ -467,8 +477,8 @@ release :: (using mutex: *Mutex) {
 
     scheduler := lock_scheduler_for_task(next);
 
-    assert(next.blocked);
-    next.blocked = false;
+    assert(next.flags & .blocked > 0);
+    unset_flag(.blocked, next);
 
     queue_to_run(next);
     release(*scheduler.spinlock);
@@ -477,11 +487,7 @@ release :: (using mutex: *Mutex) {
 trylock :: (using mutex: *Mutex) -> bool {
     acquire(*spinlock);
 
-    task := get_current_task();
-
-
     if held_by == null {
-
         ensure_initialized(*queue);
         assert(is_empty(*queue));
 
@@ -524,13 +530,10 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
         return true;
     }
 
-    task := get_current_task();
-    task.blocked = true;
-
     ensure_initialized(*queue);
 
     waiter: Waiter;
-    waiter.task = task;
+    waiter.task = get_current_task();
     list_append(*queue, *waiter);
 
     end_time := get_monotonic_time() + timeout;
@@ -550,7 +553,7 @@ wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
             release(*spinlock);
             return true;
         }
-        
+
         if timeout == INFINITE_TIMEOUT {
             continue;
         }
@@ -584,6 +587,7 @@ try_wait :: (using sem: *Semaphore) -> bool {
 
 signal :: (using sema: *Semaphore) {
     acquire(*spinlock);
+
     ensure_initialized(*queue);
 
     if is_empty(*queue) {
@@ -599,7 +603,6 @@ signal :: (using sema: *Semaphore) {
 
     waiter := list_pop(*queue);
     waiter.signalled = true;
-    waiter.task.blocked = false;
 
     wake_task(waiter.task);
 
@@ -852,6 +855,9 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
     trace(.syscall, data.rax);
 
+    task := get_current_task();
+    context.temporary_storage = task.temporary_storage;
+
     if data.rax == {
       case 1;
         yield_execution();
@@ -895,6 +901,8 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
         write_string("\n");
         bluescreen();
     }
+
+    reset_temporary_storage();
 }
 
 // This is needed by the syscall handler implemented in assembly.
@@ -936,11 +944,13 @@ ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory:
     return null;
 }
 
-user_mode_stress_test :: (threads_per_core := 4) {
+user_mode_stress_test :: (threads_per_core := 4, core_mask: u32 = 0xffff_ffff) {
     thread_index := 1;
 
     for *core: global.processor_cores {
-        // if core.id != 0 continue;
+        if core_mask & (1 << core.id) == 0 {
+            continue;
+        }
 
         for 1..threads_per_core {
             name := tprint("Do Work %:%", core.id, thread_index);
