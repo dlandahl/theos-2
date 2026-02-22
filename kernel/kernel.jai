@@ -127,9 +127,6 @@ kernel_entry :: () #no_context {
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
-    // Used for AP bootstrap.
-    global.large_pages[0].state = .RESERVED;
-
     {
         // Initialize cpu-local data really early, because it's useful to have e.g. core ID and interrupt_context_active available.
         core := space_for_processor_cores.data;
@@ -147,23 +144,28 @@ kernel_entry :: () #no_context {
         core.irq_disable_count = 1; // Interrupt requests have been disabled by the bootloader, CPU local state needs to reflect that.
     }
 
-    memory_map_index: int;
+    // Used for AP bootstrap.
+    global.large_pages[0].state = .RESERVED;
+
+    regions_done: int;
+
     for* page, page_index: global.large_pages {
+        // This method might be wasting a lot of memory, if the firmware has reserved many fractured small regions.
 
         page_base  := page_index * 0x20_0000;
         page_limit := page_base  + 0x20_0000;
 
-        for memory_map_index..global.memory_map_entries_used-1 {
+        for regions_done..global.memory_map_entries_used-1 {
 
             region := global.memory_map[it];
             region_limit := region.pages * 4096 + region.address;
 
-            if region_limit <= cast(u64) page_base {
+            if region_limit < cast(u64) page_base {
+                regions_done += 1;
                 continue;
             }
 
             if region.address >= cast(u64) page_limit {
-                memory_map_index -= 1;
                 continue page;
             }
 
@@ -171,32 +173,32 @@ kernel_entry :: () #no_context {
                 page.state = .RESERVED;
                 continue page;
             }
-
-            memory_map_index += 1;
         }
     }
 
+    physical_heap_size: u64 = 0x2000_0000;
 
-    global.large_page_allocator.freelist  = FREELIST_TAIL;
-    global.large_page_allocator.clearlist = FREELIST_TAIL;
-    global.large_page_allocator.lru_least = LRU_TAIL;
-    global.large_page_allocator.lru_most  = LRU_TAIL;
-
-    // Todo: hardcoded.
     for region: global.memory_map {
         if !it_index continue;
-        region_size := region.pages * 4096;
 
-        if region_size >= 0x2000_0000 && region.type == .FREE {
-            first_page := region.address / 0x20_0000 + 1;
+        region_size          := region.pages * 4096;
+        required_region_size := physical_heap_size + 0x40_0000;
+        // Region might span pages on both ends, and we need all pages fully contained in the region, because we're reserving memory for the block allocator at page granularity.
 
-            for first_page..first_page+256 {
-                // Todo: Make sure all these pages were actually marked free.
-                if (global.large_pages[it].state != .FREE) bluescreen();
-                global.large_pages[it].state = .RESERVED;
+        if region_size >= required_region_size && region.type == .FREE {
+
+            first_page  := (region.address + 0x1f_ffff) / 0x20_0000; // First page that's completely within the region.
+            total_pages := physical_heap_size / 0x20_0000;
+
+            for first_page..first_page+total_pages {
+                page := *global.large_pages[it];
+
+                if page.state != .FREE bluescreen();
+
+                page.state = .RESERVED;
             }
 
-            init_block_allocator(*global.physical_block_allocator, region.address, 0x2000_0000, 0x10);
+            init_block_allocator(*global.physical_block_allocator, region.address, physical_heap_size, 0x10);
             break;
         }
     }
@@ -210,16 +212,10 @@ kernel_entry :: () #no_context {
     init_tracing();
 
     push_context {
-        using global.framebuffer;
 
-        for y: 0..y_resolution-1 {
-            for x: 0..x_resolution-1 {
-                red   := cast(int) (0xa0 * (1.0 / y_resolution) * y);
-                green := cast(int) (0xa0 * (1.0 / x_resolution) * x);
-
-                // buffer[x + y * stride] = cast(u32, (red << 16) | (green << 8));
-                buffer[x + y * stride] = 0;
-            }
+        {
+            using global.framebuffer;
+            memset(buffer, 0, y_resolution * stride * size_of(u32));
         }
 
         {
@@ -324,65 +320,6 @@ kernel_entry :: () #no_context {
             yield_execution();
         }
     }
-}
-
-tlb_shootdown_test :: () {
-
-    First_Sentinel_Value  : s64 : 0xcafebabe;
-    Second_Sentinel_Value : s64 : 0xfacedbaddecaf;
-
-    Shared_Data :: struct {
-        first:  Semaphore;
-        second: Semaphore;
-
-        virtual_page: *void;
-    }
-    shared: Shared_Data;
-
-    first_thread :: (shared: *Shared_Data) {
-        physical_page := get_4k_page();
-
-        shared.virtual_page = cast(*void) alloc_block(*global.virtual_block_allocator, 4096);
-
-        map_pages(shared.virtual_page, physical_page, 1);
-
-        (.*) cast(*s64) shared.virtual_page = First_Sentinel_Value;
-
-        signal(*shared.first);
-        wait_for(*shared.second);
-
-        new_physical_page := get_4k_page();
-        unmap_pages(shared.virtual_page, 1);
-        map_pages(shared.virtual_page, new_physical_page, 1);
-
-        // TLB entry will have been flushed by map_pages.
-        (.*) cast(*s64) shared.virtual_page = Second_Sentinel_Value;
-
-        signal(*shared.first);
-        wait_for(*shared.second);
-    }
-
-    second_thread :: (shared: *Shared_Data) {
-        wait_for(*shared.first);
-
-        address: *s64 = shared.virtual_page;
-        assert(address.* == First_Sentinel_Value);
-
-        signal(*shared.second);
-        wait_for(*shared.first);
-
-        assert(address.* == First_Sentinel_Value);
-
-        signal(*shared.second);
-        wait_for(*shared.first);
-
-        // Todo.
-    }
-
-    simple_create_thread(first_thread,  *shared, "First",  core_id = 1);
-    simple_create_thread(second_thread, *shared, "Second", core_id = 2);
-
-    while true {}
 }
 
 test_test :: () {
@@ -1007,11 +944,11 @@ get_debug_info_for_address :: (address: u64) -> proc_name: string, file: string,
 Large_Page_Allocator :: struct {
     max_large_page_used: int;
 
-    freelist:  int;
-    clearlist: int;
+    freelist  := FREELIST_TAIL;
+    clearlist := FREELIST_TAIL;
 
-    lru_least: s32;
-    lru_most:  s32;
+    lru_least: s32  = LRU_TAIL;
+    lru_most:  s32  = LRU_TAIL;
 
     spinlock: Spinlock;
 }
@@ -1415,6 +1352,65 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
     }
 
     return 0, false;
+}
+
+tlb_shootdown_test :: () {
+
+    First_Sentinel_Value  : s64 : 0xcafebabe;
+    Second_Sentinel_Value : s64 : 0xfacedbaddecaf;
+
+    Shared_Data :: struct {
+        first:  Semaphore;
+        second: Semaphore;
+
+        virtual_page: *void;
+    }
+    shared: Shared_Data;
+
+    first_thread :: (shared: *Shared_Data) {
+        physical_page := get_4k_page();
+
+        shared.virtual_page = cast(*void) alloc_block(*global.virtual_block_allocator, 4096);
+
+        map_pages(shared.virtual_page, physical_page, 1);
+
+        (.*) cast(*s64) shared.virtual_page = First_Sentinel_Value;
+
+        signal(*shared.first);
+        wait_for(*shared.second);
+
+        new_physical_page := get_4k_page();
+        unmap_pages(shared.virtual_page, 1);
+        map_pages(shared.virtual_page, new_physical_page, 1);
+
+        // TLB entry will have been flushed by map_pages.
+        (.*) cast(*s64) shared.virtual_page = Second_Sentinel_Value;
+
+        signal(*shared.first);
+        wait_for(*shared.second);
+    }
+
+    second_thread :: (shared: *Shared_Data) {
+        wait_for(*shared.first);
+
+        address: *s64 = shared.virtual_page;
+        assert(address.* == First_Sentinel_Value);
+
+        signal(*shared.second);
+        wait_for(*shared.first);
+
+        assert(address.* == First_Sentinel_Value);
+
+        signal(*shared.second);
+        wait_for(*shared.first);
+
+        // Todo.
+    }
+
+    simple_create_thread(first_thread,  *shared, "First",  core_id = 1);
+    simple_create_thread(second_thread, *shared, "Second", core_id = 2);
+
+    while true {}
 }
 
 
