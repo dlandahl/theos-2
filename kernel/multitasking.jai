@@ -21,13 +21,13 @@ Task_Info :: struct {
 
     priority: Task_Priority;
 
-    sleep_until: Apollo_Time;
+    sleep_until:       Apollo_Time;
+    total_cpu_time:    Apollo_Time;
+    remaining_quantum: Apollo_Time;
 
     #as using queue_node: List_Node(#this);
 
     on_core: *X64_Core;
-
-    cpu_time: Apollo_Time;
 }
 
 Task_Priority :: enum {
@@ -53,6 +53,8 @@ Scheduler :: struct {
     spinlock: Spinlock(.IRQ);
 
     last_task_switch_timestamp: Apollo_Time;
+
+    quantum: Apollo_Time;
 }
 
 lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
@@ -75,13 +77,18 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
     return null;
 }
 
-queue_to_run :: (task: *Task_Info) {
+queue_to_run :: (task: *Task_Info, go_at_the_front := false) {
     scheduler := *task.on_core.scheduler;
 
     assert(is_held(scheduler.spinlock), "Caller should take the lock.");
 
     run_queue := *scheduler.waiting_to_run[task.priority];
-    list_append(run_queue, task);
+
+    if go_at_the_front {
+        list_prepend(run_queue, task);
+    } else {
+        list_append(run_queue, task);
+    }
 }
 
 get_current_task :: () -> *Task_Info #no_context {
@@ -139,6 +146,8 @@ core_begin_multitasking :: () {
 
     for *waiting_to_run list_init(it);
     list_init(*sleeping);
+
+    quantum = milliseconds_to_apollo(5);
 
     core.online = true;
 
@@ -240,10 +249,17 @@ schedule_tasks :: () {
         assert(count == 0, "Context switch with preemption disabled is not allowed.");
     }
 
-    current := get_current_task();
-    scheduler := lock_scheduler_for_task(current);
+    previous  := get_current_task();
+    scheduler := lock_scheduler_for_task(previous);
 
-    time_now := get_monotonic_system_time();
+    // This all uses apollo time but should probably use native clock counter values for performance.
+    time_now  := get_monotonic_system_time();
+    delta     := time_now - scheduler.last_task_switch_timestamp;
+
+    previous.remaining_quantum -= delta;
+    previous.total_cpu_time    += delta;
+
+    scheduler.last_task_switch_timestamp = time_now;
 
     {
         // Wake sleeping tasks.
@@ -255,27 +271,42 @@ schedule_tasks :: () {
 
             list_remove(it);
 
-            // We can get here if the sleep time of the current task was so short that it wakes itself before context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the current task.
-            if it != current {
+            // If you sleep you get your full quantum back.
+            it.remaining_quantum = scheduler.quantum;
+
+            // We can get here if the sleep time of the previous task was so short that it wakes before the context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the previous task.
+            if it != previous {
                 queue_to_run(it);
             }
         }
     }
 
-    next: *Task_Info;
+    quantum_expired := previous.remaining_quantum <= 0;
 
-    current_task_still_wants_to_run := current != scheduler.idle_task;
-    current_task_still_wants_to_run &&= current.flags & (.sleeping | .blocked | .stopped) == 0;
+    previous_task_still_wants_to_run  := previous != scheduler.idle_task;
+    previous_task_still_wants_to_run &&= previous.flags & (.sleeping | .blocked | .stopped) == 0;
 
     // Pick next task to run.
+    next: *Task_Info;
+
+    min_priority_allowed_to_preempt: Task_Priority;
+
+    if !previous_task_still_wants_to_run {
+        // If you don't want to run anymore, then tasks at any priority should run instead.
+        min_priority_allowed_to_preempt = -1;
+    } else if quantum_expired {
+        // If your quantum expired, then tasks at the same or higher priority should run instead.
+        min_priority_allowed_to_preempt = previous.priority;
+    } else {
+        // If your quantum has not expired then tasks at a higher priority should run instead.
+        min_priority_allowed_to_preempt = previous.priority + 1;
+    }
 
     for<* run_queue: scheduler.waiting_to_run {
-        if current_task_still_wants_to_run {
-            run_queue_priority := cast(Task_Priority) it_index;
+        queue_priority := cast(Task_Priority) it_index;
 
-            if run_queue_priority < current.priority {
-                break;
-            }
+        if queue_priority < min_priority_allowed_to_preempt {
+            break;
         }
 
         next = list_pop(run_queue);
@@ -284,28 +315,31 @@ schedule_tasks :: () {
 
     if !next {
         // Didn't find a task on any run queue.
-        next = ifx current_task_still_wants_to_run then current else scheduler.idle_task;
+        next = ifx previous_task_still_wants_to_run then previous else scheduler.idle_task;
     }
 
-    if next == current {
+    if next == previous {
         release(*scheduler.spinlock);
         return;
     }
 
-    if current_task_still_wants_to_run {
-        queue_to_run(current);
+    if previous_task_still_wants_to_run {
+        // If you got preempted by a higher priority task (rather than using up your quantum), you go at the front of the queue. That way if, for example, multiple low priority tasks want to always run, over the long term they each get the same amount of CPU time.
+        queue_to_run(previous, go_at_the_front = !quantum_expired);
     }
 
-    current.on_core.task_state_segment.rsp[0] = next.kernel_stack;
+    previous.on_core.task_state_segment.rsp[0] = next.kernel_stack;
 
-    current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
-    scheduler.last_task_switch_timestamp = time_now;
-
-    trace(.context_switch, current.id, next.id);
+    trace(.context_switch, previous.id, next.id);
 
     scheduler.current_task = next;
 
-    context_switch(current, next);
+    context_switch(previous, next);
+
+    if next.remaining_quantum <= 0 {
+        // If you ran out of time, you get a new quantum when you get scheduled in.
+        next.remaining_quantum = scheduler.quantum;
+    }
 
     release(*scheduler.spinlock);
 }

@@ -311,13 +311,15 @@ kernel_entry :: () #no_context {
         simple_create_thread(() {
             get_current_task().priority = .High;
 
-            sleep(5, .seconds);
+            sleep(10, .seconds);
             log("\n=== Writing trace buffers. ===\n\n");
             trace_event_count := write_trace_buffers();
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        test_test();
+        // test_test();
+        // user_mode_stress_test(4, 0xffffff);
+        priority_test();
 
         {
             set_flag(.stopped, get_current_task());
@@ -340,14 +342,15 @@ test_test :: () {
 
 priority_test :: () {
 
-    get_task_cpu_time_slow :: () -> Apollo_Time {
+    get_task_cpu_time :: () -> Apollo_Time {
+        // Locally scoped because it's a messy way of doing this.
         task := get_current_task();
-        scheduler := lock_scheduler_for_task(task);
 
-        runtime_this_tick := get_monotonic_time() - scheduler.last_task_switch_timestamp;
-        total_time := task.cpu_time + runtime_this_tick;
+        preempt_disable();
+        runtime_this_tick := get_monotonic_time() - task.on_core.scheduler.last_task_switch_timestamp;
+        total_time := task.total_cpu_time + runtime_this_tick;
+        preempt_restore();
 
-        release(*scheduler.spinlock);
         return total_time;
     }
 
@@ -355,7 +358,7 @@ priority_test :: () {
         task := get_current_task();
         task.priority = priority;
 
-        start_cpu_time := get_task_cpu_time_slow();
+        start_cpu_time := get_task_cpu_time();
 
         start := get_kernel_timestamp();
         end   := start + seconds_to_apollo(5);
@@ -369,7 +372,7 @@ priority_test :: () {
             }
         }
 
-        end_cpu_time := get_task_cpu_time_slow();
+        end_cpu_time := get_task_cpu_time();
 
         cpu_time := end_cpu_time - start_cpu_time;
         log("% priority %ms", priority, to_milliseconds(cpu_time));

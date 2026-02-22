@@ -765,3 +765,8 @@ debug_run_tsc_timer :: () {
 
     irq_restore();
 }
+
+
+operator <= :: (a: S128, b: s64) -> bool {
+    return a.high <= b;
+}
