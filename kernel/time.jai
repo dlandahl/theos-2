@@ -602,13 +602,14 @@ calibrate_tsc :: () -> hz: u64 {
     }
 }
 
+    // This calibrates LAPIC as well since we don't reliably have TSC DEADLINE available yet.
 
     if verbose log("Calibrating TSC...");
     hpet := global.high_precision_timer;
 
     calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
 
-    ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
+    ticks_per_calibration_run := cast(u32) (calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
     max_error := 0; // This value will be decided after the first calibration run, because then we know roughly how fast the clock is. Since for very fast clocks we want a much larger value here than for slow clocks.
@@ -617,7 +618,7 @@ calibrate_tsc :: () -> hz: u64 {
     // HPET is off-chip and therefore high latency (1-2us), but it doesn't look like there's a better alternative.
     // Good PDF about OS timekeeping: www.vmware.com/docs/vmware_timekeeping "Timekeeping in VMware Virtual Machines".
 
-    counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
+    counter_register := cast(*u32) (hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
     for 1..100 {
         irq_disable();
@@ -625,6 +626,10 @@ calibrate_tsc :: () -> hz: u64 {
         counter_start := counter_register.*;
         tsc0 := rdtsc();
         tsc1: u64;
+
+        lapic1: u32;
+
+        write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
 
         // Todo: it might be best to write the timing loop in assembly, to get the most accurate measurement.
         // Should also write some code to measure the accuracy we're getting. But then again, maybe none of this will be needed on newer microarchitectures, which are the only ones we care about.
@@ -634,6 +639,7 @@ calibrate_tsc :: () -> hz: u64 {
             // rdtsc() is a macro, will not generate a procedure call.
             // But we may want to get rid of the SHL and OR.
             tsc1 = rdtsc();
+            lapic1 = read_apic_register(.TCC__TIMER_CURRENT);
 
             if counter_now - counter_start > ticks_per_calibration_run {
                 break;
@@ -646,11 +652,11 @@ calibrate_tsc :: () -> hz: u64 {
         delta[1] = delta[0];
         delta[0] = cast(int) (tsc1 - tsc0);
 
-        if verbose log("Run % delta %", it, delta[0]);
+        if verbose log("Run % delta % lapic %", it, delta[0], 0xffff_ffff - lapic1);
 
         if it < 3 {
             if it == 1 {
-                max_error = delta[0] / 100;
+                max_error = delta[0] / 150;
                 if verbose log("Max error set at %", max_error);
             }
             continue;
@@ -668,7 +674,9 @@ calibrate_tsc :: () -> hz: u64 {
             average_delta := (delta[0] + delta[1] + delta[2]) / 3;
             frequency := cast(u64) average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
 
-            if verbose log("Calibrating TSC took % 50ms calibration runs, frequency is %", it, frequency);
+            global.lapic_frequency = (0xffff_ffff - lapic1) * 20; // Todo: Clean this up.
+
+            if verbose log("Calibrating TSC took % 50ms calibration runs, frequency is % (LAPIC %)", it, frequency, global.lapic_frequency);
             return frequency;
         }
     }

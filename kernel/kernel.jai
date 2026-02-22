@@ -18,6 +18,7 @@ X64_Core :: struct {
 
     mcs_node: MCS_Node;
 
+    // For IPIs:
     procedure_call_queue_lock: Spinlock(.IRQ);
     procedure_calls: List_Node(Procedure_Call_Info);
 }
@@ -80,6 +81,7 @@ Kernel_Globals :: struct {
     rtc_format_is_bcd: bool;
 
     tsc_frequency: u64;
+    lapic_frequency: u64;
 
     // If future x64 CPUs all support this, plus some other TSC specific features, then we'll likely remove
     // support for HPET and the Local APIC timer, and use TSC for everything. Namely the features you would
