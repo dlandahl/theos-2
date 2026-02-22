@@ -159,7 +159,7 @@ kernel_entry :: () #no_context {
 
         for regions_done..global.memory_map_entries_used-1 {
 
-            region := global.memory_map[it];
+            region       := global.memory_map[it];
             region_limit := region.pages * 4096 + region.address;
 
             if region_limit < cast(u64) page_base {
@@ -192,7 +192,7 @@ kernel_entry :: () #no_context {
             first_page  := (region.address + 0x1f_ffff) / 0x20_0000; // First page that's completely within the region.
             total_pages := physical_heap_size / 0x20_0000;
 
-            for first_page..first_page+total_pages {
+            for first_page..first_page+total_pages-1 {
                 page := *global.large_pages[it];
 
                 if page.state != .FREE bluescreen();
@@ -316,6 +316,8 @@ kernel_entry :: () #no_context {
             trace_event_count := write_trace_buffers();
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
+
+        test_test();
 
         {
             set_flag(.stopped, get_current_task());
@@ -2251,17 +2253,17 @@ irq_disable :: () #no_context {
     #asm { cli; }
 
     core := get_current_core();
-    trace(.irq_disable, core.irq_disable_count);
-
     core.irq_disable_count += 1;
+
+    trace(.irq_disable, core.irq_disable_count);
 }
 
 irq_restore :: () #no_context {
 
     core := get_current_core();
-    trace(.irq_restore, core.irq_disable_count);
 
     core.irq_disable_count -= 1;
+    trace(.irq_restore, core.irq_disable_count);
 
     if core.irq_disable_count == 0 {
         #asm { sti; }

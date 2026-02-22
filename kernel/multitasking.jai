@@ -147,7 +147,7 @@ core_begin_multitasking :: () {
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
     } else {
-        configure_apic_timer_interrupt(0x2000000, global.scheduling_interrupt_gate);
+        configure_apic_timer_interrupt(global.scheduling_interrupt_gate);
     }
 }
 
@@ -339,8 +339,10 @@ DISABLE_KERNEL_PREEMPTION :: false;
 scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
-    defer if global.tsc_deadline_support {
-        schedule_tsc_deadline_interrupt(delay_ms = 40);
+    if global.tsc_deadline_support {
+        schedule_tsc_deadline_interrupt(delay_ms = 5);
+    } else {
+        schedule_apic_timer_interrupt(delay_ms = 5);
     }
 
     core := get_current_core();
@@ -388,8 +390,6 @@ prepare_task_sleep_until :: (time: Apollo_Time) {
     task := get_current_task();
     scheduler := lock_scheduler_for_task(task);
 
-    defer release(*scheduler.spinlock);
-
     set_flag(.sleeping, task);
 
     assert(time > get_monotonic_time());
@@ -400,10 +400,12 @@ prepare_task_sleep_until :: (time: Apollo_Time) {
 
         insert_after(task, it.prev);
 
+        release(*scheduler.spinlock);
         return;
     }
 
     list_append(*scheduler.sleeping, task);
+    release(*scheduler.spinlock);
 }
 
 wake_task :: (task: *Task_Info) {
@@ -1039,6 +1041,8 @@ task_do_work_in_ring_3 :: () #c_call {
         random_seed(rdtsc());
 
         while true {
+            auto_release_temp();
+
             print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
 
             for 1..1_000_000 {

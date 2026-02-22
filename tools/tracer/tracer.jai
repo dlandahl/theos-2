@@ -474,7 +474,7 @@ draw_one_frame :: (dt: float) {
     st.first_background.shape.rounding_flags = 0;
     st.second_background.shape.rounding_flags = 0;
     st.initial_divider_position_type = .ABSOLUTE_FROM_THEME_FIELD;
-    st.initial_divider_position = 500*UI_SCALE;
+    st.initial_divider_position = slidable_rect.w / 2;
 
     slide_state, left_rect, right_rect := slidable_region(slidable_rect, *st);
 
@@ -595,7 +595,7 @@ draw_one_frame :: (dt: float) {
 
               case .irq_disable; #through;
               case .irq_restore;
-                text = tprint("Previous IRQ state: %", it.user[0] > 0);
+                text = tprint("New disable count: %", it.user[0]);
                 label(label_rect, text, lt);
             }
         }

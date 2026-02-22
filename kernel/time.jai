@@ -496,17 +496,21 @@ APIC_TIMER_MODE_ONE_SHOT     :: 0b00;
 APIC_TIMER_MODE_PERIODIC     :: 0b01;
 APIC_TIMER_MODE_TSC_DEADLINE :: 0b10;
 
-configure_apic_timer_interrupt :: (period_in_ticks: u32, gate: int) {
+configure_apic_timer_interrupt :: (gate: int) {
 
     lapic_timer: Apic_Lvt_Timer;
 
-    set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC); // Todo: This should be ONE_SHOT to make the scheduling code work the same for either hardware scheduling clock source.
+    set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_ONE_SHOT);
     set(*lapic_timer, .gate_index, gate);
     set(*lapic_timer, .mask,       0);
 
-    // Todo: we don't currently measure APIC timer frequency, so we can't use a realtime value.
-    write_apic_register(.TIC__TIMER_INITIAL, period_in_ticks);
     write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
+    schedule_apic_timer_interrupt(delay_ms = 5);
+}
+
+schedule_apic_timer_interrupt :: (delay_ms: u64) #no_context {
+    ticks := (global.lapic_frequency * delay_ms / 1_000);
+    write_apic_register(.TIC__TIMER_INITIAL, cast(u32) ticks);
 }
 
 configure_tsc_deadline_interrupt :: (gate: int) {
@@ -518,14 +522,13 @@ configure_tsc_deadline_interrupt :: (gate: int) {
     set(*lapic_timer, .gate_index, gate);
     set(*lapic_timer, .mask,       0);
 
-    write_msr(.TSC_DEADLINE, rdtsc() - 1); // Ensure it doesn't fire yet.
-
     write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
+    schedule_tsc_deadline_interrupt(delay_ms = 5);
 }
 
 schedule_tsc_deadline_interrupt :: (delay_ms: u64) #no_context {
-    delay := (global.tsc_frequency * delay_ms / 1_000);
-    write_msr(.TSC_DEADLINE, rdtsc() + delay);
+    ticks := (global.tsc_frequency * delay_ms / 1_000);
+    write_msr(.TSC_DEADLINE, rdtsc() + ticks);
 }
 
 
@@ -559,10 +562,10 @@ initialize_tsc :: () {
         // global.tsc_deadline_support = true;
     }
 
-    global.tsc_frequency = calibrate_tsc();
+    calibrate_tsc();
 }
 
-calibrate_tsc :: () -> hz: u64 {
+calibrate_tsc :: () {
     verbose := true;
 
 #if 0 { // Disabling this because QEMU thinks it's getting the frequency this way but it comes out way too low.
@@ -633,6 +636,7 @@ calibrate_tsc :: () -> hz: u64 {
 
         // Todo: it might be best to write the timing loop in assembly, to get the most accurate measurement.
         // Should also write some code to measure the accuracy we're getting. But then again, maybe none of this will be needed on newer microarchitectures, which are the only ones we care about.
+
         while true {
             counter_now := counter_register.*;
 
@@ -672,18 +676,18 @@ calibrate_tsc :: () -> hz: u64 {
 
         if first_valid && second_valid {
             average_delta := (delta[0] + delta[1] + delta[2]) / 3;
-            frequency := cast(u64) average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
 
-            global.lapic_frequency = (0xffff_ffff - lapic1) * 20; // Todo: Clean this up.
+            global.tsc_frequency   = cast(u64) average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
+            global.lapic_frequency = (0xffff_ffff - lapic1)  * 20;
 
-            if verbose log("Calibrating TSC took % 50ms calibration runs, frequency is % (LAPIC %)", it, frequency, global.lapic_frequency);
-            return frequency;
+            if verbose log("Calibrating TSC took % 50ms calibration runs, frequency is % (LAPIC %)", it, global.tsc_frequency, global.lapic_frequency);
+
+            return;
         }
     }
 
     log_error("Failed to calibrate the Timestamp Counter in good time."); // In the future this routine should never fail, but while the calibration algorithm is not final we'll print this message.
     bluescreen();
-    return 0;
 }
 
 calibrate_tsc_using_interrupt :: () {
