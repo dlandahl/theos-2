@@ -887,18 +887,18 @@ uacpi_kernel_io_unmap :: () #c_call {
 }
 
 #program_export
-uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
+uacpi_kernel_map :: (address: uacpi_phys_addr, length: uacpi_size) -> *void #c_call {
     push_context {
-        memory := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) len);
- 
-        pages_needed := cast(s64) (len / 4096);
-        if len % 4096 pages_needed += 1;
+        assert(length != 0);
 
-        page_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
+        offset_in_page := address & 0xfff;
+        pages_needed   := (length + offset_in_page + 4095) / 4096;
 
-        map_pages(memory, addr, pages_needed, page_flags);
+        virtual := cast(*void) alloc_block(*global.virtual_block_allocator, pages_needed * 4096);
 
-        return memory;
+        map_pages(virtual, address, pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+
+        return virtual + offset_in_page;
     }
 }
 
