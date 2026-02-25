@@ -344,10 +344,23 @@ format_disk :: () -> bool {
     fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
 
     fat16_print_directory_tree(root);
-
     fat16_copy_fat_table(*disk_image);
 
-    write_entire_file("disk_image.img", disk_image.all_file_data);
+    {
+        // Create the GUID Partition Table required by my physical PCs firmware.
+        // Todo: Jai code to create GPT formatted disks in memory.
+
+        dd_command := break_command_into_strings("dd if=/dev/zero of=gpt.img bs=1M count=20");
+        run_command(.. dd_command);
+
+        parted_command := break_command_into_strings("parted --script gpt.img mktable gpt mkpart primary fat16 2048s 10Mib align-check optimal 1 name 1 UEFI quit");
+        run_command(.. parted_command);
+
+        gpt := read_entire_file("gpt.img");
+        memcpy(gpt.data + 512 * 2048, disk_image.all_file_data.data, disk_image.all_file_data.count);
+
+        write_entire_file("disk_image.img", gpt);
+    }    
 
     return true; // Todo: Check for errors.
 }

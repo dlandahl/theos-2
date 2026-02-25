@@ -251,6 +251,7 @@ kernel_entry :: () #no_context {
 
         {
             temporary_buffer := talloc(0x8000);
+            uacpi_context_set_log_level(.ERROR);
             uacpi_setup_early_table_access(temporary_buffer, 0x8000);
 
             status := uacpi_table_fadt(*global.fadt);
@@ -269,6 +270,8 @@ kernel_entry :: () #no_context {
 
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         global.boot_time = native_calendar_to_apollo(boot_calendar_time);
+
+        log("The time is %.", calendar_to_string(native_apollo_to_calendar(get_monotonic_time())));
 
         initialize_tsc();
 
@@ -292,7 +295,7 @@ kernel_entry :: () #no_context {
 
         irq_restore();
 
-        for *global.pci_devices {
+        if false for *global.pci_devices {
             if it.combined_class_code == {
               case .SATA_CONTROLLER;
                 init_ahci_controller(it);
@@ -558,6 +561,7 @@ set_runtime_support_callbacks :: () #no_context {
         view := array_view(buffer, 3); // Get rid of the top 3 entries which are just assertion handler forwarding.
         append_formatted_stack_trace(*builder, view);
 
+        append(*builder, "\n");
         write_builder(*builder);
 
         bluescreen();
@@ -2730,11 +2734,11 @@ align :: (alignment: int, value: int) -> int {
     return (value + (alignment - 1)) & -alignment;
 }
 
-bit_cast :: (object: $T, $target_type: Type) -> target_type {
+bit_cast :: inline (object: $T, $target_type: Type) -> target_type {
     return (.*) cast(*target_type) *object;
 }
 
-offset_of :: ($T: Type, $member: string) -> s64 #no_context {
+offset_of :: inline ($T: Type, $member: string) -> s64 #no_context {
     BODY :: #string DONE
     dummy: T = ---;
     return cast(*void) (*dummy.%) - cast(*void) *dummy;

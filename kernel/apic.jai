@@ -209,9 +209,12 @@ initialize_apic :: () {
             new_core.id = id;
 
           case .IO_APIC;
-            assert(global.io_apic == null);
-
             ioapic_ics := cast(*Ics_Io_Apic) ics;
+
+            if ioapic_ics.global_system_interrupt_base != 0 {
+                // Todo: For now we ignore additional IO APICS that are there to support larger numbers of GSIs.
+                continue;
+            }
 
             virtual := cast(*void) alloc_block(*global.virtual_block_allocator, 4096);
             map_pages(virtual, ioapic_ics.address, 1, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
@@ -226,6 +229,8 @@ initialize_apic :: () {
             // Todo
         }
     }
+
+    assert(global.io_apic != null);
 
     uacpi_table_unref(*table);
 
@@ -753,8 +758,8 @@ initialize_uacpi :: () {
     uacpi_install_fixed_event_handler(.POWER_BUTTON, (ctx: uacpi_handle) -> uacpi_interrupt_ret #c_call {
         write_string("Turning off the PC...\n");
 
-        uacpi_prepare_for_sleep_state(.S5);
-        uacpi_enter_sleep_state(.S5);
+        // uacpi_prepare_for_sleep_state(.S5);
+        // uacpi_enter_sleep_state(.S5);
 
         write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
@@ -896,7 +901,7 @@ uacpi_kernel_map :: (address: uacpi_phys_addr, length: uacpi_size) -> *void #c_c
 
         virtual := cast(*void) alloc_block(*global.virtual_block_allocator, pages_needed * 4096);
 
-        map_pages(virtual, address, pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        map_pages(virtual, address, cast(s64) pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
         return virtual + offset_in_page;
     }

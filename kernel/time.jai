@@ -638,6 +638,7 @@ calibrate_tsc :: () {
         // Should also write some code to measure the accuracy we're getting. But then again, maybe none of this will be needed on newer microarchitectures, which are the only ones we care about.
 
         while true {
+            // Todo: This could run into counter register overflow.
             counter_now := counter_register.*;
 
             // rdtsc() is a macro, will not generate a procedure call.

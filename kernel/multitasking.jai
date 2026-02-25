@@ -30,14 +30,14 @@ Task_Info :: struct {
     on_core: *X64_Core;
 }
 
-Task_Priority :: enum {
+Task_Priority :: enum s8 {
     Low;
     Normal;
     High;
     Count;
 }
 
-Task_Flags :: enum_flags {
+Task_Flags :: enum_flags s8 {
     sleeping;
     blocked;
     stopped;
@@ -97,14 +97,14 @@ get_current_task :: () -> *Task_Info #no_context {
 
 set_flag :: (flag: Task_Flags, task: *Task_Info) {
     offset := offset_of(Task_Info, "flags");
-    #asm { lock_or?Task_Flags [task + offset], flag; }
+    #asm { lock_or.8 [task + offset], flag; }
 }
 
 unset_flag :: (flag: Task_Flags, task: *Task_Info) {
     offset := offset_of(Task_Info, "flags");
     #asm {
-        not?Task_Flags flag;
-        lock_and?Task_Flags [task + offset], flag;
+        not.8 flag;
+        lock_and.8 [task + offset], flag;
     }
 }
 
@@ -374,9 +374,9 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
     if global.tsc_deadline_support {
-        schedule_tsc_deadline_interrupt(delay_ms = 5);
+        schedule_tsc_deadline_interrupt(delay_ms = 20);
     } else {
-        schedule_apic_timer_interrupt(delay_ms = 5);
+        schedule_apic_timer_interrupt(delay_ms = 20);
     }
 
     core := get_current_core();
