@@ -584,7 +584,7 @@ debug_exception :: (stack: *Interrupt_Stack_Frame()) #c_call {
         dr6: DR6;
         #asm { get_dr6 dr6; }
         stack_dr6 := dr6;
-        print("DR6 flags: %\n", stack_dr6);
+        print("DR6 flags: %\n\n", stack_dr6);
 
         bluescreen();
     }
@@ -675,6 +675,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
 
     release(*global.guarded_memory.spinlock);
 
+    append(*b, "\n");
     write_builder(*b);
 
     bluescreen();

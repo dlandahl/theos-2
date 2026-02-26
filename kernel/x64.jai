@@ -147,6 +147,29 @@ System_Segment_Descriptor :: struct {
 
 
 
+Page_Attribute_Table_Entry :: enum u8 {
+    UC__Uncacheable     :: 0x00;
+    WC__Write_Combining :: 0x01;
+    WT__Write_Through   :: 0x04;
+    WP__Write_Protected :: 0x05;
+    WB__Write_Back      :: 0x06;
+    UC_Minus__Uncached  :: 0x07;
+}
+
+Page_Attribute_Table :: [8] Page_Attribute_Table_Entry;
+
+get_page_attribute_table :: () -> Page_Attribute_Table {
+    _u64 := read_msr(.PAT__page_attribute_table);
+    return bit_cast(_u64, Page_Attribute_Table);
+}
+
+set_page_attribute_table :: (pat: Page_Attribute_Table) {
+    table := bit_cast(pat, u64);
+    write_msr(.PAT__page_attribute_table, table);
+}
+
+
+
 Ia32_Model_Specific_Register :: enum {
     APIC_BASE                 :: 0x0000_001b;
     PAT__page_attribute_table :: 0x0000_0277;
@@ -240,6 +263,8 @@ enable_cpu_features :: () {
             set_cr4 cr4;
         }
     }
+
+    assert(check_feature(cpu_features, .PAT), "Page Attribute Table is not supported.\n");
 
     // Mask out all the FP exceptions for now
     mxcsr := Mxcsr.MASK_ALL;

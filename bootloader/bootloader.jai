@@ -59,10 +59,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             console := system_table.ConOut;
             EFI_CHECK(console.Reset(console, 0));
 
-            boot_data.framebuffer.buffer = cast(*u32) gop.Mode.frame_buffer_base;
-            boot_data.framebuffer.x_resolution = gop.Mode.info.HorizontalResolution;
-            boot_data.framebuffer.y_resolution = gop.Mode.info.VerticalResolution;
-            boot_data.framebuffer.stride = gop.Mode.info.PixelsPerScanLine;
+            boot_data.framebuffer.hardware_buffer = cast(*u32) gop.Mode.frame_buffer_base;
+            boot_data.framebuffer.x_resolution    = gop.Mode.info.HorizontalResolution;
+            boot_data.framebuffer.y_resolution    = gop.Mode.info.VerticalResolution;
+            boot_data.framebuffer.stride          = gop.Mode.info.PixelsPerScanLine;
         }
 
         for 0..system_table.NumberOfTableEntries-1 {
@@ -189,6 +189,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             PAGE_USER       : u64 : 0x4;
             PAGE_PRESENT    : u64 : 0x1 | PAGE_USER; // Adding the USER/SUPERVISOR bit to all pages so we can do stuff in ring 3 and not think about this yet.
             PAGE_READ_WRITE : u64 : 0x2;
+            PAGE_2MB_PAT    : u64 : 0x1000; // This value is correct for 2Mb pages only, not 4kb.
             PAGE_SIZE       : u64 : 0x80;
 
             {
@@ -229,16 +230,17 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                     pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 }
 
-                offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
+                offset := cast(u64) boot_data.framebuffer.hardware_buffer & 0x1fffff;
 
-                // Map the framebuffer after where the kernel executable will be loaded. 32MB should support a 4k framebuffer. Todo: enable write combining for this memory.
+                // Map the framebuffer after where the kernel executable will be loaded. 32MB should support a 4k framebuffer.
+                // We map this with the PAT bit set, which will later be configured by the kernel to mean write-combining.
                 for 0..16 {
-                    address := cast(u64) boot_data.framebuffer.buffer - offset + cast(u64)it * 0x20_0000;
-                    pd[KERNEL_EXE_LARGE_PAGES + it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                    address := cast(u64) boot_data.framebuffer.hardware_buffer - offset + cast(u64)it * 0x20_0000;
+                    pd[KERNEL_EXE_LARGE_PAGES + it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE | PAGE_2MB_PAT;
                 }
 
                 // Translate framebuffer address to virtual.
-                boot_data.framebuffer.buffer = cast(*u32) (TOP_2_GB + KERNEL_EXE_LARGE_PAGES*0x20_0000 + offset);
+                boot_data.framebuffer.hardware_buffer = cast(*u32) (TOP_2_GB + KERNEL_EXE_LARGE_PAGES*0x20_0000 + offset);
             }
 
             // Direct-map all physical memory to the bottom of kernel memory. Todo: We could mape this as 1GB pages if all modern CPUs support that.

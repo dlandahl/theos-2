@@ -128,7 +128,7 @@ Trace_Entry :: struct {
         index_in_buffer := index % TRACE_ENTRIES_PER_BUFFER;
 
         if buffer_index >= trace_buffers.count {
-            write_string("Warning: Trace buffer overflow.");
+            write_string("Warning: Trace buffer overflow.\n"); // Since trace buffers use no synchronization, it's possible to see this message multiple times from different CPU cores if they race.
             tracing_enabled = false;
             return;
         }

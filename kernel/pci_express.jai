@@ -339,6 +339,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
     if bar.base & 0xfff {
         // Doesn't currently handle BARs with unaligned base addresses.
+        log_error("Unaligned BAR.");
         bluescreen();
     }
 
@@ -388,9 +389,9 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
                   case .END_TAG;
                     break;
                   case .IRQ;
-                    // Todo.
+                    assert(false, "Todo: Found IRQ source.");
                   case .EXTENDED_IRQ;
-                    // Todo.
+                    assert(false, "Todo: Found extended IRQ source.");
                 }
                 resource = cast(*void)resource + resource.length;
             }
@@ -411,7 +412,7 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
         return true;
     }
 
-    log_error("Failed to find routing entry for Device %d, Pin %d", pci.bus_address.device, pci.interrupt_pin);
+    log_error("Failed to find routing entry for Device %, Pin %", pci.bus_address.device, pci.interrupt_pin);
     return false;
 }
 
@@ -1175,8 +1176,8 @@ nvme_interrupt :: (stack: *void) #c_call {
 init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     log_category("NVMe");
 
-    if device.class_code != .MASS_STORAGE bluescreen();
-    if device.subclass   != 0x8           bluescreen();
+    assert(device.class_code == .MASS_STORAGE);
+    assert(device.subclass   == 0x8);
 
     device.command |= .BUS_MASTER | .MEMORY_SPACE;
     device.command &= ~.INTERRUPT_DISABLE;
@@ -1600,6 +1601,8 @@ Ahci_Controller :: struct {
     received_fis: *Ahci_Received_Fis;
     port: *Ahci_Port;
     ahci: *Ahci_Memory_Region;
+
+    initialized: bool;
 }
 
 #program_export
@@ -1624,8 +1627,6 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
     }
 
     ahci := cast(*Ahci_Memory_Region) map_base_address_register(bar);
-
-    log("Interrupt status is %.\n", ahci.IS__interrupt_status);
 
     ahci.GHC__global_host_control |= .AE__ahci_enable | .IE__interrupt_enable;
 
@@ -1694,25 +1695,17 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
             return success = false;
         }
 
-        log("Interrupt status (port) is %.\n", port.IS__interrupt_status);
-
-        // Need a better allocator for cache-disabled memory
         list_size := align(4096, size_of(Ahci_Command_Header) * command_slot_count);
         fis_size  := align(4096, size_of(Ahci_Received_Fis));
 
-        memory_needed := cast(u64) (list_size + fis_size + command_slot_count * 4096 + 4096);
+        // Todo: What does this mean. I don't remember. Fix this code.
+        memory_needed := list_size + fis_size + command_slot_count * 4096 + 4096;
 
-        using global;
-        virtual  := cast(*void) alloc_block(*virtual_block_allocator,  memory_needed);
-        physical :=             alloc_block(*physical_block_allocator, memory_needed);
+        virtual  := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) memory_needed);
+        _, physical := allocate_page_aligned_physical_memory(memory_needed);
 
-        // The virtual memory gets aligned by the allocator
-        physical = xx align(4096, xx physical);
-
-        page_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
-        pages_needed := cast(int)memory_needed / 4096;
-
-        map_pages(virtual, physical, pages_needed, page_flags);
+        pages_needed := cast(int) memory_needed / 4096;
+        map_pages(virtual, physical, pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
         controller: Ahci_Controller;
         controller.command_list.count = command_slot_count;
@@ -1749,10 +1742,11 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         }
 
         controller.ahci = ahci;
+        controller.initialized = true;
         return controller, true;
     }
 
-    bluescreen();
+    log_error("No active port found.");
     return success = false;
 }
 
@@ -1771,15 +1765,13 @@ Transfer_Direction :: enum {
 ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, memory_address: u64, number_of_bytes: u64, disk_address: u64) {
     log_category("AHCI");
 
+    assert(controller.initialized);
     assert(cast(u64) memory_address % 0x200 == 0);
 
     sector_count : u64 = (number_of_bytes + 0x1ff) / 0x200;
     lba          : u64 = (disk_address    + 0x1ff) / 0x200;
 
     if sector_count == 0 return;
-
-    // DMA hardware does not support memory accesses that cross a 64k boundary in physical memory.
-    // This code splits the operation into 64k blocks.
 
     first_sector_count := (0x1_0000 - memory_address % 0x1_0000) / 0x200;
     if first_sector_count > sector_count first_sector_count = sector_count;
@@ -1802,8 +1794,10 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
     }
 }
 
-ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Direction, physical: u64, lba: u64, sector_count: int) {
+ahci_transfer_sectors :: no_inline (controller: *Ahci_Controller, direction: Transfer_Direction, physical: u64, lba: u64, sector_count: int) {
     log_category("AHCI");
+
+    assert(controller.initialized);
 
     fis: Ahci_Command_Fis;
     fis.flags = .IS_COMMAND;
@@ -1813,12 +1807,12 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     fis.sectors_low  = cast(u8, sector_count);
     fis.sectors_high = cast(u8, sector_count >> 8);
 
-    fis.lba_0 = cast(u8, lba);
-    fis.lba_1 = cast(u8, lba >> 8);
-    fis.lba_2 = cast(u8, lba >> 16);
-    fis.lba_3 = cast(u8, lba >> 24);
-    fis.lba_4 = cast(u8, lba >> 32);
-    fis.lba_5 = cast(u8, lba >> 40);
+    fis.lba_0 = cast(u8) (lba      ) & 0xff;
+    fis.lba_1 = cast(u8) (lba >> 8 ) & 0xff;
+    fis.lba_2 = cast(u8) (lba >> 16) & 0xff;
+    fis.lba_3 = cast(u8) (lba >> 24) & 0xff;
+    fis.lba_4 = cast(u8) (lba >> 32) & 0xff;
+    fis.lba_5 = cast(u8) (lba >> 40) & 0xff;
 
     table := controller.command_table[0];
     table.CFIS__command_fis = fis;
@@ -1848,7 +1842,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         if controller.port.SACT__sata_active & 1 continue;
 
         ata_status := cast(u32, Ata_Status.BUSY | .TRANSFER_REQUESTED);
-
+        
         if controller.port.TFD__task_file_data & ata_status {
             continue;
         }
@@ -1866,13 +1860,6 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     if Timeout(!(controller.port.CI__command_issue & 1)) {
         log_error("SATA command issue timeout");
     }
-
-
-    for 1..1_000_000 #asm { pause; }
-
-    log("(Transfer) Interrupt status is %.\n", controller.ahci.IS__interrupt_status);
-    log("(Transfer) Interrupt status (port) is %.\n", controller.port.IS__interrupt_status);
-
 }
 
 Ata_Command :: enum u8 {
@@ -2199,7 +2186,7 @@ init_high_definition_audio_controller :: (device: *Pci_Device) {
 }
 
 hda_submit_command :: (hda: *High_Definition_Audio, verb: HDA_Codec_Verb) -> enum {success; buffer_full;} {
-    rp := cast(int) hda.CORBRP__corb_read_pointer & 0xff;
+    rp := cast(int) hda.CORBRP__corb_read_pointer  & 0xff;
     wp := cast(int) hda.CORBWP__corb_write_pointer & 0xff;
 
     wp = (wp + 1) % hda.corb_size;

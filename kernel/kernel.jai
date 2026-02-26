@@ -109,6 +109,7 @@ Kernel_Globals :: struct {
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
     nvme: Nvme_Controller;
+    ahci: Ahci_Controller;
 
     pci_devices: [..] Pci_Device;
 
@@ -136,7 +137,7 @@ kernel_entry :: () #no_context {
         CR4_FSGSBASE := 1 << 16;
 
         #asm FSGSBASE {
-            // Todo: FSGSBASE also gets initialized in initialize_processor_core as part of enable_cpu_features.
+            // Todo: FSGSBASE also gets initialized in init_processor_core.
             get_cr4 cr4:;
             or  cr4, CR4_FSGSBASE;
             set_cr4 cr4;
@@ -216,11 +217,6 @@ kernel_entry :: () #no_context {
     push_context {
 
         {
-            using global.framebuffer;
-            memset(buffer, 0, y_resolution * stride * size_of(u32));
-        }
-
-        {
             // Put a virtual memory heap after the direct mapping.
             GB :: 0x4000_0000;
             direct_mapping_size := cast(u64) global.page_tables.direct_pd.count * GB;
@@ -230,6 +226,19 @@ kernel_entry :: () #no_context {
 
             // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
             init_block_allocator(*global.virtual_block_allocator, heap_base, heap_size, alignment=4096);
+        }
+
+        {
+            // Initialize the software framebuffer.
+            using global.framebuffer;
+
+            size_bytes := y_resolution * stride * size_of(u32);
+            size_bytes += 0x10_0000; // Todo: We copy black pixels from outside the framebuffer for convenience when doing text line-scrolling. Bit messy.
+
+            software_buffer = alloc(size_bytes);
+            memset(software_buffer, 0, size_bytes);
+
+            // flush_screen();
         }
 
         {
@@ -295,19 +304,22 @@ kernel_entry :: () #no_context {
 
         irq_restore();
 
-        if false for *global.pci_devices {
+        for *global.pci_devices {
             if it.combined_class_code == {
               case .SATA_CONTROLLER;
-                init_ahci_controller(it);
+                ahci, success := init_ahci_controller(it);
+                if success {
+                    global.ahci = ahci;
+                }
 
               case .NVME_CONTROLLER;
                 global.nvme = init_nvme_controller(it);
 
               case .I8254X_ETHERNET;
-                global.network_connection.adapter = init_i8254x(it);
+                // global.network_connection.adapter = init_i8254x(it);
 
               case .HIGH_DEFINITION_AUDIO;
-                init_high_definition_audio_controller(it);
+                // init_high_definition_audio_controller(it);
             }
         }
 
@@ -320,9 +332,15 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        // test_test();
-        // user_mode_stress_test(4, 0xffffff);
         priority_test();
+
+        _, buffer := allocate_page_aligned_physical_memory(4096);
+        ahci_transfer(*global.ahci, .READ, buffer, 512, 2048*512);
+        bs := cast(*Fat16_Bootsector) (buffer + DIRECT_MAPPING_BASE);
+
+        log("OEM name is %.",          cast(string) bs.oem_name);
+        log("Volume label is %.",      cast(string) bs.volume_label);
+        log("File system label is %.", cast(string) bs.file_system_label);
 
         {
             set_flag(.stopped, get_current_task());
@@ -782,6 +800,21 @@ init_processor_core :: () {
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
     }
+
+    {
+        // Page attribute table, add write combining.
+
+        pat := get_page_attribute_table();
+        pat[4] = .WC__Write_Combining;
+        set_page_attribute_table(pat);
+
+        // It's required to flush TLBs after modifying PAT.
+        // This needs to be done differently once we have support for PCID. See Intel SDE Volume 3 section 12.12.4
+        #asm {
+            get_cr3 cr3:;
+            set_cr3 cr3;
+        }
+    }
 }
 
 #program_export
@@ -796,10 +829,11 @@ bluescreen :: () #no_context {
 
     for y: 0..y_resolution-1 {
         for x: 0..x_resolution-1 {
-            buffer[x + y * stride] |= 0xff;
+            software_buffer[x + y * stride] |= 0xff;
         }
     }
 
+    flush_screen();
     global.bluescreen_occurred = true;
 
     while true #asm {
@@ -1193,6 +1227,11 @@ Page_Flags :: enum_flags u64 {
     ACCESSED        :: 1 << 5;
     DIRTY           :: 1 << 6;
     PAGE_SIZE       :: 1 << 7;
+
+    // Todo: We should maybe have separate enums for flags at different page table levels.
+    PTE_PAGE_ATTRIBUTE_TABLE :: 1 << 7;   // For 4Kb pages.
+    PDE_PAGE_ATTRIBUTE_TABLE :: 1 << 12;  // For 2Mb and 1Gb pages.
+
     EXECUTE_DISABLE :: 1 << 63;
 }
 
@@ -2586,7 +2625,7 @@ draw_text :: (text: string) #no_context {
             cursor_x = 0;
         }
 
-        screen_x := cursor_x * char_width + margin;
+        screen_x := cursor_x * char_width  + margin;
         screen_y := cursor_y * line_height + margin;
 
         while screen_y + line_height + margin > framebuffer.y_resolution {
@@ -2596,11 +2635,11 @@ draw_text :: (text: string) #no_context {
             count := cursor_y * line_height * framebuffer.stride;
 
             // Inefficient when printing strings with many newlines.
-            memcpy(framebuffer.buffer + target, framebuffer.buffer + source, count * size_of(u32));
+            memcpy(framebuffer.software_buffer + target, framebuffer.software_buffer + source, count * size_of(u32));
 
             if global.bluescreen_occurred {
                 for 0..count-1 {
-                    framebuffer.buffer[target + it] |= 0xff;
+                    framebuffer.software_buffer[target + it] |= 0xff;
                 }
             }
 
@@ -2625,14 +2664,23 @@ draw_text :: (text: string) #no_context {
                 red   := cast(int) (0xa0 * (1.0 / framebuffer.y_resolution) * (screen_y + char_y));
                 green := cast(int) (0xa0 * (1.0 / framebuffer.x_resolution) * (screen_x + char_x));
 
-                framebuffer.buffer[pixel_on_screen] = pixel_color;
+                framebuffer.software_buffer[pixel_on_screen] = pixel_color;
             }
         }
 
         cursor_x += 1;
     }
 
+    flush_screen();
+
     release(*spinlock);
+}
+
+flush_screen :: () #no_context {
+    fb := global.framebuffer;
+    size_bytes := fb.y_resolution * fb.stride * size_of(u32);
+
+    memcpy(fb.hardware_buffer, fb.software_buffer, size_bytes);
 }
 
 Netpbm_Image :: struct {

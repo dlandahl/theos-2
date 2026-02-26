@@ -2,7 +2,8 @@
 // Stuff that's shared between bootloader and kernel
 
 Framebuffer :: struct {
-    buffer: *u32;
+    hardware_buffer: *u32;
+    software_buffer: *u32;
     x_resolution: int;
     y_resolution: int;
     stride: int;
