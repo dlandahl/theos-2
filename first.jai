@@ -395,8 +395,7 @@ isr__%1:
 
     ; For now, let's not have interrupt requests while other interrupt handlers are running.
     ; Todo: Very important to clarify this in the future.
-    cli
-    inc qword [gs:irq_disable_count]
+    call irq_disable
 
     mov rdi, rsp
 
@@ -411,11 +410,12 @@ isr__%1:
     cld
     call %1
 
+    call irq_restore
+
     dec qword [gs:interrupt_context_active]
 
+    ; Remove the manually created call stack frame from the stack.
     add rsp, 16
-
-    dec qword [gs:irq_disable_count]
 
     pop_all
     %2

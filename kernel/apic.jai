@@ -169,8 +169,8 @@ initialize_apic :: () {
     register_interrupt_gate(isr__page_fault,               14, true, ist = 1);
     register_interrupt_gate(isr__floating_point_exception, 19, true);
 
-    register_interrupt_gate(isr__ipi_handler__procedure_call, cast(s64) Interrupt_Gate.PROCEDURE_CALL_IPI);
-    register_interrupt_gate(isr__ipi_handler__reschedule,     cast(s64) Interrupt_Gate.RESCHEDULE_IPI);
+    register_interrupt_gate(isr__ipi_procedure_call, Interrupt_Gate.PROCEDURE_CALL_IPI);
+    register_interrupt_gate(isr__ipi_reschedule,     Interrupt_Gate.RESCHEDULE_IPI);
 
     //
     // Iterate interrupt controller structures
@@ -335,17 +335,10 @@ get_core_id :: () -> int #no_context {
 }
 
 get_task_id :: () -> int #no_context {
-    if !global.multiprocessing_initialized {
-        return 0;
-    }
-
-    core := get_current_core();
-
-    if !core.online {
-        return 0;
-    }
-
     task := get_current_task();
+
+    if !task return 0; // It's early during boot.
+
     return task.id;
 }
 
@@ -396,13 +389,13 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, entry: 
 
 
 
-execute_ipi :: (gate: Interrupt_Gate, target: *X64_Core) {
+execute_ipi :: (gate: Interrupt_Gate, destination: *X64_Core) {
     // Slightly higher level version of "apic_execute_ipi" for callers that
     // don't want to be concerned with the interrupt command bitfield.
 
     ipi: Apic_Interrupt_Command;
     set(*ipi, .vector,      xx gate);
-    set(*ipi, .destination, target.local_apic_id);
+    set(*ipi, .destination, destination.local_apic_id);
     apic_execute_ipi(ipi);
 }
 
@@ -441,7 +434,7 @@ do_procedure_call_ipi_synchronous :: (procedure: (*void), parameter: *void, core
 }
 
 #program_export
-ipi_handler__procedure_call :: (stack: *void) #c_call {
+ipi_procedure_call :: (stack: *void) #c_call {
     push_context,defer_pop;
 
     core := get_current_core();
@@ -461,17 +454,12 @@ ipi_handler__procedure_call :: (stack: *void) #c_call {
 } @InterruptRoutine
 
 #program_export
-ipi_handler__reschedule :: (stack: *void) #c_call {
+ipi_reschedule :: (stack: *void) #c_call {
     push_context,defer_pop;
 
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
-    if cpu_local_read("preempt_disable_count") > 0 {
-        // Todo: We need to reschedule once preemption is enabled.
-        return;
-    }
-
-    schedule_tasks();
+    set_flag(.preempt, get_current_task());
 } @InterruptRoutine
 
 

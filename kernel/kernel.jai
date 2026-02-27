@@ -796,7 +796,7 @@ init_processor_core :: () {
     {
         // Spurious interrupts.
 
-        register_interrupt_gate(isr__spurious_interrupt, 0xff);
+        register_interrupt_gate(isr__spurious_interrupt, Interrupt_Gate.SPURIOUS);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
     }
@@ -938,7 +938,7 @@ read_debug_info :: () {
         pool.oversized_size =  0x1_0000;
 
         set_allocators(pool);
-        push_allocator(.{pool_allocator_proc, pool});
+        push_allocator({pool_allocator_proc, pool});
 
         global.debug_info, success = parse_dwarf_debug_info(info, abbrev, line, str);
     }
@@ -2290,11 +2290,14 @@ preempt_disable :: () #no_context {
 
 preempt_restore :: () #no_context {
     cpu_local_decrement("preempt_disable_count");
+
+    maybe_reschedule();
 }
 
 
 get_rflags :: () -> X64_Flags #foreign Assembly;
 
+#program_export
 irq_disable :: () #no_context {
     #asm { cli; }
 
@@ -2304,6 +2307,7 @@ irq_disable :: () #no_context {
     trace(.irq_disable, core.irq_disable_count);
 }
 
+#program_export
 irq_restore :: () #no_context {
 
     core := get_current_core();
@@ -2313,6 +2317,8 @@ irq_restore :: () #no_context {
 
     if core.irq_disable_count == 0 {
         #asm { sti; }
+
+        maybe_reschedule();
     }
 }
 

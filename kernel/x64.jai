@@ -69,7 +69,7 @@ Interrupt_Gate_Descriptor :: struct {
     reserved: u32;
 }
 
-register_interrupt_gate :: (handler: () #c_call, index: int, trap := false, ist: u8 = 0) {
+register_interrupt_gate :: (handler: () #c_call, index: $T/.[int, Interrupt_Gate], trap := false, ist: u8 = 0) {
     desc := *global.interrupt_descriptor_table[index];
     desc.* = .{};
 

@@ -41,6 +41,7 @@ Task_Flags :: enum_flags s8 {
     sleeping;
     blocked;
     stopped;
+    preempt;
 }
 
 Scheduler :: struct {
@@ -78,8 +79,9 @@ lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
 }
 
 queue_to_run :: (task: *Task_Info, go_at_the_front := false) {
-    scheduler := *task.on_core.scheduler;
+    // Just a utility to put a task on the correct run queue based on its priority.
 
+    scheduler := *task.on_core.scheduler;
     assert(is_held(scheduler.spinlock), "Caller should take the lock.");
 
     run_queue := *scheduler.waiting_to_run[task.priority];
@@ -95,7 +97,7 @@ get_current_task :: () -> *Task_Info #no_context {
     return cast(*Task_Info) cpu_local_read("scheduler.current_task");
 }
 
-set_flag :: (flag: Task_Flags, task: *Task_Info) {
+set_flag :: (flag: Task_Flags, task: *Task_Info) #no_context {
     offset := offset_of(Task_Info, "flags");
     #asm { lock_or.8 [task + offset], flag; }
 }
@@ -163,12 +165,7 @@ core_begin_multitasking :: () {
 cpu_idle_loop :: () {
     while true {
         assert(get_rflags() & .IF__interrupt > 0);
-
-        preempt_disable(); // Maybe this is dumb, but if the interrupt that causes 'hlt' to resume is the scheduling clock, we don't need the clock handler to call the scheduler because it will happen anyway. In the future, maybe interrupts should be able to report to whether they require the scheduler to run.
         #asm { hlt; }
-        preempt_restore();
-
-        schedule_tasks();
     }
 }
 
@@ -185,6 +182,8 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     task.on_core = core;
 
     queue_to_run(task);
+
+    execute_ipi(.RESCHEDULE_IPI, core);
 
     release(*scheduler.spinlock);
 }
@@ -243,6 +242,38 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
 yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
+
+    schedule_timer_interrupt :: (scheduler: *Scheduler, time_now: Apollo_Time) {
+        assert(is_held(scheduler.spinlock)); // Caller should take the lock.
+
+        // Calculate when the next scheduling interrupt should occur.
+        shortest_time := INFINITE_TIMEOUT;
+
+        if !is_empty(*scheduler.sleeping) {
+            next_wake_up := get_item(scheduler.sleeping.next);
+            if next_wake_up.sleep_until != INFINITE_TIMEOUT {
+                shortest_time = next_wake_up.sleep_until - time_now;
+            }
+        }
+
+        // We could set it up so the idle task's scheduling quantum is set to INFINITE.
+        if scheduler.current_task != scheduler.idle_task && scheduler.current_task.remaining_quantum < shortest_time {
+            shortest_time = scheduler.current_task.remaining_quantum;
+        }
+
+        if shortest_time == INFINITE_TIMEOUT {
+            // There's currently no reason to run the scheduler again. Wait for an external interrupt.
+            return;
+        }
+
+        delay_ms := max(1, to_milliseconds(shortest_time));
+
+        if global.tsc_deadline_support {
+            schedule_tsc_deadline_interrupt(cast(u64) delay_ms);
+        } else {
+            schedule_apic_timer_interrupt(cast(u64) delay_ms);
+        }
+    }
 
     {
         count := cpu_local_read("preempt_disable_count");
@@ -319,6 +350,8 @@ schedule_tasks :: () {
     }
 
     if next == previous {
+        schedule_timer_interrupt(scheduler, time_now);
+
         release(*scheduler.spinlock);
         return;
     }
@@ -328,18 +361,20 @@ schedule_tasks :: () {
         queue_to_run(previous, go_at_the_front = !quantum_expired);
     }
 
-    previous.on_core.task_state_segment.rsp[0] = next.kernel_stack;
+    if next.remaining_quantum <= 0 {
+        // If you ran out of time, you get a new quantum when you get scheduled in.
+        next.remaining_quantum = scheduler.quantum;
+    }
+
+    next.on_core.task_state_segment.rsp[0] = next.kernel_stack;
 
     trace(.context_switch, previous.id, next.id);
 
     scheduler.current_task = next;
 
-    context_switch(previous, next);
+    schedule_timer_interrupt(scheduler, time_now);
 
-    if next.remaining_quantum <= 0 {
-        // If you ran out of time, you get a new quantum when you get scheduled in.
-        next.remaining_quantum = scheduler.quantum;
-    }
+    context_switch(previous, next);
 
     release(*scheduler.spinlock);
 }
@@ -373,27 +408,41 @@ DISABLE_KERNEL_PREEMPTION :: false;
 scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
-    if global.tsc_deadline_support {
-        schedule_tsc_deadline_interrupt(delay_ms = 20);
-    } else {
-        schedule_apic_timer_interrupt(delay_ms = 20);
-    }
-
     core := get_current_core();
     trace(.scheduling_timer, core.preempt_disable_count);
 
-    if core.preempt_disable_count > 0 {
+    if stack.cs != .RING0_CODE && DISABLE_KERNEL_PREEMPTION {
         return;
     }
 
-    if stack.cs == .RING0_CODE && DISABLE_KERNEL_PREEMPTION {
+    set_flag(.preempt, core.scheduler.current_task);
+} @InterruptRoutine
+
+#program_export
+maybe_reschedule :: () #c_call {
+    task := get_current_task();
+
+    if task == null {
+        return; // It's early during boot.
+    }
+
+    if task.flags & .preempt == 0 {
+        return;
+    }
+
+    if cpu_local_read("preempt_disable_count") > 0 {
+        return;
+    }
+
+    if cpu_local_read("irq_disable_count") > 0 {
         return;
     }
 
     push_context {
+        unset_flag(.preempt, task);
         schedule_tasks();
     }
-} @InterruptRoutine
+}
 
 
 
@@ -456,9 +505,7 @@ wake_task :: (task: *Task_Info) {
     list_remove(task);
     queue_to_run(task);
 
-    if task.priority > scheduler.current_task.priority {
-        execute_ipi(.RESCHEDULE_IPI, task.on_core); // Maybe task_info should store the ID of the core rather than a pointer.
-    }
+    execute_ipi(.RESCHEDULE_IPI, task.on_core);
 
     release(*scheduler.spinlock);
 }
@@ -939,6 +986,8 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     }
 
     reset_temporary_storage();
+
+    maybe_reschedule();
 }
 
 // This is needed by the syscall handler implemented in assembly.
@@ -1118,6 +1167,7 @@ List_Node :: struct (Item: Type) {
 }
 
 get_item :: (node: *$T/List_Node) -> *T.Item {
+    DEBUG(node);
 
     offset :: #run -> int {
         ti_item := type_info(T.Item);
@@ -1132,7 +1182,7 @@ get_item :: (node: *$T/List_Node) -> *T.Item {
         return -1;
     }
 
-    #assert offset != -1;
+    assert(offset != -1);
 
     return cast(*void) node - offset;
 }
@@ -1250,6 +1300,7 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
         prepend   :: #procedure_of_call(list_prepend (a, b));
         delete    :: #procedure_of_call(list_remove  (a));
         empty     :: #procedure_of_call(is_empty     (a));
+        get       :: #procedure_of_call(get_item     (a));
 
         // Can't use a case statement because I can't get the procedures to be constants with the same type as #this. Using compile-time #if == { would be much better though.
 
@@ -1258,6 +1309,13 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
 
             a.is_head = true;
             a.my_head = a;
+        }
+
+        else if #this == xx get {
+            // Can't do this assert because we call it in list_pop on list nodes that have just been removed.
+            // assert(a.my_head != null);
+
+            assert(!a.is_head);
         }
 
         else if #this == xx insert {

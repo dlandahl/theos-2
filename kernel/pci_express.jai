@@ -1698,7 +1698,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         list_size := align(4096, size_of(Ahci_Command_Header) * command_slot_count);
         fis_size  := align(4096, size_of(Ahci_Received_Fis));
 
-        // Todo: What does this mean. I don't remember. Fix this code.
+        // Todo: Make this easier to understand.
         memory_needed := list_size + fis_size + command_slot_count * 4096 + 4096;
 
         virtual  := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) memory_needed);

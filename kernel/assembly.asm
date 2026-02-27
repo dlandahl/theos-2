@@ -39,6 +39,11 @@ section .text
     pop rax
 %endmacro
 
+extern irq_restore
+extern irq_disable    
+
+
+
 global context_switch
 
 ; *current_task is in rdi
