@@ -26,8 +26,13 @@ Trace_Tag :: enum u16 {
     nvme_enqueue;
     nvme_SUCCESS;
     nvme_FAILURE;
+    resched_by_wakeup;
+    resched_by_quantum;
     section_break;
+    count;
 }
+
+#assert Trace_Tag.count <= 32; // Don't accidentally run out of slots in the trace tag mask.
 
 Trace_Header :: struct {
     tsc_frequency:     u64;

@@ -149,7 +149,7 @@ core_begin_multitasking :: () {
     for *waiting_to_run list_init(it);
     list_init(*sleeping);
 
-    quantum = milliseconds_to_apollo(5);
+    quantum = milliseconds_to_apollo(50);
 
     core.online = true;
 
@@ -243,22 +243,30 @@ yield_execution :: schedule_tasks;
 
 schedule_tasks :: () {
 
-    schedule_timer_interrupt :: (scheduler: *Scheduler, time_now: Apollo_Time) {
+    update_scheduling_timer :: (scheduler: *Scheduler, time_now: Apollo_Time) {
         assert(is_held(scheduler.spinlock)); // Caller should take the lock.
+
+        next := scheduler.current_task; // The task we're switching to.
 
         // Calculate when the next scheduling interrupt should occur.
         shortest_time := INFINITE_TIMEOUT;
 
-        if !is_empty(*scheduler.sleeping) {
-            next_wake_up := get_item(scheduler.sleeping.next);
-            if next_wake_up.sleep_until != INFINITE_TIMEOUT {
-                shortest_time = next_wake_up.sleep_until - time_now;
-            }
+        // Todo: This is O(n), but we could switch to having sleep queues per-priority level to make it O(1).
+        for scheduler.sleeping {
+            if it.priority <= next.priority continue;
+            if it.sleep_until == INFINITE_TIMEOUT continue;
+
+            sleep_time := it.sleep_until - time_now;
+            if sleep_time >= shortest_time break;
+
+            shortest_time = sleep_time;
+            trace(.resched_by_wakeup, to_milliseconds(shortest_time), it.id);
         }
 
         // We could set it up so the idle task's scheduling quantum is set to INFINITE.
-        if scheduler.current_task != scheduler.idle_task && scheduler.current_task.remaining_quantum < shortest_time {
-            shortest_time = scheduler.current_task.remaining_quantum;
+        if next != scheduler.idle_task && next.remaining_quantum < shortest_time && next.remaining_quantum > .{} {
+            shortest_time = next.remaining_quantum;
+            trace(.resched_by_quantum, to_milliseconds(shortest_time));
         }
 
         if shortest_time == INFINITE_TIMEOUT {
@@ -266,6 +274,7 @@ schedule_tasks :: () {
             return;
         }
 
+        // Todo: Proably need to make this higher than millisecond resolution.
         delay_ms := max(1, to_milliseconds(shortest_time));
 
         if global.tsc_deadline_support {
@@ -350,7 +359,7 @@ schedule_tasks :: () {
     }
 
     if next == previous {
-        schedule_timer_interrupt(scheduler, time_now);
+        update_scheduling_timer(scheduler, time_now);
 
         release(*scheduler.spinlock);
         return;
@@ -372,7 +381,7 @@ schedule_tasks :: () {
 
     scheduler.current_task = next;
 
-    schedule_timer_interrupt(scheduler, time_now);
+    update_scheduling_timer(scheduler, time_now);
 
     context_switch(previous, next);
 

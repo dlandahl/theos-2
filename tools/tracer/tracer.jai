@@ -555,20 +555,20 @@ draw_one_frame :: (dt: float) {
                 label_rect.x += 150*UI_SCALE;
             }
 
+            // Display tag-specific explanation of what's going on with this trace entry.
+
             if it.tag == {
               case .scheduling_timer;
                 text = tprint("Preempt disable count: %", it.user[0]);
-                label(label_rect, text, lt);
 
               case .nvme_FAILURE; #through;
               case .nvme_SUCCESS; #through;
               case .nvme_enqueue;
                 text = tprint("Queue index: %, id = %", it.user[0], it.user[1]);
-                label(label_rect, text, lt);
 
               case .syscall;
                 syscall_names := string.["Zero (Invalid)", "Yield", "CPU Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex", "Free Memory"];
-                label(label_rect, tprint("Syscall '%'", syscall_names[it.user[0]]), lt);
+                text = tprint("Syscall '%'", syscall_names[it.user[0]]);
 
               case .context_switch;
                 if it.user[1] > cast(u64)trace_data.threads.count-1 {
@@ -577,27 +577,28 @@ draw_one_frame :: (dt: float) {
                     text = tprint("Switch to %", trace_data.threads[it.user[1]]);
                 }
 
-                label(label_rect, text, lt);
-
               case .small_object_alloc;  #through;
               case .small_object_free;   #through;
               case .block_alloc;         #through;
               case .block_resize;        #through;
               case .block_free;
                 text = tprint("% bytes at 0x%", it.user[1], cast(*void)it.user[0]);
-                label(label_rect, text, lt);
 
               case .contended_spinlock;
                 time_ns := cast(float)it.user[1] / cast(float)trace_data.tsc_frequency;
-
                 text = tprint("Contention level: %, blocked for %us", it.user[0], cast(int)(time_ns * 1_000_000));
-                label(label_rect, text, lt);
 
               case .irq_disable; #through;
               case .irq_restore;
                 text = tprint("New disable count: %", it.user[0]);
-                label(label_rect, text, lt);
+
+              case .resched_by_wakeup;
+                text = tprint("Task % wakes in %ms", trace_data.threads[it.user[1]], it.user[0]);
+              case .resched_by_quantum;
+                text = tprint("Remaining quantum %ms", it.user[0]);
             }
+
+            label(label_rect, text, lt);
         }
 
         end_scrollable_region(state, row_rect.x, row_rect.y, *scroll_position);

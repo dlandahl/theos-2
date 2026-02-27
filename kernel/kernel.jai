@@ -332,7 +332,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        user_mode_stress_test(3, 0b1100);
+        user_mode_stress_test(1, 0b1000);
 
         if false {
             _, buffer := allocate_page_aligned_physical_memory(4096);
