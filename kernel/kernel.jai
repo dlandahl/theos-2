@@ -332,15 +332,17 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        priority_test();
+        user_mode_stress_test(3, 0b1100);
 
-        _, buffer := allocate_page_aligned_physical_memory(4096);
-        ahci_transfer(*global.ahci, .READ, buffer, 512, 2048*512);
-        bs := cast(*Fat16_Bootsector) (buffer + DIRECT_MAPPING_BASE);
+        if false {
+            _, buffer := allocate_page_aligned_physical_memory(4096);
+            ahci_transfer(*global.ahci, .READ, buffer, 512, 2048*512);
+            bs := cast(*Fat16_Bootsector) (buffer + DIRECT_MAPPING_BASE);
 
-        log("OEM name is %.",          cast(string) bs.oem_name);
-        log("Volume label is %.",      cast(string) bs.volume_label);
-        log("File system label is %.", cast(string) bs.file_system_label);
+            log("OEM name is %.",          cast(string) bs.oem_name);
+            log("Volume label is %.",      cast(string) bs.volume_label);
+            log("File system label is %.", cast(string) bs.file_system_label);
+        }
 
         {
             set_flag(.stopped, get_current_task());
@@ -422,11 +424,15 @@ disk_test :: () {
     }
 
     start := get_monotonic_time();
+    start_byte := 2048*512; // FAT filesystem has 2048 LBA (1MB) offset because this is favourable alignment.
+    assert(start_byte % global.nvme.block_size == 0);
+
+    fat16_mbr_offset_blocks := start_byte / global.nvme.block_size;
 
     for 0..transfers-1 {
         start_block   := it * blocks_per_transfer;
         memory_buffer := buffer.data + start_block * global.nvme.block_size;
-        nvme_read(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
+        nvme_read(*global.nvme, cast(u64) (start_block + fat16_mbr_offset_blocks), memory_buffer, blocks_per_transfer);
 
         if it % global.nvme.maximum_queue_entries == 0 nvme_fence(*global.nvme);
     }
@@ -445,7 +451,7 @@ disk_test :: () {
     for 0..transfers-1 {
         start_block   := it * blocks_per_transfer;
         memory_buffer := buffer.data + start_block * global.nvme.block_size;
-        nvme_write(*global.nvme, cast(u64) start_block, memory_buffer, blocks_per_transfer);
+        nvme_write(*global.nvme, cast(u64) (start_block + fat16_mbr_offset_blocks), memory_buffer, blocks_per_transfer);
 
         if it % global.nvme.maximum_queue_entries == 0 nvme_fence(*global.nvme);
     }

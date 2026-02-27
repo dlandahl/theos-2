@@ -598,6 +598,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack_Frame(false)) #c_call {
 
     append_formatted_stack_trace(*b, buffer);
 
+    append(*b, "\n");
     write_builder(*b);
 
     bluescreen();

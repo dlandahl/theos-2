@@ -510,6 +510,12 @@ configure_apic_timer_interrupt :: (gate: int) {
 
 schedule_apic_timer_interrupt :: (delay_ms: u64) #no_context {
     ticks := (global.lapic_frequency * delay_ms / 1_000);
+
+    // If the 32bit counter register can't hold the delay we want, just run the scheduler sooner to recalculate the time. In the future we'll use TSC deadline where this is not an issue.
+    if ticks > 0xffff_ffff {
+        ticks = 0xffff_ffff;
+    }
+
     write_apic_register(.TIC__TIMER_INITIAL, cast(u32) ticks);
 }
 
