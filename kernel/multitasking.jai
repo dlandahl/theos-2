@@ -41,7 +41,7 @@ Task_Flags :: enum_flags s8 {
     sleeping;
     blocked;
     stopped;
-    preempt;
+    preempt; // Todo: Might make more sense to have this in CPU-local data.
 }
 
 Scheduler :: struct {
@@ -149,11 +149,11 @@ core_begin_multitasking :: () {
     for *waiting_to_run list_init(it);
     list_init(*sleeping);
 
-    quantum = milliseconds_to_apollo(50);
+    quantum = milliseconds_to_apollo(20);
 
     core.online = true;
 
-    // Enable scheduling clock - either LAPIC or preferably TSC Deadline.
+    // Enable scheduling clock - either APIC or preferably TSC Deadline.
 
     if global.tsc_deadline_support {
         configure_tsc_deadline_interrupt(global.scheduling_interrupt_gate);
@@ -170,14 +170,10 @@ cpu_idle_loop :: () {
 }
 
 put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
-    // A weird procedure because tasks are never not associated with a core unless they have never run yet. So we could just put tasks on the core they were created from, and let the caller move them before waking them. That way on_core is never null on any Task_Info we deal with outside of create_task.
-
     scheduler := *core.scheduler;
     acquire(*scheduler.spinlock);
 
-    if task.on_core != null {
-        bluescreen();
-    }
+    assert(task.on_core == null);
 
     task.on_core = core;
 
@@ -247,13 +243,14 @@ schedule_tasks :: () {
         assert(is_held(scheduler.spinlock)); // Caller should take the lock.
 
         next := scheduler.current_task; // The task we're switching to.
+        is_idle := next == scheduler.idle_task;
 
         // Calculate when the next scheduling interrupt should occur.
         shortest_time := INFINITE_TIMEOUT;
 
         // Todo: This is O(n), but we could switch to having sleep queues per-priority level to make it O(1).
         for scheduler.sleeping {
-            if it.priority <= next.priority continue;
+            if it.priority <= next.priority && !is_idle continue;
             if it.sleep_until == INFINITE_TIMEOUT continue;
 
             sleep_time := it.sleep_until - time_now;
@@ -264,7 +261,7 @@ schedule_tasks :: () {
         }
 
         // We could set it up so the idle task's scheduling quantum is set to INFINITE.
-        if next != scheduler.idle_task && next.remaining_quantum < shortest_time && next.remaining_quantum > .{} {
+        if !is_idle && next.remaining_quantum < shortest_time && next.remaining_quantum > 0 {
             shortest_time = next.remaining_quantum;
             trace(.resched_by_quantum, to_milliseconds(shortest_time));
         }
@@ -275,7 +272,9 @@ schedule_tasks :: () {
         }
 
         // Todo: Proably need to make this higher than millisecond resolution.
-        delay_ms := max(1, to_milliseconds(shortest_time));
+        delay_ms := max(0, to_milliseconds(shortest_time));
+
+        delay_ms += 1;
 
         if global.tsc_deadline_support {
             schedule_tsc_deadline_interrupt(cast(u64) delay_ms);
@@ -314,7 +313,7 @@ schedule_tasks :: () {
             // If you sleep you get your full quantum back.
             it.remaining_quantum = scheduler.quantum;
 
-            // We can get here if the sleep time of the previous task was so short that it wakes before the context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the previous task.
+            // We can get here if the sleep time of the previous task was so short that it wakes itself before context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the previous task.
             if it != previous {
                 queue_to_run(it);
             }
@@ -420,7 +419,7 @@ scheduling_timer_interrupt :: (stack: *Interrupt_Stack_Frame()) #c_call {
     core := get_current_core();
     trace(.scheduling_timer, core.preempt_disable_count);
 
-    if stack.cs != .RING0_CODE && DISABLE_KERNEL_PREEMPTION {
+    if stack.cs == .RING0_CODE && DISABLE_KERNEL_PREEMPTION {
         return;
     }
 

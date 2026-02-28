@@ -777,3 +777,7 @@ debug_run_tsc_timer :: () {
 operator <= :: (a: S128, b: s64) -> bool {
     return a.high <= b;
 }
+
+operator > :: (a: S128, b: s64) -> bool {
+    return a > inline to_s128(b);
+}

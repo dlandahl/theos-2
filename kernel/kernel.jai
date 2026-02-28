@@ -237,8 +237,6 @@ kernel_entry :: () #no_context {
 
             software_buffer = alloc(size_bytes);
             memset(software_buffer, 0, size_bytes);
-
-            // flush_screen();
         }
 
         {
@@ -332,7 +330,8 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        user_mode_stress_test(1, 0b1000);
+        priority_test();
+        user_mode_stress_test(4, 0b1111);
 
         if false {
             _, buffer := allocate_page_aligned_physical_memory(4096);
@@ -2692,7 +2691,9 @@ flush_screen :: () #no_context {
     fb := global.framebuffer;
     size_bytes := fb.y_resolution * fb.stride * size_of(u32);
 
-    memcpy(fb.hardware_buffer, fb.software_buffer, size_bytes);
+    #import "Memory";
+    push_context,defer_pop;
+    copy(fb.hardware_buffer, fb.software_buffer, size_bytes);
 }
 
 Netpbm_Image :: struct {

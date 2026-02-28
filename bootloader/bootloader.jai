@@ -41,23 +41,46 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
 
         {
-            // Get framebuffer and clear the screen
+            // Get framebuffer and clear the screen.
 
             gop: *EFI_GRAPHICS_OUTPUT_PROTOCOL;
             EFI_CHECK(boot_services.LocateProtocol(*EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, null, cast(**void) *gop));
 
-            gop.SetMode(gop, 9);
+            // It will try to get as close as possible to this resolution, without exceeding it.
+            preferred_horizontal_resolution :: 1920;
+            preferred_vertical\ _resolution :: 1080;
+
+            best_horizontal_resolution: u32;
+            best_vertical\ _resolution: u32;
+            best_mode: u32;
+
+            for 0..gop.Mode.max_mode-1 {
+                info: *EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+                info_size: u64 = size_of(EFI_GRAPHICS_OUTPUT_MODE_INFORMATION);
+
+                EFI_CHECK(gop.QueryMode(gop, cast(u32) it, *info_size, *info));
+
+                if info.PixelFormat != .PixelBlueGreenRedReserved8BitPerColor {
+                    continue;
+                }
+
+                if info.HorizontalResolution > best_horizontal_resolution && info.HorizontalResolution <= preferred_horizontal_resolution {
+                    best_horizontal_resolution = info.HorizontalResolution;
+                    best_mode = cast(u32) it;
+                }
+
+                if info.VerticalResolution > best_vertical_resolution && info.VerticalResolution <= preferred_vertical_resolution {
+                    best_vertical_resolution = info.VerticalResolution;
+                    best_mode = cast(u32) it;
+                }
+            }
+
+            display("Selected GOP mode \"", best_mode, "\" x=", best_horizontal_resolution, " y=", best_vertical_resolution);
+            EFI_CHECK(gop.SetMode(gop, best_mode));
 
             framebuffer: [] u32;
             framebuffer.data  = cast(*u32) gop.Mode.frame_buffer_base;
             framebuffer.count = cast(s64) gop.Mode.frame_buffer_size / size_of(u32);
-
-            for* framebuffer {
-                it.* = 0x00ffff00;
-            }
-
-            console := system_table.ConOut;
-            EFI_CHECK(console.Reset(console, 0));
 
             boot_data.framebuffer.hardware_buffer = cast(*u32) gop.Mode.frame_buffer_base;
             boot_data.framebuffer.x_resolution    = gop.Mode.info.HorizontalResolution;
@@ -459,9 +482,27 @@ display :: (args: .. Any) {
             memcpy(*integer, it.value_pointer, it.type.runtime_size);
             display_int(integer);
         }
+
+        if it.type.type == .ENUM {
+            display_enum(it);
+        }
     }
 
     display_string("\r\n");
+}
+
+display_enum :: (e: Any) {
+    ti := cast(*Type_Info_Enum) e.type;
+
+    value := (.*) cast(*s64) e.value_pointer;
+
+    for ti.values if it == value {
+        enum_name := ti.names[it_index];
+        display_string(enum_name);
+        return;
+    }
+
+    display_int(cast(u64) value);
 }
 
 display_string :: (message: string) {
@@ -477,15 +518,42 @@ display_string :: (message: string) {
     console.OutputString(console, wide.data);
 }
 
-display_int :: (value: u64) {
-    hex_chars := "0123456789abcdef";
-    result: [16] u8;
-
-    for 0..15 {
-        result[it] = hex_chars[(value >> (60 - it * 4)) & 0xF];
+display_int :: (n: u64, base := 10) {
+    if n == 0 {
+        display_string("0");
+        return;
     }
 
-    display_string(cast(string) result);
+    if base > 16  base = 16;
+    if base < 2   base = 2;
+
+    ubase := cast,no_check(u64) base;
+
+    // This is of course a horrible hack.
+    // A u64 in base 2 can be up to 64 digits,
+    // so we need at least that much space. Add a few more digits for superstition.
+    buf: [69] u8;
+
+    starting_cursor : s32 = buf.count;
+    cursor := starting_cursor;
+
+
+    while n {
+        cursor -= 1;
+        index := n % ubase;
+        if index <= 9 {
+            buf[cursor] = cast(u8)(index + #char "0");
+        } else {
+            buf[cursor] = cast(u8)(index - 10 + #char "a");
+        }
+
+        n /= ubase;
+    }
+
+    s: string = ---;
+    s.data  = buf.data + cursor;
+    s.count = starting_cursor - cursor;
+    display_string(s);
 }
 
 serial_out :: (data: string) #no_context {
