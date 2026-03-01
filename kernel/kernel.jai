@@ -207,7 +207,7 @@ kernel_entry :: () #no_context {
     }
 
     if global.physical_block_allocator.base_address == 0 {
-        write_string("Could not find enough memory for the kernel...\n");
+        write_string("Could not find enough memory for the kernel.\n");
         while true #asm { cli; hlt; }
     }
 
@@ -1337,6 +1337,8 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
 }
 
 map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
+    assert(physical_start & 0xfff == 0);
+
     for VM_Iterator.{virtual_start, page_count} {
         assert(it.flags & .PAGE_SIZE == 0);
 
@@ -2344,11 +2346,14 @@ Lock_Type :: enum {
 Spinlock :: struct (lock_type := Lock_Type.PREEMPT) {
     now_serving: u16;
     next_ticket: u16;
+
+    #if DEBUG_SPINLOCKS {
+        held_by: *X64_Core;
+    }
 }
 
 is_held :: (lock: Spinlock) -> bool #no_context {
-    // Todo: Maybe should verify who the holder is in debug builds.
-    return lock.now_serving != lock.next_ticket;
+    return (lock.now_serving != lock.next_ticket) && (lock.held_by == get_current_core());
 }
 
 acquire :: (lock: *Spinlock) #no_context {
@@ -2361,21 +2366,16 @@ acquire :: (lock: *Spinlock) #no_context {
 
     profile_lock_contention();
 
-    {
-        interrupt_context_active := cpu_local_read("interrupt_context_active");
-
-        if interrupt_context_active > 0 && lock.lock_type != .IRQ {
-            // Todo: This needs to be clarified. Are software (non-IRQ) interrupts allowed to use non-IRQ spinlocks? Spinlocks do nothing to prevent software interrupts, but it needs to be certain that this doesn't cause the lock to be reentered on the same core.
-            // push_context { assert(false, "Non-IRQ lock used in interrupt context."); }
-        }
-    }
-
     while lock.now_serving != my_ticket {
         #asm { pause; }
     }
+
+    #if DEBUG_SPINLOCKS lock.held_by = get_current_core();
 }
 
 release :: (lock: *Spinlock) #no_context {
+    #if DEBUG_SPINLOCKS lock.held_by = null;
+
     lock.now_serving += 1;
 
     #if lock.lock_type == {
@@ -2400,6 +2400,8 @@ profile_lock_contention :: () #expand {
         trace(.contended_spinlock, contention_level, end - start);
     }
 }
+
+DEBUG_SPINLOCKS :: true;
 
 
 
