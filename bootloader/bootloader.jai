@@ -41,7 +41,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
 
         {
-            // Get framebuffer and clear the screen.
+            // Get framebuffer.
 
             gop: *EFI_GRAPHICS_OUTPUT_PROTOCOL;
             EFI_CHECK(boot_services.LocateProtocol(*EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, null, cast(**void) *gop));
@@ -75,12 +75,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
             }
 
-            display("Selected GOP mode \"", best_mode, "\" x=", best_horizontal_resolution, " y=", best_vertical_resolution);
+            display("Selected GOP mode \"", best_mode, "\" x=", gop.Mode.info.HorizontalResolution, " y=", gop.Mode.info.VerticalResolution);
             EFI_CHECK(gop.SetMode(gop, best_mode));
 
             framebuffer: [] u32;
             framebuffer.data  = cast(*u32) gop.Mode.frame_buffer_base;
-            framebuffer.count = cast(s64) gop.Mode.frame_buffer_size / size_of(u32);
+            framebuffer.count = cast(s64)  gop.Mode.frame_buffer_size / size_of(u32);
 
             boot_data.framebuffer.hardware_buffer = cast(*u32) gop.Mode.frame_buffer_base;
             boot_data.framebuffer.x_resolution    = gop.Mode.info.HorizontalResolution;

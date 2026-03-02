@@ -910,715 +910,61 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
 
 
 
-Nvme_Controller :: struct {
-    using mmio: *Nvme_Property_Memory_Map;
+Storage_Device :: struct {
+    device_specific_data_pointer: *void;
 
-    admin_queue: Nvme_Command_Queue;
-    io_queue:    Nvme_Command_Queue;
-
-    identify: *Nvme_Identify_Controller_Structure;
-
-    maximum_transfer_size_in_blocks: int;
-    maximum_queue_entries: int;
-
-    // These are properties of the namespace, will need to be moved into a separate struct when we support multiple drives connected to the same controller.
-    block_size: int;
-    nsid: u32;
-
-    initialized: bool;
+    transfer: (device: *void, request: Transfer_Request);
 }
 
-Nvme_Command_Queue :: struct {
-    tail_doorbell: *u32;
-    head_doorbell: *u32;
+Transfer_Request :: struct {
+    // "LBA" size here is always 512 bytes.
+    start_lba: int;
+    count_lba: int;
 
-    sq_tail: u32;
-    cq_head: u32;
+    physical_memory_address: u64;
 
-    sq: [] Nvme_Submission_Queue_Entry;
-    cq: [] Nvme_Completion_Queue_Entry;
-
-    current_phase: bool;
-    async_completion_enabled: bool;
-
-    next_command_id: u16;
-}
-
-Nvme_Property_Memory_Map :: struct {
-    start: void;
-
-    CAP__capabilities:            Nvme_Controller_Capabilities;
-    VS__version:                  Nvme_Specification_Version_Descriptor;
-    INTMS:                        u32;
-    INTMC:                        u32;
-    CC__controller_config:        Nvme_Controller_Configuration;
-    _:                            u32;
-    CSTS__controller_status:      Nvme_Controller_Status;
-    NSSR:                         u32;
-    AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
-    ASQ__admin_sq:  u64;
-    ACQ__admin_cq:  u64;
-
-    space_for_overlay: [0x2000] u8;
-
-    #overlay(start) using _: struct {
-        offset_for_transport_specific_properties: [0x1000] u8;
-        doorbell_base: void;
-
-        SQ0TDBL__submission_queue_0_tail_doorbell: u32;
-        CQ0HDBL__completion_queue_0_head_doorbell: u32;
-    }
-}
-
-Nvme_Controller_Capabilities :: enum u64 {
-    MQES__maximum_queue_entries          :: 16;
-    CQR__contiguous_queue_entries        :: 1;
-    AMS__arbitration_mechanism_supported :: 2;
-    _                                    :: 5;
-    TO__timeout                          :: 8;
-    DSTRD__doorbell_stride               :: 4;
-    NSSRS__nvm_subsystem_reset           :: 1;
-    NCSS__nvm_command_set_support        :: 1;
-    _                                    :: 5;
-    IOCSS__io_command_set_support        :: 1;
-    NOIOCSS__no_io_command_set_support   :: 1;
-
-    BPS    :: 1;
-    CPS    :: 2;
-    MPSMIN :: 4;
-    MPSMAX :: 4;
-    PMRS   :: 1;
-    CMBS   :: 1;
-    NSSS   :: 1;
-    CRMS   :: 2;
-    NSSES  :: 1;
-    _      :: 2;
-} @Bitfield
-
-Nvme_Specification_Version_Descriptor :: struct {
-    ter__teritary: u8;
-    mnr__minor:    u8;
-    mjr__major:    u16;
-}
-
-Nvme_Controller_Configuration :: enum u32 {
-    EN__enable                   :: 1;
-    _                            :: 3;
-    CSS__io_command_set          :: 3;
-    MPS__memory_page_size        :: 4;
-    AMS__arbitration_mechanism   :: 3;
-    SHN__shutdown_notification   :: 2;
-    IOSQES__io_submission_entry_size :: 4;
-    IOCQES__io_completion_entry_size :: 4;
-
-    __rest_of_the_bits :: 8;
-} @Bitfield
-
-Nvme_Controller_Status :: enum_flags u32 {
-    RDY__READY                   :: 0x1;
-    CFS__CONTROLLER_FATAL_STATUS :: 0x2;
-    SHST__SHUTDOWN_STATUS0       :: 0x4;
-    SHST__SHUTDOWN_STATUS1       :: 0x8;
-    ST__SHUTDOWN_TYPE            :: 0x40;
-}
-
-Nvme_Admin_Queue_Attributes :: struct {
-    ASQS__submission_queue_size: u16;
-    ACQS__completion_queue_size: u16;
-}
-
-Nvme_Submission_Queue_Entry :: struct {
-    OPC__opcode: Nvme_Opcode;
-    FUSE_and_PSDT: u8;
-    CID__command_identifier: u16;
-    NSID__namespace_id: u32;
-
-    CDW2__command_dword_2: u32;
-    CDW3__command_dword_3: u32;
-
-    MPTR__metadata_pointer: u64;
-    DPTR__data_pointer:     [2] u64;
-
-    union {
-        CDW__command_dwords_10_to_15: [6] u32;
-
-        // For IDENTIFY commands:
-        CNS__controller_or_namespace: Nvme_Controller_Or_Namespace_Structure;
-
-        struct {
-            // For CREATE_IO_*_QUEUE:
-            QID__queue_identifier: u16;
-            QSIZE__queue_size: u16;
-
-            flags: enum_flags u16 {
-                PC__physically_contiguous :: 1;
-                IEN__interrupts_enabled   :: 2;
-            }
-
-            union {
-                CQID__completion_queue_identifier: u16; // For submission queues.
-                IV__interrupt_vector: u16;              // For completion queues.
-            }
-        }
-
-        struct {
-            // For IO READ:
-            SLBA__starting_lba: u64;
-            NLB__number_of_logical_blocks: u16;
-        }
-    }
-}
-
-#assert size_of(Nvme_Submission_Queue_Entry) == 64;
-
-Nvme_Completion_Queue_Entry :: struct {
-    DW0: u32;
-    DW1: u32;
-
-    SQHD__sq_head_pointer: u16;
-    SQID__sq_identifier: u16;
-
-    CID__command_identifier: u16;
-
-    STATUS__status: enum u16 {
-        PHASE                    :: 1;
-        SC__STATUS_CODE          :: 8;
-        SCT__STATUS_CODE_TYPE    :: 3;
-        CRD__COMMAND_RETRY_DELAY :: 2;
-        M__MORE                  :: 1;
-        DNR__DO_NOT_RETRY        :: 1;
-    };
-}
-
-#assert size_of(Nvme_Completion_Queue_Entry) == 16;
-
-Nvme_Opcode :: enum u8 {
-    // Admin opcodes
-    DELETE_IO_SUBMISSION_QUEUE :: 0x0;
-    CREATE_IO_SUBMISSION_QUEUE :: 0x1;
-    GET_LOG_PAGE               :: 0x2;
-    DELETE_IO_COMPLETION_QUEUE :: 0x4;
-    CREATE_IO_COMPLETION_QUEUE :: 0x5;
-    IDENTIFY                   :: 0x6;
-    ABORT                      :: 0x8;
-
-    // IO opcodes
-    FLUSH                      :: 0x0;
-    WRITE                      :: 0x1;
-    READ                       :: 0x2;
-}
-
-Nvme_Controller_Or_Namespace_Structure :: enum u8 {
-    IDENTIFY_NAMESPACE       :: 0x0;
-    IDENTIFY_CONTROLLER      :: 0x1;
-    ACTIVE_NAMESPACE_ID_LIST :: 0x2;
-}
-
-Nvme_Identify_Controller_Structure :: struct {
-    VID__pci_vendor_id: u16;
-    SSVID__pci_subsystem_vendor_id: u16;
-    SN__serial_number: [20] u8;
-    MN__model_number:  [40] u8;
-    FR__firmware_revision: u64 #align 1;
-    RAB__recommended_arbitration_burst: u8;
-    IEEE_ieee_oui_identifier: [3]u8;
-    CMIC: u8;
-    MDTS__maximum_data_transfer_size: u8;
-}
-
-Nvme_Identify_Namespace_Structure :: struct {
-    start: void;
-
-    NSIZE__size: u64;
-    NCAP__capacity: u64;
-    NUSE__utilization: u64;
-    NSFEAT: u8;
-    NLBAF__lba_format_count: u8;
-    FLBAS__formatted_lba_size: u8;
-
-    _: [0x100] u8;
-
-    #overlay(start) using _: struct {
-        offset: [128] u8;
-        LBAF__lba_format_support: [64] Nvme_LBA_Format;
-    }
-}
-
-Nvme_LBA_Format :: struct {
-    MS__metadata_size:    u16;
-    LBADS__lba_data_size: u8;
-
-    RP__relative_performance: enum u8 {
-        best     :: 0b00;
-        better   :: 0b01;
-        good     :: 0b10;
-        degraded :: 0b11;
-    };
-}
-
-#assert size_of(Nvme_Identify_Controller_Structure) == 78;
-
-#program_export
-nvme_interrupt :: (stack: *void) #c_call {
-    push_context,defer_pop;
-
-    if global.nvme.initialized {
-        queue := *global.nvme.io_queue;
-
-        if queue.async_completion_enabled {
-            nvme_dequeue_all_finished_commands(queue);
-        }
+    direction: enum {
+        READ;
+        WRITE;
     }
 
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
-} @InterruptRoutine
-
-init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
-    log_category("NVMe");
-
-    assert(device.class_code == .MASS_STORAGE);
-    assert(device.subclass   == 0x8);
-
-    device.command |= .BUS_MASTER | .MEMORY_SPACE;
-    device.command &= ~.INTERRUPT_DISABLE;
-
-    parse_pci_capability_list(device);
-
-    enabled := enable_msi_or_msi_x(device, isr__nvme_interrupt);
-    assert(enabled == .MSI_X);
-
-    // Mask out the admin queue interrupt. Just spin on the phase bit for now
-    // device.msi_x_table[0].vector_control |= .MASK;
-
-    nvme: Nvme_Controller;
-
-    bar := read_base_address_register(device, bar_index = 0);
-    nvme.mmio = map_base_address_register(bar);
-
-    nvme_reset_controller(*nvme);
-
-    {
-        // Send IDENTIFY command.
-        identify_page := get_4k_page();
-
-        admin_command: Nvme_Submission_Queue_Entry;
-        admin_command.OPC__opcode = .IDENTIFY;
-        admin_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
-        admin_command.DPTR__data_pointer[0] = identify_page;
-
-        nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
-
-        nvme.identify = cast(*Nvme_Identify_Controller_Structure) (identify_page + DIRECT_MAPPING_BASE);
-
-        sn := cast(string) nvme.identify.SN__serial_number;
-        mn := cast(string) nvme.identify.MN__model_number;
-        for sn if it == #char " " { sn.count = it_index; break; }
-        for mn if it == #char " " { mn.count = it_index; break; }
-
-        mps_min := get(nvme.CAP__capabilities, .MPSMIN);
-        assert(mps_min == 0); // Zero means 4k. Controller should always support 4k memory page size.
-
-        nvme.maximum_transfer_size_in_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
-        nvme.maximum_queue_entries = cast(s64) get(nvme.CAP__capabilities, .MQES__maximum_queue_entries);
-
-        log("Found controller with model number '%'. Maximum transfer size % blocks, maximum queue size % entries.", mn, nvme.maximum_transfer_size_in_blocks, nvme.maximum_queue_entries);
-    }
-
-    {
-        // Get active namespace ID list.
-        nsid_page := get_4k_page();
-
-        admin_command: Nvme_Submission_Queue_Entry;
-        admin_command.OPC__opcode = .IDENTIFY;
-        admin_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
-        admin_command.DPTR__data_pointer[0] = nsid_page;
-
-        nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
-
-        nsid_list := cast(*[1024] u32) (nsid_page + DIRECT_MAPPING_BASE);
-
-        for nsid_list.* if it != 0 {
-            nvme.nsid = it;
-            break;
-        }
-
-        if nvme.nsid == 0 {
-            log_error("No active namespace ID found");
-            bluescreen();
-        }
-
-        log("Found NSID %.", nvme.nsid);
-        free_4k_page(nsid_page);
-    }
-
-    {
-        // Identify namespace (drive).
-
-        identify_page := get_4k_page();
-
-        admin_command: Nvme_Submission_Queue_Entry;
-        admin_command.OPC__opcode = .IDENTIFY;
-        admin_command.CNS__controller_or_namespace = .IDENTIFY_NAMESPACE;
-        admin_command.NSID__namespace_id = nvme.nsid;
-        admin_command.DPTR__data_pointer[0] = identify_page;
-
-        nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
-        identify := cast(*Nvme_Identify_Namespace_Structure) (identify_page + DIRECT_MAPPING_BASE);
-
-        index := identify.FLBAS__formatted_lba_size & 0xf;
-
-        lba_format := identify.LBAF__lba_format_support[index];
-        nvme.block_size = 1 << lba_format.LBADS__lba_data_size;
-
-        assert(nvme.block_size == 4096 || nvme.block_size == 512, "Todo: Nvme block size % not supported.", nvme.block_size);
-    }
-
-    {
-        // Create IO queues.
-        space_for_queues := allocate_large_page();
-        queue_size       := cast(u64) min(0x4000, nvme.maximum_queue_entries+1);
-
-        assert(queue_size * size_of(Nvme_Submission_Queue_Entry) + queue_size * size_of(Nvme_Completion_Queue_Entry) < 0x20_0000);
-
-        io_sq_base := space_for_queues;
-        io_cq_base := space_for_queues + queue_size * size_of(Nvme_Submission_Queue_Entry);
-
-        {
-            admin_command: Nvme_Submission_Queue_Entry;
-            admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
-            admin_command.DPTR__data_pointer[0] = io_cq_base;
-            admin_command.NSID__namespace_id = nvme.nsid;
-            admin_command.QSIZE__queue_size = cast(u16) queue_size-1;
-            admin_command.QID__queue_identifier = 1;
-            admin_command.flags |= .PC__physically_contiguous;
-            admin_command.flags |= .IEN__interrupts_enabled;
-            admin_command.IV__interrupt_vector = 1;
-
-            nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
-        }
-
-        {
-            admin_command: Nvme_Submission_Queue_Entry;
-            admin_command.OPC__opcode = .CREATE_IO_SUBMISSION_QUEUE;
-            admin_command.DPTR__data_pointer[0] = io_sq_base;
-            admin_command.NSID__namespace_id = nvme.nsid;
-            admin_command.QSIZE__queue_size = cast(u16) queue_size-1;
-            admin_command.QID__queue_identifier = 1;
-            admin_command.CQID__completion_queue_identifier = 1;
-            admin_command.flags |= .PC__physically_contiguous;
-
-            nvme_send_command_synchronous(*nvme.admin_queue, admin_command);
-        }
-
-        nvme.io_queue.sq.data = xx (io_sq_base + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
-        nvme.io_queue.cq.data = xx (io_cq_base + DIRECT_MAPPING_BASE);
-
-        nvme.io_queue.sq.count = cast(s64) queue_size;
-        nvme.io_queue.cq.count = cast(s64) queue_size;
-
-        nvme.io_queue.tail_doorbell = *nvme.doorbell_base + 2 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
-        nvme.io_queue.head_doorbell = *nvme.doorbell_base + 3 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
-
-        nvme.io_queue.async_completion_enabled = true;
-    }
-
-    {
-        // Read bootsector test.
-        buffer := get_4k_page();
-
-        io_command: Nvme_Submission_Queue_Entry;
-        io_command.OPC__opcode = .READ;
-        io_command.DPTR__data_pointer[0] = buffer;
-        io_command.NSID__namespace_id = nvme.nsid;
-        io_command.SLBA__starting_lba = 0;
-        io_command.NLB__number_of_logical_blocks = 0; // This means 1 block.
-
-        nvme_send_command_synchronous(*nvme.io_queue, io_command);
-
-        assert((.*) cast(*u16) (buffer + 510 + DIRECT_MAPPING_BASE) == 0xaa55, "NVMe read bootsector test failed.");
-    }
-
-    nvme.initialized = true;
-    return nvme;
+    semaphore: *Semaphore;
 }
 
-nvme_reset_controller :: (nvme: *Nvme_Controller) {
-    if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
-        log("Shutdown status.");
-    }
-
-    if nvme.CC__controller_config & .EN__enable {
-        set(*nvme.CC__controller_config, .EN__enable, 0);
-    }
-
-    if Timeout(!(nvme.CSTS__controller_status & .RDY__READY)) {
-        log_error("Reset timeout (RDY is set.)");
-        return;
-    }
-
-    {
-        // Initialize admin queues.
-
-        admin_sq := get_4k_page();
-        admin_cq := get_4k_page();
-
-        nvme.AQA__admin_queue_attributes = .{
-            // Subtract one, because the field is zero based.
-            63, 63
-        };
-
-        nvme.ASQ__admin_sq = admin_sq;
-        nvme.ACQ__admin_cq = admin_cq;
-
-        nvme.admin_queue.sq.data = cast(*Nvme_Submission_Queue_Entry) (admin_sq + DIRECT_MAPPING_BASE);
-        nvme.admin_queue.cq.data = cast(*Nvme_Completion_Queue_Entry) (admin_cq + DIRECT_MAPPING_BASE);
-
-        nvme.admin_queue.sq.count = 64;
-        nvme.admin_queue.cq.count = 64;
-
-        nvme.admin_queue.tail_doorbell = *nvme.SQ0TDBL__submission_queue_0_tail_doorbell;
-        nvme.admin_queue.head_doorbell = *nvme.CQ0HDBL__completion_queue_0_head_doorbell;
-
-        nvme.admin_queue.async_completion_enabled = true;
-    }
-
-    {
-        // Initialize config register.
-
-        config  := nvme.CC__controller_config;
-        caps    := nvme.CAP__capabilities;
-
-        NOIOCSS := get(caps, .NOIOCSS__no_io_command_set_support);
-        IOCSS   := get(caps, .IOCSS__io_command_set_support);
-        NCSS    := get(caps, .NCSS__nvm_command_set_support);
-
-        if NOIOCSS         set(*config, .CSS__io_command_set, 0b111);
-        if IOCSS           set(*config, .CSS__io_command_set, 0b110);
-        if !IOCSS && NCSS  set(*config, .CSS__io_command_set, 0b000);
-
-        set(*config, .AMS__arbitration_mechanism, 0);
-        set(*config, .MPS__memory_page_size, 0);
-
-        // Todo, detect these values
-        set(*config, .IOSQES__io_submission_entry_size, 6);
-        set(*config, .IOCQES__io_completion_entry_size, 4);
-
-        set(*config, .EN__enable, 1);
-
-        nvme.CC__controller_config = config;
-    }
-
-    if Timeout_Block(#code {
-        if nvme.CSTS__controller_status & .RDY__READY break;
-
-        fatal := nvme.CSTS__controller_status & .CFS__CONTROLLER_FATAL_STATUS;
-        if fatal {
-            log_error("Controller fatal status during reset.");
-            bluescreen();
-        }
-    }) {
-        log("Reset timeout (RDY is unset.)");
-    }
-}
-
-// Currently this queue API doesn't support multithreading. Also, NVMe interrupts must go to the core that owns the thread that owns the queue.
-
-nvme_enqueue_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
-    log_category("NVMe");
-
-    trace(.nvme_enqueue, sq_tail, queue.next_command_id);
-
-    sq[sq_tail] = command;
-    sq[sq_tail].CID__command_identifier = queue.next_command_id;
-
-    #no_aoc {
-        queue.next_command_id += 1;
-    }
-
-    sq_tail += 1;
-    sq_tail %= cast(u32)sq.count;
-
-    memory_fence();
-    tail_doorbell.* = sq_tail;
-}
-
-nvme_dequeue_all_finished_commands :: (using queue: *Nvme_Command_Queue) {
-    log_category("NVMe");
-
-    while true {
-        cqe    := *cq[cq_head];
-        status := cqe.STATUS__status;
-
-        if get_bit(status, .PHASE) == queue.current_phase {
-            // This command has not finished yet, so we're done dequeueing commands.
-            break;
-        }
-
-        clear_bit(*status, .PHASE);
-
-        if status != 0 {
-            trace(.nvme_FAILURE, cq_head, cqe.CID__command_identifier);
-
-            ps := push_print_style();
-            ps.use_newlines_if_long_form = true;
-            ps.base = 16;
-
-            s := to_string(status,, temp);
-            log_error("Command failed with status: %", s);
-        } else {
-            trace(.nvme_SUCCESS, cq_head, cqe.CID__command_identifier);
-        }
-
-        cq_head += 1;
-
-        if cq_head == cq.count {
-            cq_head = 0;
-            queue.current_phase = !queue.current_phase;
-        }
-    }
-
-    memory_fence();
-    head_doorbell.* = cq_head;
-}
-
-nvme_spin_drain_queue :: (using queue: *Nvme_Command_Queue) {
-
-    // Calling this only works if interrupts are enabled, and the queue is configured to get consumed by the interrupts.
-    assert(get_rflags() & .IF__interrupt > 0);
-    assert(queue.async_completion_enabled);
-
-    while cq_head != sq_tail {
-        #asm { pause; }
-    }
-}
-
-nvme_send_command_synchronous :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
-    log_category("NVMe");
-
-    nvme_spin_drain_queue(queue); // Wait for commands that will be asynchronously dequeued by interrupts.
-    queue.async_completion_enabled = false;
-
-    nvme_enqueue_command(queue, command);
-
-    command_has_been_processed :: #code get_bit(cq[cq_head].STATUS__status, .PHASE) != queue.current_phase;
-    assert(!Timeout(command_has_been_processed));
-
-    nvme_dequeue_all_finished_commands(queue);
-    queue.async_completion_enabled = true;
-}
-
-nvme_read :: (nvme: *Nvme_Controller, starting_disk_block: u64, destination_memory: *void, number_of_blocks: int) {
-    nvme_transfer(nvme, starting_disk_block, destination_memory, number_of_blocks, .READ);
-}
-
-nvme_write :: (nvme: *Nvme_Controller, starting_disk_block: u64, source_memory: *void, number_of_blocks: int) {
-    nvme_transfer(nvme, starting_disk_block, source_memory, number_of_blocks, .WRITE);
-}
-
-nvme_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, memory_buffer: *void, number_of_blocks: int, direction: enum {READ; WRITE;}) {
-
-    assert(number_of_blocks <= maximum_transfer_size_in_blocks, "NVMe transfer exceeds maximum transfer size.");
-
-    pages_allocated: [..] u64;
-    pages_allocated.allocator = temp;
-
-    command: Nvme_Submission_Queue_Entry;
-    command.OPC__opcode = ifx direction == .READ then .READ else .WRITE;
-
-    // Fill in PRP (physical region page) list. Todo: This code is too hard to read.
-
-    number_of_bytes := number_of_blocks * nvme.block_size;
-
-    offset_in_page  := cast(s64) memory_buffer & 0xfff;
-    number_of_pages := (number_of_bytes + offset_in_page + 4095) / 4096;
-
-    first_page := get_physical_address(memory_buffer);
-
-    assert(first_page & 0b11 == 0);
-    command.DPTR__data_pointer[0] = first_page;
-
-    if number_of_pages == 2 {
-        second_page := get_physical_address(memory_buffer + 4096);
-        second_page &= ~0xfff;
-
-        command.DPTR__data_pointer[1] = second_page;
-    } else if number_of_pages > 2 {
-        page_index := 1;
-
-        next_prp_list_phys_base := get_4k_page();
-        array_add(*pages_allocated, next_prp_list_phys_base);
-
-        prp_list := cast(*u64) (next_prp_list_phys_base + DIRECT_MAPPING_BASE);
-
-        command.DPTR__data_pointer[1] = next_prp_list_phys_base;
-
-        while page_index < number_of_pages {
-
-            remaining_pages   := number_of_pages - page_index;
-            is_final_prp_list := remaining_pages <= 512;
-
-            current_prp_list_length := min(remaining_pages, ifx is_final_prp_list then 512 else 511);
-
-            for 0..current_prp_list_length-1 {
-                page := get_physical_address(memory_buffer + 4096 * page_index);
-                page &= ~0xfff;
-
-                prp_list[it] = page;
-
-                page_index += 1;
-            }
-
-            if !is_final_prp_list {
-                next_prp_list_phys_base = get_4k_page();
-                array_add(*pages_allocated, next_prp_list_phys_base);
-
-                prp_list[511] = next_prp_list_phys_base;
-                prp_list = cast(*u64) (next_prp_list_phys_base + DIRECT_MAPPING_BASE);
-            }
-        }
-    }
-
-    command.NSID__namespace_id = nvme.nsid;
-    command.SLBA__starting_lba = starting_disk_block;
-    command.NLB__number_of_logical_blocks = cast(u16)number_of_blocks-1;
-
-    nvme_enqueue_command(*nvme.io_queue, command);
-
-    // for pages_allocated free_4k_page(it);
-}
-
-nvme_fence :: (using nvme: *Nvme_Controller) {
-    nvme_spin_drain_queue(*io_queue);
+do_storage_transfer :: (device: Storage_Device, transfer: Transfer_Request) {
+    assert(device.transfer != null);
+    assert(device.device_specific_data_pointer != null);
+
+    device.transfer(device.device_specific_data_pointer, transfer);
 }
 
 
 
+Sata_Controller :: struct {
+    command_list:  []    Sata_Command_Header;
+    command_table: [32] *Sata_Command_Table;
 
-Ahci_Controller :: struct {
-    command_list: [] Ahci_Command_Header;
-    command_table: [32] *Ahci_Command_Table;
-
-    received_fis: *Ahci_Received_Fis;
-    port: *Ahci_Port;
-    ahci: *Ahci_Memory_Region;
+    received_fis: *Sata_Received_Fis;
+    port:         *Sata_Port;
+    mmio:         *Sata_Memory_Region;
 
     initialized: bool;
 }
 
 #program_export
-ahci_interrupt :: (data: *void) #c_call {
-    write_string("Handling AHCI Interrupt.\n");
+sata_interrupt :: (data: *void) #c_call {
+    write_string("Handling SATA Interrupt.\n");
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
-init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
-    log_category("AHCI");
+init_sata_controller :: (device: *Pci_Device) -> c: Sata_Controller = .{}, success: bool {
+    log_category("SATA");
 
     device.command |= .BUS_MASTER | .MEMORY_SPACE;
     device.command &= ~.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
-    enable_msi_or_msi_x(device, isr__ahci_interrupt);
+    enable_msi_or_msi_x(device, isr__sata_interrupt);
 
     bar := read_base_address_register(device, bar_index = 5);
     if !bar.base {
@@ -1626,33 +972,33 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         return success = false;
     }
 
-    ahci := cast(*Ahci_Memory_Region) map_base_address_register(bar);
+    sata := cast(*Sata_Memory_Region) map_base_address_register(bar);
 
-    ahci.GHC__global_host_control |= .AE__ahci_enable | .IE__interrupt_enable;
+    sata.GHC__global_host_control |= .AE__sata_enable | .IE__interrupt_enable;
 
-    if !(ahci.CAP__host_capabilities & .S64A__64bit_addressing) {
+    if !(sata.CAP__host_capabilities & .S64A__64bit_addressing) {
         log_error("Controller without 64-bit addressing not supported");
         return success = false;
     }
 
-    if !(ahci.CAP__host_capabilities & .SAM__supports_ahci_only) {
-        ahci.GHC__global_host_control |= .HR__hba_reset;
+    if !(sata.CAP__host_capabilities & .SAM__supports_sata_only) {
+        sata.GHC__global_host_control |= .HR__hba_reset;
     }
 
     // Todo bitfield
-    num_ports          := cast(int,  ahci.CAP__host_capabilities       & 0b11111) + 1;
-    command_slot_count := cast(int, (ahci.CAP__host_capabilities >> 8) & 0b11111) + 1;
+    num_ports          := cast(int,  sata.CAP__host_capabilities       & 0b11111) + 1;
+    command_slot_count := cast(int, (sata.CAP__host_capabilities >> 8) & 0b11111) + 1;
 
     max_ports := 32;
 
     for 0..max_ports-1 {
-        if !(ahci.PI__ports_implemented & (1 << it)) {
+        if !(sata.PI__ports_implemented & (1 << it)) {
             continue;
         }
 
-        port := *ahci.ports[it];
+        port := *sata.ports[it];
 
-        if ahci_port_is_running(port) {
+        if sata_port_is_running(port) {
             port.CMD__command_status &= ~.ST__start;
 
             if Timeout(!(port.CMD__command_status & .CR__command_list_running)) {
@@ -1670,15 +1016,15 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
     }
 
     for 0..max_ports-1 {
-        if !(ahci.PI__ports_implemented & (1 << it)) continue;
+        if !(sata.PI__ports_implemented & (1 << it)) continue;
 
-        port := *ahci.ports[it];
+        port := *sata.ports[it];
         if !(port.CMD__command_status & .SUD__spin_up_device) {
             log_error("Port not spun up");
             return success = false;
         }
 
-        // if ahci.CAP__host_capabilities & .STAGGERED_SPIN_UP {
+        // if sata.CAP__host_capabilities & .STAGGERED_SPIN_UP {
         // }
 
         detection := port.SSTS__sata_status & .DET_MASK;
@@ -1695,8 +1041,8 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
             return success = false;
         }
 
-        list_size := align(4096, size_of(Ahci_Command_Header) * command_slot_count);
-        fis_size  := align(4096, size_of(Ahci_Received_Fis));
+        list_size := align(4096, size_of(Sata_Command_Header) * command_slot_count);
+        fis_size  := align(4096, size_of(Sata_Received_Fis));
 
         // Todo: Make this easier to understand.
         memory_needed := list_size + fis_size + command_slot_count * 4096 + 4096;
@@ -1707,7 +1053,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         pages_needed := cast(int) memory_needed / 4096;
         map_pages(virtual, physical, pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-        controller: Ahci_Controller;
+        controller: Sata_Controller;
         controller.command_list.count = command_slot_count;
 
         controller.command_list.data = virtual;
@@ -1741,7 +1087,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
             return success = false;
         }
 
-        controller.ahci = ahci;
+        controller.mmio = sata;
         controller.initialized = true;
         return controller, true;
     }
@@ -1750,7 +1096,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
     return success = false;
 }
 
-ahci_port_is_running :: (port: *Ahci_Port) -> bool {
+sata_port_is_running :: (port: *Sata_Port) -> bool {
     return (port.CMD__command_status & .ST__start)
         || (port.CMD__command_status & .CR__command_list_running)
         || (port.CMD__command_status & .FRE__fis_receive_enable)
@@ -1762,8 +1108,8 @@ Transfer_Direction :: enum {
     WRITE;
 }
 
-ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, memory_address: u64, number_of_bytes: u64, disk_address: u64) {
-    log_category("AHCI");
+sata_transfer :: (controller: *Sata_Controller, direction: Transfer_Direction, memory_address: u64, number_of_bytes: u64, disk_address: u64) {
+    log_category("SATA");
 
     assert(controller.initialized);
     assert(cast(u64) memory_address % 0x200 == 0);
@@ -1777,29 +1123,29 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
     if first_sector_count > sector_count first_sector_count = sector_count;
     sector_count -= first_sector_count;
 
-    ahci_transfer_sectors(controller, direction, memory_address, cast(u32) lba, xx first_sector_count);
+    sata_transfer_sectors(controller, direction, memory_address, cast(u32) lba, xx first_sector_count);
 
     lba            += first_sector_count;
     memory_address += first_sector_count * 0x200;
 
     while sector_count > 128 {
-        ahci_transfer_sectors(controller, direction, memory_address, cast(u32) lba, 128);
+        sata_transfer_sectors(controller, direction, memory_address, cast(u32) lba, 128);
         memory_address += 0x1_0000;
         lba += 128;
         sector_count -= 128;
     }
 
     if sector_count {
-        ahci_transfer_sectors(controller, direction, memory_address, xx lba, xx sector_count);
+        sata_transfer_sectors(controller, direction, memory_address, xx lba, xx sector_count);
     }
 }
 
-ahci_transfer_sectors :: no_inline (controller: *Ahci_Controller, direction: Transfer_Direction, physical: u64, lba: u64, sector_count: int) {
-    log_category("AHCI");
+sata_transfer_sectors :: no_inline (controller: *Sata_Controller, direction: Transfer_Direction, physical: u64, lba: u64, sector_count: int) {
+    log_category("SATA");
 
     assert(controller.initialized);
 
-    fis: Ahci_Command_Fis;
+    fis: Sata_Command_Fis;
     fis.flags = .IS_COMMAND;
     fis.command = ifx direction == .READ then Ata_Command.READ_DMA_EX else .WRITE_DMA_EX;
     fis.device = 1 << 6; // Todo magic number
@@ -1822,7 +1168,7 @@ ahci_transfer_sectors :: no_inline (controller: *Ahci_Controller, direction: Tra
     // contain more physical region descriptors, to reduce software overhead of disk access.
     controller.command_list[0].PRDTL__prd_table_length = 1;
     controller.command_list[0].PRDBC__prd_byte_count = 0;
-    controller.command_list[0].flags = size_of(Ahci_Command_Fis) / 4;
+    controller.command_list[0].flags = size_of(Sata_Command_Fis) / 4;
 
     if direction == .WRITE {
         controller.command_list[0].flags |= .WRITE;
@@ -1884,7 +1230,7 @@ Ata_Status :: enum_flags u8 {
     BUSY                :: 0x80;
 }
 
-Ahci_Command_Header :: struct {
+Sata_Command_Header :: struct {
     flags: enum u16 {
         WRITE :: 0x40;
     }
@@ -1896,16 +1242,16 @@ Ahci_Command_Header :: struct {
     reserved: [4] u32;
 }
 
-Ahci_Command_Table :: struct {
-    CFIS__command_fis:   Ahci_Command_Fis;
+Sata_Command_Table :: struct {
+    CFIS__command_fis:   Sata_Command_Fis;
     RSV0__reserved:      [44] u8;
     ACMD__atapi_command: [16] u8;
     RSV1__reserved:      [48] u8;
 
-    PRDT__physical_region_descriptor_table: [1] Ahci_Physical_Region_Descriptor;
+    PRDT__physical_region_descriptor_table: [1] Sata_Physical_Region_Descriptor;
 }
 
-Ahci_Physical_Region_Descriptor :: struct {
+Sata_Physical_Region_Descriptor :: struct {
     DBA__data_base_address: u64;
     _: u32;
     DBC__data_byte_count: u16;
@@ -1926,17 +1272,17 @@ Fis_Type :: enum u8 {
     DEV_BITS     :: 0xa1;
 }
 
-Ahci_Received_Fis :: struct {
+Sata_Received_Fis :: struct {
     DSFIS__dma_setup: [32] u8;
     PSFIS__pio_setup: [32] u8;
-    RFIS__d2h_register: Ahci_Command_Fis = .{ fis_type = .REGISTER_D2H };
+    RFIS__d2h_register: Sata_Command_Fis = .{ fis_type = .REGISTER_D2H };
     SDBFIS__set_device_bits: u64;
     UFIS__unknown: [64] u8;
 
     reserved: [96] u8;
 }
 
-Ahci_Command_Fis :: struct {
+Sata_Command_Fis :: struct {
     fis_type := Fis_Type.REGISTER_H2D;
     flags: enum u8 { NONE :: 0x0; IS_COMMAND :: 0x80; };
     command: Ata_Command;
@@ -1960,9 +1306,9 @@ Ahci_Command_Fis :: struct {
     reserved: u32;
 }
 
-Ahci_Memory_Region :: struct {
-    CAP__host_capabilities:            HBA_CAP__Ahci_Capabilities;
-    GHC__global_host_control:          HBA_GHC__Ahci_Global_Host_Control;
+Sata_Memory_Region :: struct {
+    CAP__host_capabilities:            HBA_CAP__Sata_Capabilities;
+    GHC__global_host_control:          HBA_GHC__Sata_Global_Host_Control;
     IS__interrupt_status:              u32;
     PI__ports_implemented:             u32;
     VS__version:                       u32;
@@ -1976,19 +1322,19 @@ Ahci_Memory_Region :: struct {
     reserved:                          [116] u8;
     vendor_specific:                   [96] u8;
 
-    ports:                             [32] Ahci_Port;
+    ports:                             [32] Sata_Port;
 }
 
-Ahci_Port :: struct {
+Sata_Port :: struct {
     CLB__command_list_base:    u64 #align 4;
     FB__fis_base:              u64 #align 4;
     IS__interrupt_status:      u32;
     IE__interrupt_enable:      u32;
-    CMD__command_status:       HBA_PxCMD__Ahci_Port_Command_Status;
+    CMD__command_status:       HBA_PxCMD__Sata_Port_Command_Status;
     RSV0__reserved:            u32;
     TFD__task_file_data:       u32;
-    SIG__signature:            HBA_PxSIG__Ahci_Port_Signature;
-    SSTS__sata_status:         HBA_PxSSTS__Ahci_Port_Status;
+    SIG__signature:            HBA_PxSIG__Sata_Port_Signature;
+    SSTS__sata_status:         HBA_PxSSTS__Sata_Port_Status;
     SCTL__sata_control:        u32;
     SERR__sata_error:          u32;
     SACT__sata_active:         u32;
@@ -2001,24 +1347,24 @@ Ahci_Port :: struct {
     vendor_specific:           [16] u8;
 }
 
-#assert size_of(Ahci_Received_Fis)     == 0x100;
-#assert size_of(Ahci_Command_Header)   == 0x20;
-#assert size_of(Ahci_Command_Table)    == 0x80 + size_of(Ahci_Physical_Region_Descriptor);
-#assert size_of(Ahci_Port)             == 0x80;
+#assert size_of(Sata_Received_Fis)     == 0x100;
+#assert size_of(Sata_Command_Header)   == 0x20;
+#assert size_of(Sata_Command_Table)    == 0x80 + size_of(Sata_Physical_Region_Descriptor);
+#assert size_of(Sata_Port)             == 0x80;
 
-HBA_GHC__Ahci_Global_Host_Control :: enum_flags u32 {
+HBA_GHC__Sata_Global_Host_Control :: enum_flags u32 {
     HR__hba_reset                      :: 0x1;
     IE__interrupt_enable               :: 0x2;
     MRSM__msi_revert_to_single_message :: 0x4;
-    AE__ahci_enable                    :: 0x8000_0000;
+    AE__sata_enable                    :: 0x8000_0000;
 }
 
-HBA_CAP__Ahci_Capabilities :: enum_flags u32 {
-    SAM__supports_ahci_only :: 0x4_0000;
+HBA_CAP__Sata_Capabilities :: enum_flags u32 {
+    SAM__supports_sata_only :: 0x4_0000;
     S64A__64bit_addressing  :: 0x8000_0000;
 }
 
-HBA_PxSSTS__Ahci_Port_Status :: enum u32 {
+HBA_PxSSTS__Sata_Port_Status :: enum u32 {
     DET_ESTABLISHED :: 0x3;
     IPM_ACTIVE      :: 0x100;
 
@@ -2027,7 +1373,7 @@ HBA_PxSSTS__Ahci_Port_Status :: enum u32 {
     IPM_MASK   :: 0b1111_0000_0000;
 }
 
-HBA_PxCMD__Ahci_Port_Command_Status :: enum_flags u32 {
+HBA_PxCMD__Sata_Port_Command_Status :: enum_flags u32 {
     ST__start                 :: 0x1;
     SUD__spin_up_device       :: 0x2;
     FRE__fis_receive_enable   :: 0x10;
@@ -2035,7 +1381,7 @@ HBA_PxCMD__Ahci_Port_Command_Status :: enum_flags u32 {
     CR__command_list_running  :: 0x8000;
 }
 
-HBA_PxSIG__Ahci_Port_Signature :: enum u32 {
+HBA_PxSIG__Sata_Port_Signature :: enum u32 {
     ATA   :: 0x0000_0101;
     ATAPI :: 0xeb14_0101;
     SEMB  :: 0xc33c_0101;

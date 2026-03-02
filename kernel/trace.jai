@@ -97,8 +97,8 @@ Trace_Entry :: struct {
 
         // Disable the spammy tags by default.
         using Trace_Tag;
-        trace_tag_mask  = (1 << irq_disable)  | (1 << irq_restore);
-        trace_tag_mask |= (1 << nvme_enqueue) | (1 << nvme_SUCCESS) | (1 << nvme_FAILURE);
+        trace_tag_mask  |= (1 << irq_disable)  | (1 << irq_restore);
+        // trace_tag_mask |= (1 << nvme_enqueue) | (1 << nvme_SUCCESS) | (1 << nvme_FAILURE);
     }
 
     trace :: (tag: Trace_Tag, user_data: ..Any) #no_context {

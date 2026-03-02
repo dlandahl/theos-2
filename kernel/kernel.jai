@@ -108,8 +108,8 @@ Kernel_Globals :: struct {
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
-    nvme: Nvme_Controller;
-    ahci: Ahci_Controller;
+    nvme: *Nvme_Controller;
+    sata: Sata_Controller;
 
     pci_devices: [..] Pci_Device;
 
@@ -302,16 +302,19 @@ kernel_entry :: () #no_context {
 
         irq_restore();
 
+        nvme_sd: Storage_Device;
+
         for *global.pci_devices {
             if it.combined_class_code == {
               case .SATA_CONTROLLER;
-                ahci, success := init_ahci_controller(it);
+                sata, success := init_sata_controller(it);
                 if success {
-                    global.ahci = ahci;
+                    global.sata = sata;
                 }
 
               case .NVME_CONTROLLER;
-                global.nvme = init_nvme_controller(it);
+                nvme_sd = init_nvme_controller(it);
+                global.nvme = nvme_sd.device_specific_data_pointer;
 
               case .I8254X_ETHERNET;
                 // global.network_connection.adapter = init_i8254x(it);
@@ -330,12 +333,11 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        priority_test();
-        user_mode_stress_test(4, 0b1111);
+        disk_test(nvme_sd);
 
         if false {
             _, buffer := allocate_page_aligned_physical_memory(4096);
-            ahci_transfer(*global.ahci, .READ, buffer, 512, 2048*512);
+            sata_transfer(*global.sata, .READ, buffer, 512, 2048*512);
             bs := cast(*Fat16_Bootsector) (buffer + DIRECT_MAPPING_BASE);
 
             log("OEM name is %.",          cast(string) bs.oem_name);
@@ -350,113 +352,45 @@ kernel_entry :: () #no_context {
     }
 }
 
-test_test :: () {
-    disk_test();
-    user_mode_stress_test(3, 0b1100);
-    priority_test();
-    network_test();
-    disk_test();
-    disk_test();
-    network_test();
-    disk_test();
-    network_test();
-}
+disk_test :: (sd: Storage_Device) {
 
-priority_test :: () {
-
-    get_task_cpu_time :: () -> Apollo_Time {
-        // Locally scoped because it's a messy way of doing this.
-        task := get_current_task();
-
-        preempt_disable();
-        runtime_this_tick := get_monotonic_time() - task.on_core.scheduler.last_task_switch_timestamp;
-        total_time := task.total_cpu_time + runtime_this_tick;
-        preempt_restore();
-
-        return total_time;
-    }
-
-    proc :: (priority: Task_Priority) {
-        task := get_current_task();
-        task.priority = priority;
-
-        start_cpu_time := get_task_cpu_time();
-
-        start := get_kernel_timestamp();
-        end   := start + seconds_to_apollo(5);
-
-        while get_kernel_timestamp() < end {
-            sleep(100, .milliseconds);
-
-            for 1..1000 {
-                if get_kernel_timestamp() >= end break;
-                busy_wait(100);
-            }
-        }
-
-        end_cpu_time := get_task_cpu_time();
-
-        cpu_time := end_cpu_time - start_cpu_time;
-        log("% priority %ms", priority, to_milliseconds(cpu_time));
-    }
-
-    for 0..5 {
-        priority := cast(Task_Priority) (it / 2);
-        simple_create_thread(proc, priority, name = "% priority", priority);
-    }
-}
-
-disk_test :: () {
-    assert(global.nvme.initialized);
     buffer := cast(string) NewArray(0xa0_0000, u8);
-
-    blocks_per_transfer := global.nvme.maximum_transfer_size_in_blocks;
-    transfers := 0xa0_0000 / (blocks_per_transfer * global.nvme.block_size);
-
-    {
-        total_bytes := transfers * blocks_per_transfer * global.nvme.block_size;
-        assert(total_bytes == 0xa0_0000);
-
-        log("Blocks per transfer: %, transfers: %, total bytes: %",
-            hex(blocks_per_transfer), transfers, hex(total_bytes)
-           );
-    }
+    transfer_done: Semaphore;
+    transfer: Transfer_Request;
 
     start := get_monotonic_time();
-    start_byte := 2048*512; // FAT filesystem has 2048 LBA (1MB) offset because this is favourable alignment.
-    assert(start_byte % global.nvme.block_size == 0);
 
-    fat16_mbr_offset_blocks := start_byte / global.nvme.block_size;
+    {
+        transfer.start_lba = 2048;
+        transfer.count_lba = 0xa0_0000 / 512;
+        transfer.direction = .READ;
+        transfer.semaphore = *transfer_done;
+        transfer.physical_memory_address = get_physical_address(buffer.data);
 
-    for 0..transfers-1 {
-        start_block   := it * blocks_per_transfer;
-        memory_buffer := buffer.data + start_block * global.nvme.block_size;
-        nvme_read(*global.nvme, cast(u64) (start_block + fat16_mbr_offset_blocks), memory_buffer, blocks_per_transfer);
-
-        if it % global.nvme.maximum_queue_entries == 0 nvme_fence(*global.nvme);
+        do_storage_transfer(sd, transfer);
+        wait_for(*transfer_done);
     }
 
-    nvme_fence(*global.nvme);
+    {
+        // Do some stuff with the loaded file system.
+        disk_image := fat16_parse_disk_image(buffer);
+        root       := fat16_get_root_directory(*disk_image);
 
-    disk_image := fat16_parse_disk_image(buffer);
-    root       := fat16_get_root_directory(*disk_image);
+        fat16_create_directory(root, "THEOS");
+        fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
 
-    fat16_create_directory(root, "THEOS");
-    fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
-
-    fat16_print_directory_tree(root);
-    fat16_copy_fat_table(*disk_image);
-
-    for 0..transfers-1 {
-        start_block   := it * blocks_per_transfer;
-        memory_buffer := buffer.data + start_block * global.nvme.block_size;
-        nvme_write(*global.nvme, cast(u64) (start_block + fat16_mbr_offset_blocks), memory_buffer, blocks_per_transfer);
-
-        if it % global.nvme.maximum_queue_entries == 0 nvme_fence(*global.nvme);
+        fat16_print_directory_tree(root);
+        fat16_copy_fat_table(*disk_image);
     }
 
-    nvme_fence(*global.nvme);
-    
+    {
+        // It's the exact same transfer parameters, but in the other direction.
+        transfer.direction = .WRITE;
+
+        do_storage_transfer(sd, transfer);
+        wait_for(*transfer_done);
+    }
+
     end   := get_monotonic_time();
     log("Elapsed: %ms", to_milliseconds(end - start));
 }
@@ -731,7 +665,8 @@ init_processor_core :: () {
         tss_desc.base_address_3 = cast,trunc(u32, tss_address >> 32);
         tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
 
-        core.task_state_segment.ist[0] = allocate_large_page() + DIRECT_MAPPING_BASE;
+        // For page fault. Page fault might be caused by stack overflow, so it gets its own stack. This system is temporary.
+        core.task_state_segment.ist[0] = allocate_large_page() + DIRECT_MAPPING_BASE + 0x20_0000;
 
         using Gdt_Entry;
 
@@ -2876,6 +2811,8 @@ Curve25519 :: #import "Curve25519";
 #load "pci_express.jai";
 #load "multitasking.jai";
 #load "time.jai";
+// #load "file_system.jai";
+#load "nvme.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";

@@ -240,12 +240,13 @@ yield_execution :: schedule_tasks;
 schedule_tasks :: () {
 
     update_scheduling_timer :: (scheduler: *Scheduler, time_now: Apollo_Time) {
+        // Calculate when the next scheduling interrupt should occur.
+
         assert(is_held(scheduler.spinlock)); // Caller should take the lock.
 
         next := scheduler.current_task; // The task we're switching to.
         is_idle := next == scheduler.idle_task;
 
-        // Calculate when the next scheduling interrupt should occur.
         shortest_time := INFINITE_TIMEOUT;
 
         // Todo: This is O(n), but we could switch to having sleep queues per-priority level to make it O(1).
@@ -313,7 +314,8 @@ schedule_tasks :: () {
             // If you sleep you get your full quantum back.
             it.remaining_quantum = scheduler.quantum;
 
-            // We can get here if the sleep time of the previous task was so short that it wakes itself before context switching. In that case we don't put ourselves back on the run queue because that already happens below as standard for the previous task.
+            // We can get here if the sleep time of the previous task was so short that it wakes itself before context switching.
+            // In that case we don't put ourselves back on the run queue because that already happens below as standard for the previous task.
             if it != previous {
                 queue_to_run(it);
             }
@@ -365,7 +367,8 @@ schedule_tasks :: () {
     }
 
     if previous_task_still_wants_to_run {
-        // If you got preempted by a higher priority task (rather than using up your quantum), you go at the front of the queue. That way if, for example, multiple low priority tasks want to always run, over the long term they each get the same amount of CPU time.
+        // If you got preempted by a higher priority task (rather than using up your quantum), you go at the front of the queue.
+        // That way if, for example, multiple low priority tasks want to always run, over the long term they each get the same amount of CPU time.
         queue_to_run(previous, go_at_the_front = !quantum_expired);
     }
 
@@ -513,9 +516,9 @@ wake_task :: (task: *Task_Info) {
     list_remove(task);
     queue_to_run(task);
 
-    execute_ipi(.RESCHEDULE_IPI, task.on_core);
-
     release(*scheduler.spinlock);
+
+    execute_ipi(.RESCHEDULE_IPI, task.on_core);
 }
 
 
@@ -572,6 +575,8 @@ release :: (using mutex: *Mutex) {
     unset_flag(.blocked, next);
 
     queue_to_run(next);
+    execute_ipi(.RESCHEDULE_IPI, task.on_core);
+
     release(*scheduler.spinlock);
 }
 
@@ -1055,6 +1060,49 @@ user_mode_stress_test :: (threads_per_core := 4, core_mask: u32 = 0xffff_ffff) {
     }
 }
 
+priority_test :: () {
+
+    get_task_cpu_time :: () -> Apollo_Time {
+        // Locally scoped because it's a messy way of doing this.
+        task := get_current_task();
+
+        preempt_disable();
+        runtime_this_tick := get_monotonic_time() - task.on_core.scheduler.last_task_switch_timestamp;
+        total_time := task.total_cpu_time + runtime_this_tick;
+        preempt_restore();
+
+        return total_time;
+    }
+
+    proc :: (priority: Task_Priority) {
+        task := get_current_task();
+        task.priority = priority;
+
+        start_cpu_time := get_task_cpu_time();
+
+        start := get_kernel_timestamp();
+        end   := start + seconds_to_apollo(5);
+
+        while get_kernel_timestamp() < end {
+            sleep(100, .milliseconds);
+
+            for 1..1000 {
+                if get_kernel_timestamp() >= end break;
+                busy_wait(100);
+            }
+        }
+
+        end_cpu_time := get_task_cpu_time();
+
+        cpu_time := end_cpu_time - start_cpu_time;
+        log("% priority %ms", priority, to_milliseconds(cpu_time));
+    }
+
+    for 0..5 {
+        priority := cast(Task_Priority) (it / 2);
+        simple_create_thread(proc, priority, name = "% priority", priority);
+    }
+}
 
 memory_test :: () {
     proc :: () {
