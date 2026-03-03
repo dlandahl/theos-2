@@ -892,7 +892,7 @@ uacpi_kernel_map :: (address: uacpi_phys_addr, length: uacpi_size) -> *void #c_c
 
         virtual := cast(*void) alloc_block(*global.virtual_block_allocator, pages_needed * 4096);
 
-        map_pages(virtual, address, cast(s64) pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        map_pages(virtual, address - offset_in_page, cast(s64) pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
         return virtual + offset_in_page;
     }

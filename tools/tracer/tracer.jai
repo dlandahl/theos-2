@@ -564,7 +564,7 @@ draw_one_frame :: (dt: float) {
               case .nvme_FAILURE; #through;
               case .nvme_SUCCESS; #through;
               case .nvme_enqueue;
-                text = tprint("Queue index: %, id = %", it.user[0], it.user[1]);
+                text = tprint("Queue index: %", it.user[0]);
 
               case .syscall;
                 syscall_names := string.["Zero (Invalid)", "Yield", "CPU Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex", "Free Memory"];

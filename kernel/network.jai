@@ -2186,7 +2186,6 @@ allocate_port :: (net: *Network_Connection) -> u16 {
 }
 
 network_thread :: () {
-
     log_category("Net");
 
     time := get_monotonic_system_time();
@@ -2326,9 +2325,15 @@ allocate_ring_buffer :: (ring: *Ring_Buffer, size: int) {
     map_pages(virtual,        physical, page_count);
     map_pages(virtual + size, physical, page_count);
 
-    ring.buffer.count = size;
-    ring.buffer.data  = virtual;
+    ring.buffer.count  = size;
+    ring.buffer.data   = virtual;
     ring.physical_base = physical_base;
+}
+
+free_ring_buffer :: (ring: *Ring_Buffer) {
+    free_block(*global.physical_block_allocator, ring.physical_base);
+    free_block(*global.virtual_block_allocator,  cast(u64) ring.buffer.data);
+    memset(ring, 0, size_of(Ring_Buffer));
 }
 
 ring_buffer_start_write :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
@@ -2349,7 +2354,7 @@ ring_buffer_finish_write :: (ring: *Ring_Buffer) {
 }
 
 ring_buffer_start_read :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
-    wrapped := ring.write_cursor & (ring.buffer.count-1);
+    wrapped := ring.read_cursor & (ring.buffer.count-1);
     base_address := ring.buffer.data + wrapped;
 
     // As with writing regarding available space.
@@ -2397,3 +2402,91 @@ get_space_available :: inline (ring: Ring_Buffer) -> int {
 get_data_available :: inline (ring: Ring_Buffer) -> int {
     return ring.write_cursor - ring.read_cursor;
 }
+
+
+
+network_test :: () -> string {
+    USE_DNS :: false;
+
+    log_category("TLS Test");
+    log("Starting.");
+
+    net := *global.network_connection;
+
+    network_adapter_initialized := net.adapter.mmio != null;
+    assert(network_adapter_initialized);
+
+    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
+    put_task_on_core(task, *global.processor_cores[1]);
+
+    log("Waiting for DHCP handshake.");
+    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
+
+    ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
+    port: u16 = 4443;
+
+    #if USE_DNS {
+        log("Sending DNS Query.");
+
+        for 1..100 {
+            // Usually works the first time unless network is bad.
+
+            dns_query := transmit_dns_query(net, "thinkpad");
+
+            if Timeout(dns_query.complete, 1000) {
+                continue;
+            }
+
+            if dns_query.response != .NOERROR {
+                log("DNS Query failed with code %", dns_query.response);
+                return "";
+            }
+
+            ip_address = dns_query.answer;
+            // port = 443;
+            break;
+        }
+    }
+
+    transmit_ping(net, ip_address);
+
+    connection := initiate_tcp_connection(net, ip_address, port);
+
+    Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
+
+    tls := establish_tls_connection(connection);
+
+    request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
+    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
+
+    tls_transmit_application_data(*tls, request);
+
+    builder: String_Builder;
+
+    for 1..2 {
+        response := tls_receive_application_data(*tls, seconds_to_apollo(5));
+        append(*builder, response);
+
+        log("Got HTTPS response: %", response);
+    }
+
+    // Todo: TLS Close Notify.
+
+    tcp_close(connection);
+
+    log("Completed.");
+    return builder_to_string(*builder);
+}
+
+HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
+
+HTTP_MESSAGE :: #string,cr END
+POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
+Host: discord.com
+Authorization: %3
+Accept: application/json
+Content-Type: application/json
+Content-Length: %1
+
+%2
+END;

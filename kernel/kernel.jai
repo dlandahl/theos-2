@@ -314,7 +314,7 @@ kernel_entry :: () #no_context {
 
               case .NVME_CONTROLLER;
                 nvme_sd = init_nvme_controller(it);
-                global.nvme = nvme_sd.device_specific_data_pointer;
+                global.nvme = nvme_sd.data_pointer;
 
               case .I8254X_ETHERNET;
                 // global.network_connection.adapter = init_i8254x(it);
@@ -332,8 +332,6 @@ kernel_entry :: () #no_context {
             trace_event_count := write_trace_buffers();
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
-
-        disk_test(nvme_sd);
 
         if false {
             _, buffer := allocate_page_aligned_physical_memory(4096);
@@ -355,8 +353,9 @@ kernel_entry :: () #no_context {
 disk_test :: (sd: Storage_Device) {
 
     buffer := cast(string) NewArray(0xa0_0000, u8);
-    transfer_done: Semaphore;
+
     transfer: Transfer_Request;
+    transfer_done: Semaphore;
 
     start := get_monotonic_time();
 
@@ -376,8 +375,10 @@ disk_test :: (sd: Storage_Device) {
         disk_image := fat16_parse_disk_image(buffer);
         root       := fat16_get_root_directory(*disk_image);
 
+        text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
+
         fat16_create_directory(root, "THEOS");
-        fat16_write_file(root, "THEOS/TEST", "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.");
+        fat16_write_file(root, "THEOS/TEST", text);
 
         fat16_print_directory_tree(root);
         fat16_copy_fat_table(*disk_image);
@@ -394,107 +395,6 @@ disk_test :: (sd: Storage_Device) {
     end   := get_monotonic_time();
     log("Elapsed: %ms", to_milliseconds(end - start));
 }
-
-maple_tree_test :: () {
-    tree := create_maple_tree(0, 100);
-
-    maple_add(*tree, 12, 18,  null);
-    maple_add(*tree, 5,  6,   null);
-    maple_add(*tree, 8,  9,   null);
-    maple_add(*tree, 7,  7,   null);
-    maple_add(*tree, 19, 100, null);
-
-    entry_count := get(tree.meta, .entry_count);
-    assert(entry_count >= 1);
-
-    visualize_maple_tree_node(*tree);
-}
-
-network_test :: () -> string {
-    USE_DNS :: false;
-
-    log_category("TLS Test");
-    log("Starting.");
-
-    net := *global.network_connection;
-
-    network_adapter_initialized := net.adapter.mmio != null;
-    assert(network_adapter_initialized);
-
-    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
-    put_task_on_core(task, *global.processor_cores[1]);
-
-    log("Waiting for DHCP handshake.");
-    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
-
-    ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
-    port: u16 = 4443;
-
-    #if USE_DNS {
-        log("Sending DNS Query.");
-
-        for 1..100 {
-            // Usually works the first time unless network is bad.
-
-            dns_query := transmit_dns_query(net, "thinkpad");
-
-            if Timeout(dns_query.complete, 1000) {
-                continue;
-            }
-
-            if dns_query.response != .NOERROR {
-                log("DNS Query failed with code %", dns_query.response);
-                return "";
-            }
-
-            ip_address = dns_query.answer;
-            // port = 443;
-            break;
-        }
-    }
-
-    transmit_ping(net, ip_address);
-
-    connection := initiate_tcp_connection(net, ip_address, port);
-
-    Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
-
-    tls := establish_tls_connection(connection);
-
-    request := tprint(HTTP_MESSAGE, HTTP_CONTENT.count, HTTP_CONTENT, "");
-    request = "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
-
-    tls_transmit_application_data(*tls, request);
-
-    builder: String_Builder;
-
-    for 1..2 {
-        response := tls_receive_application_data(*tls, seconds_to_apollo(5));
-        append(*builder, response);
-
-        log("Got HTTPS response: %", response);
-    }
-
-    // Todo: TLS Close Notify.
-
-    tcp_close(connection);
-
-    log("Completed.");
-    return builder_to_string(*builder);
-}
-
-HTTP_CONTENT :: "{\"content\": \"This discord message was sent from the Jai operating system (running in VirtualBox) using custom ethernet driver and network protocol implementations, including transport layer security written in Jai. Will post a video in a moment.\"}";
-
-HTTP_MESSAGE :: #string,cr END
-POST /api/v8/channels/1366374734702313514/messages HTTP/1.1
-Host: discord.com
-Authorization: %3
-Accept: application/json
-Content-Type: application/json
-Content-Length: %1
-
-%2
-END;
 
 
 
@@ -2012,6 +1912,21 @@ create_maple_tree :: (min: s64, max: s64) -> Maple_Tree_Node_Expanded {
     return expanded;
 }
 
+maple_tree_test :: () {
+    tree := create_maple_tree(0, 100);
+
+    maple_add(*tree, 12, 18,  null);
+    maple_add(*tree, 5,  6,   null);
+    maple_add(*tree, 8,  9,   null);
+    maple_add(*tree, 7,  7,   null);
+    maple_add(*tree, 19, 100, null);
+
+    entry_count := get(tree.meta, .entry_count);
+    assert(entry_count >= 1);
+
+    visualize_maple_tree_node(*tree);
+}
+
 
 
 // A temporary system to help detect memory bugs.
@@ -2258,9 +2173,9 @@ irq_restore :: () #no_context {
     trace(.irq_restore, core.irq_disable_count);
 
     if core.irq_disable_count == 0 {
-        #asm { sti; }
-
         maybe_reschedule();
+
+        #asm { sti; }
     }
 }
 
@@ -2628,9 +2543,7 @@ flush_screen :: () #no_context {
     fb := global.framebuffer;
     size_bytes := fb.y_resolution * fb.stride * size_of(u32);
 
-    #import "Memory";
-    push_context,defer_pop;
-    copy(fb.hardware_buffer, fb.software_buffer, size_bytes);
+    memcpy(fb.hardware_buffer, fb.software_buffer, size_bytes);
 }
 
 Netpbm_Image :: struct {

@@ -911,7 +911,7 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
 
 
 Storage_Device :: struct {
-    device_specific_data_pointer: *void;
+    data_pointer: *void;
 
     transfer: (device: *void, request: Transfer_Request);
 }
@@ -933,9 +933,9 @@ Transfer_Request :: struct {
 
 do_storage_transfer :: (device: Storage_Device, transfer: Transfer_Request) {
     assert(device.transfer != null);
-    assert(device.device_specific_data_pointer != null);
+    assert(device.data_pointer != null);
 
-    device.transfer(device.device_specific_data_pointer, transfer);
+    device.transfer(device.data_pointer, transfer);
 }
 
 

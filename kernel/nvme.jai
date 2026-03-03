@@ -115,7 +115,14 @@ init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
         mps_min := get(nvme.CAP__capabilities, .MPSMIN);
         assert(mps_min == 0); // Zero means 4k. Controller should always support 4k memory page size.
 
-        nvme.maximum_transfer_size_in_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
+        mdts := nvme.identify.MDTS__maximum_data_transfer_size;
+        if mdts == 0 {
+            // 0 Means no limit.
+            nvme.maximum_transfer_size_in_blocks = 0x1000;
+        } else {
+            nvme.maximum_transfer_size_in_blocks = 1 << nvme.identify.MDTS__maximum_data_transfer_size;
+        }
+
         nvme.maximum_queue_entries = cast(s64) get(nvme.CAP__capabilities, .MQES__maximum_queue_entries);
 
         log("Found controller with model number '%'. Maximum transfer size % blocks, maximum queue size % entries.", mn, nvme.maximum_transfer_size_in_blocks, nvme.maximum_queue_entries);
@@ -227,7 +234,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
     put_task_on_core(thread, get_current_core());
 
     sd: Storage_Device;
-    sd.device_specific_data_pointer = nvme;
+    sd.data_pointer = nvme;
     sd.transfer = nvme_transfer;
 
     nvme.initialized = true;
@@ -727,6 +734,8 @@ completion_thread :: () {
                     array_free(it.prp_pages);
                     free(it,, global.small_objects);
                 }
+
+                break;
             }
 
             release(*controller.metadata_lock);
