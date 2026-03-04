@@ -15,6 +15,7 @@
 }
 
 #import "FAT16";
+#import "GUID_Partition_Table";
 
 #run,stallable main();
 
@@ -328,6 +329,35 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 }
 
 format_disk :: () -> bool {
+    log("Formatting disk image");
+
+    bootloader := read_entire_file(".build/bootx64.efi");
+    kernel     := read_entire_file(".build/kernel");
+
+    memory_buffer := NewArray(0x140_0000, u8);
+
+    disk      := format_gpt_disk_image(memory_buffer);
+    partition := create_partition(disk, PARTITION_TYPE_EFI_BASIC_DATA, "UEFI", 2048, 0xa0_0000 / disk.sector_size);
+
+    fat16     := fat16_create_disk_image(partition, set_volume_label="THEOS BOOT");
+    root      := fat16_get_root_directory(*fat16);
+
+    fat16_create_directory(root, "EFI");
+    fat16_create_directory(root, "EFI/BOOT");
+
+    fat16_write_file(root, "EFI/BOOT/BOOTX64.EFI", bootloader);
+    fat16_write_file(root, "kernel", kernel);
+    fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
+
+    fat16_print_directory_tree(root);
+    fat16_copy_fat_table(*fat16);
+
+    write_entire_file("disk_image.img", disk.all_file_data);
+
+    return true; // Todo: Check for errors.
+}
+
+#if 0 format_disk__parted :: () -> bool {
     log("Formatting disk image");
 
     bootloader := read_entire_file(".build/bootx64.efi");

@@ -1,4 +1,6 @@
 
+// Todo: Can we easily generalise this code to do FAT32 as well?
+
 #module_parameters(
     get_calendar_time := () -> Calendar_Time {
         apollo := current_time_consensus();
@@ -22,28 +24,28 @@ Fat16_Partition_State :: enum u16 {
 }
 
 Fat16_Bootsector :: struct {
-    jmp:                [3]u8;
-    oem_name:           [8]u8;
-    bytes_per_sector:      u16 #align 1;
-    sectors_per_cluster:   u8;
-    reserved_sectors:      u16;
-    number_of_fat_tables:  u8;
-    max_root_dir_entries:  u16 #align 1;
-    number_of_sectors16:   u16 #align 1;
-    media_descriptor:      Fat16_Media_Descriptor;
-    sectors_per_fat_table: u16;
-    sectors_per_track:     u16;
-    heads_per_cylinder:    u16;
-    num_hidden_sectors:    u32 #align 2;
-    number_of_sectors32:   u32 #align 2;
-    drive_number:          u8;
-    unused:                u8;
-    ext_boot_signature:    u8;
-    serial_number:         u32 #align 1;
-    volume_label:      [11]u8;
-    file_system_label:  [8]u8;
-    boot_code:        [448]u8;
-    bootsector_magic:      u16;
+    jmp:                [3] u8;
+    oem_name:           [8] u8;
+    bytes_per_sector:       u16 #align 1;
+    sectors_per_cluster:    u8;
+    reserved_sectors:       u16;
+    number_of_fat_tables:   u8;
+    max_root_dir_entries:   u16 #align 1;
+    number_of_sectors16:    u16 #align 1;
+    media_descriptor:       Fat16_Media_Descriptor;
+    sectors_per_fat_table:  u16;
+    sectors_per_track:      u16;
+    heads_per_cylinder:     u16;
+    num_hidden_sectors:     u32 #align 2;
+    number_of_sectors32:    u32 #align 2;
+    drive_number:           u8;
+    unused:                 u8;
+    ext_boot_signature:     u8;
+    serial_number:          u32 #align 1;
+    volume_label:      [11] u8;
+    file_system_label:  [8] u8;
+    boot_code:        [448] u8;
+    bootsector_magic:       u16;
 }
 
 #assert size_of(Fat16_Bootsector) == 512;
@@ -119,12 +121,12 @@ Fat16_Short_Entry ::  struct {
 #assert size_of(Fat16_Short_Entry) == 0x20;
 
 
-Fat16_Disk_Image :: struct {
+Fat16_Disk_Image :: struct { // Maybe this shouldn't be called disk image anymore, because it would often be a single-partition view into a larger disk image.
     bytes_per_cluster: int;
 
     bootsector: *Fat16_Bootsector;
 
-    file_allocation_table: []u16;
+    file_allocation_table: [] u16;
     root_directory_area: *void;
     data_area: *void;
 
@@ -137,15 +139,12 @@ Fat16_Tree_Cursor :: struct {
     cluster: u16;
 }
 
-fat16_create_disk_image :: (size_bytes: int, set_oem_name := "JaiFAT16", set_volume_label := "NO NAME", set_serial_number: u32 = 0) -> Fat16_Disk_Image {
-    // Code for creating a new FAT16 disk from scratch in memory.
+fat16_create_disk_image :: (memory_buffer: [] u8, set_oem_name := "JaiFAT16", set_volume_label := "NO NAME", set_serial_number: u32 = 0) -> Fat16_Disk_Image {
+    // Code for creating a new FAT16 disk from scratch in memory, in-place.
 
-    all_file_data: string;
+    all_file_data: string = xx memory_buffer;
 
-    all_file_data.count = size_bytes;
-    all_file_data.data  = alloc(size_bytes);
-
-    total_sectors  := (size_bytes+511) / 512;
+    total_sectors  := (memory_buffer.count+511) / 512;
     total_clusters := total_sectors / 4;
 
     {
@@ -663,30 +662,33 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
             first_long_entry := cast(*Fat16_LFN_Entry) it.short_entry;
 
             if first_long_entry.record_sequence & 0x40 == 0 {
-                // LFN is corrupted.
+                // Not the start of an LFN sequence. Don't put a message, because we likely got here through one of of the failures below.
                 continue;
             }
 
             sequence_number := first_long_entry.record_sequence & ~0x40;
 
+            lfn_parse_failure :: (message: string) #expand {
+                log(message);
+                log("Directory Entry may have become corrupted by driver without LFN support.");
+                continue outer;
+            }
+
             while true {
                 current_long_entry := cast(*Fat16_LFN_Entry) (directory_data + it_index);
 
                 if current_long_entry.record_sequence != sequence_number && current_long_entry != first_long_entry {
-                    log("LFN sequence mismatch. Directory entry may have become corrupted by driver without LFN support.");
-                    continue outer;
+                    lfn_parse_failure("LFN sequence mismatch.");
                 }
 
                 if current_long_entry.attributes != .LFN_ENTRY {
                     // Not marked LFN even though we expected more entries due to the sequence number. Skip.
-                    log("Found partial sequence of LFN entries. Directory entry may have become corrupted by driver without LFN support.");
-                    continue outer;
+                    lfn_parse_failure("Found partial sequence of LFN entries.");
                 }
 
                 if (it_index+1) % entries_per_cluster == 0 {
                     // LFN entries should not be spread over different clusters. This might be the last one but we still need a slot for the short entry.
-                    log("LFN entries are not physically contiguous. Directory entry may have become corrupted by driver without LFN support.");
-                    continue outer;
+                    lfn_parse_failure("LFN entries are not physically contiguous.");
                 }
 
                 it_index += 1;
@@ -696,8 +698,7 @@ for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: 
                     it.short_entry = directory_data + it_index;
 
                     if it.attributes == .LFN_ENTRY {
-                        log("Expected short entry. Directory entry may have become corrupted by driver without LFN support.");
-                        continue outer;
+                        lfn_parse_failure("Expected short entry.");
                     }
 
                     it.first_long_entry = first_long_entry;
@@ -766,7 +767,7 @@ fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
             name := fat16_get_name(it);
             if equal_nocase(name, ".") || equal_nocase(name, "..") continue;
 
-            if index == top.entries_printed {
+            if index == top.entries_printed { // Todo: This should remember where it left off.
 
                 print(*b, "── %\n", to_lower_copy(name,, temp));
                 top.entries_printed += 1;
@@ -836,8 +837,8 @@ calendar_to_dostime :: (cal: Calendar_Time) -> DOSDATE, DOSTIME {
     minute := cast(u16) (cal.minute);
     second := cast(u16) (cal.second / 2);
 
-    d := cast(DOSDATE) ((year << 9)  | (month  << 5) | (day));
-    t := cast(DOSTIME) ((hour << 11) | (minute << 5) | (second));
+    d := cast(DOSDATE) (year << 9)  | (month  << 5) | (day);
+    t := cast(DOSTIME) (hour << 11) | (minute << 5) | (second);
 
     return d, t;
 }
