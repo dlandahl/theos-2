@@ -500,7 +500,7 @@ setup_temporary_storage :: () {
     ts_data := alloc(TEMPORARY_STORAGE_SIZE);
 
     ts := New(Temporary_Storage,, global.small_objects);
-    set_initial_data(ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
+    set_initial_data(ts, TEMPORARY_STORAGE_SIZE, ts_data);
 
     context.temporary_storage = ts;
 

@@ -286,7 +286,9 @@ draw_one_frame :: (dt: float) {
     ui_per_frame_update(my_window, width, height, current_time);
 
     r := get_rect(0, 0, xx width, xx height);
-    r = shrink(r, 25*UI_SCALE);
+    r = shrink(r, 20*UI_SCALE);
+
+    info_bar_rect:, r = cut_bottom(r, 30*UI_SCALE);
 
     file_load_rect, main_region_rect := cut_top(r, 50*UI_SCALE);
     {
@@ -468,6 +470,7 @@ draw_one_frame :: (dt: float) {
         }
     }
 
+
     st := my_theme.slidable_region_theme;
     st.divider_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
     st.divider_thickness = 10*UI_SCALE;
@@ -477,6 +480,8 @@ draw_one_frame :: (dt: float) {
     st.initial_divider_position = slidable_rect.w / 2;
 
     slide_state, left_rect, right_rect := slidable_region(slidable_rect, *st);
+
+    hovered_entry := -1;
 
     {
         // Vertical trace events view (left slide region).
@@ -526,10 +531,16 @@ draw_one_frame :: (dt: float) {
                 continue;
             }
 
-            if button(row_rect, "", *row_theme, it_index) {
+            pressed, state := button(row_rect, "", *row_theme, it_index);
+            if pressed {
                 selected_entry = it_index;
                 update_highlighted_trace_entries();
             }
+
+            if state.status & .OVER {
+                hovered_entry = it_index;
+            }
+
 
             time_seconds := cast(float)it.tsc / cast(float)trace_data.tsc_frequency;
             text := tprint("%", formatFloat(time_seconds, trailing_width=3, zero_removal=.NO));
@@ -700,6 +711,23 @@ draw_one_frame :: (dt: float) {
     }
 
     finish(slide_state);
+
+    if hovered_entry != -1 {
+        info_bar_rect = shrink_y(info_bar_rect, 50*UI_SCALE);
+
+        t := my_theme.label_theme;
+        t.alignment = .Left;
+        t.font = mono_font;
+
+        selected := *trace_data.entries[selected_entry];
+        hovered  := *trace_data.entries[hovered_entry];
+
+        delta := abs(cast(s64)selected.tsc - cast(s64)hovered.tsc);
+        delta_seconds := cast(float)delta / cast(float)trace_data.tsc_frequency;
+
+        text := tprint("% | Delta: %s", formatInt(hovered_entry, minimum_digits=4), formatFloat(delta_seconds, trailing_width=3, zero_removal=.NO));
+        label(info_bar_rect, text, *t);
+    }
 
     draw_popups();
 

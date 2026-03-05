@@ -4,6 +4,7 @@
 MBR_OS_Indicator :: enum u8 {
     UEFI_SYSTEM_PARTITION    :: 0xef;
     PROTECTIVE_MBR           :: 0xff;
+    LEGACY_MBR               :: 0xee;
 }
 
 MBR_Partition :: struct {
@@ -47,10 +48,9 @@ GPT_Header :: struct {
     partition_array_count: u32;
     partition_entry_size:  u32;
     partition_array_crc:   u32;
-    _:                     u32;
-}
+} #no_padding
 
-#assert size_of(GPT_Header) == 96;
+#assert size_of(GPT_Header) == 92;
 
 GPT_Partition :: struct {
     type_guid:     [16] u8;
@@ -103,13 +103,10 @@ format_gpt_disk_image :: (memory_buffer: [] u8, sector_size := 512) -> GPT_Disk_
         // Todo: Should make the boot code report that the firmware is trying to do BIOS boot on a UEFI disk.
 
         pmbr.partitions[0].start_chs              = .[0x00, 0x02, 0x00];
-        pmbr.partitions[0].os_type                = .PROTECTIVE_MBR;
-
-        end_chs := cast(u32) min(total_logical_blocks, 0xff_ffff) << 8;
-        memcpy(*pmbr.partitions[0].end_chs, *end_chs, 3);
-
+        pmbr.partitions[0].os_type                = .LEGACY_MBR;
+        pmbr.partitions[0].end_chs                = .[0xff, 0xff, 0xff];
         pmbr.partitions[0].start_lba              = 1;
-        pmbr.partitions[0].size_in_logical_blocks = cast(u32) min(total_logical_blocks, 0xffff_ffff);
+        pmbr.partitions[0].size_in_logical_blocks = cast(u32) min(total_logical_blocks - 1, 0xffff_ffff);
         pmbr.boot_magic                           = 0xaa55;
     }
 
@@ -170,6 +167,24 @@ format_gpt_disk_image :: (memory_buffer: [] u8, sector_size := 512) -> GPT_Disk_
     return disk;
 }
 
+finalize_gpt_disk_image :: (disk: GPT_Disk_Image) {
+    // 1. Recalculate header checksum.
+    disk.header.partition_array_crc = do_crc32(disk.partition_table);
+    disk.header.header_crc32        = 0;
+    disk.header.header_crc32        = do_crc32(disk.header, size_of(GPT_Header));
+
+    // 2. Recalculate alternate header checksum.
+    disk.header_copy.partition_array_crc = disk.header.partition_array_crc;
+    disk.header_copy.header_crc32        = 0;
+    disk.header_copy.header_crc32        = do_crc32(disk.header_copy, size_of(GPT_Header));
+
+    // 3. Copy partition table.
+    source      := disk.partition_table.data;
+    destination := disk.partition_table_copy;
+    bytes       := disk.partition_table.count * size_of(GPT_Partition);
+    memcpy(destination, source, bytes);
+}
+
 create_partition :: (disk: GPT_Disk_Image, type_guid: [16] u8, name: string, offset_in_sectors: int, size_in_sectors: int) -> [] u8, *GPT_Partition {
     // Todo: Make sure this doesn't overlap with any existing partitions.
 
@@ -180,7 +195,7 @@ create_partition :: (disk: GPT_Disk_Image, type_guid: [16] u8, name: string, off
         memset(it, 0, size_of(GPT_Partition));
 
         it.starting_lba = cast(u64) (offset_in_sectors);
-        it.ending_lba   = cast(u64) (offset_in_sectors + size_in_sectors);
+        it.ending_lba   = cast(u64) (offset_in_sectors + size_in_sectors - 1);
 
         for char: 0..min(name.count, it.name.count)-1 {
             it.name[char] = name[char];
@@ -197,10 +212,6 @@ create_partition :: (disk: GPT_Disk_Image, type_guid: [16] u8, name: string, off
     }
 
     return .[], null; // No free GPT entries.
-}
-
-parse_gpt_disk_image :: () {
-    // Todo.
 }
 
 
@@ -276,7 +287,7 @@ do_crc32 :: (data: *void, count: int) -> u32 {
 }
 
 do_crc32 :: (input: [] $T) -> u32 {
-    return do_crc32(cast(*u8) input.data, input.count * size_of(T));
+    return do_crc32(input.data, input.count * size_of(T));
 }
 
 // Source polynomial for this table is 0x04c11db7 (or inverted, 0xedb88320.)
