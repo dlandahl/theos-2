@@ -109,7 +109,7 @@ Kernel_Globals :: struct {
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
     nvme: *Nvme_Controller;
-    sata: Sata_Controller;
+    sata: *Sata_Controller;
 
     pci_devices: [..] Pci_Device;
 
@@ -302,7 +302,9 @@ kernel_entry :: () #no_context {
 
         irq_restore();
 
+        // Todo: Clean this up.
         nvme_sd: Storage_Device;
+        sata_sd: Storage_Device;
 
         for *global.pci_devices {
             if it.combined_class_code == {
@@ -310,6 +312,9 @@ kernel_entry :: () #no_context {
                 sata, success := init_sata_controller(it);
                 if success {
                     global.sata = sata;
+
+                    sata_sd.data_pointer = sata;
+                    sata_sd.transfer     = sata_transfer;
                 }
 
               case .NVME_CONTROLLER;
@@ -333,15 +338,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        if false {
-            _, buffer := allocate_page_aligned_physical_memory(4096);
-            sata_transfer(*global.sata, .READ, buffer, 512, 2048*512);
-            bs := cast(*Fat16_Bootsector) (buffer + DIRECT_MAPPING_BASE);
-
-            log("OEM name is %.",          cast(string) bs.oem_name);
-            log("Volume label is %.",      cast(string) bs.volume_label);
-            log("File system label is %.", cast(string) bs.file_system_label);
-        }
+        disk_test(sata_sd);
 
         {
             set_flag(.stopped, get_current_task());
@@ -352,7 +349,11 @@ kernel_entry :: () #no_context {
 
 disk_test :: (sd: Storage_Device) {
 
-    buffer := cast(string) NewArray(0xa0_0000, u8);
+    _, physical := allocate_page_aligned_physical_memory(0xa0_0000);
+
+    buffer: string;
+    buffer.data  = cast(*u8) physical + DIRECT_MAPPING_BASE;
+    buffer.count = 0xa0_0000;
 
     transfer: Transfer_Request;
     transfer_done: Semaphore;
@@ -361,7 +362,7 @@ disk_test :: (sd: Storage_Device) {
 
     {
         transfer.start_lba = 2048;
-        transfer.count_lba = 0xa0_0000 / 512;
+        transfer.count_lba = buffer.count / 512;
         transfer.direction = .READ;
         transfer.semaphore = *transfer_done;
         transfer.physical_memory_address = get_physical_address(buffer.data);
@@ -375,10 +376,14 @@ disk_test :: (sd: Storage_Device) {
         file_system := fat16_parse_file_system(buffer);
         root        := fat16_get_root_directory(*file_system);
 
-        text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
-
         fat16_create_directory(root, "THEOS");
+
+        text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
         fat16_write_file(root, "THEOS/TEST", text);
+
+        trace: String_Builder;
+        serialize_trace_buffers(*trace);
+        fat16_write_file(root, "THEOS/TRACE", builder_to_string(*trace));
 
         fat16_print_directory_tree(root);
         fat16_copy_fat_table(*file_system);
@@ -2173,9 +2178,9 @@ irq_restore :: () #no_context {
     trace(.irq_restore, core.irq_disable_count);
 
     if core.irq_disable_count == 0 {
-        maybe_reschedule();
-
         #asm { sti; }
+
+        maybe_reschedule();
     }
 }
 
@@ -2728,6 +2733,7 @@ Curve25519 :: #import "Curve25519";
 #load "time.jai";
 // #load "file_system.jai";
 #load "nvme.jai";
+#load "sata.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";

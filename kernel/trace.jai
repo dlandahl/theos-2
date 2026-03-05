@@ -141,16 +141,16 @@ Trace_Entry :: struct {
         trace_buffers[buffer_index].data[index_in_buffer] = entry;
     }
 
-    write_trace_buffers :: () -> num_written: int {
+    serialize_trace_buffers :: (builder: *String_Builder) -> num_written: int {
         using global.trace_state;
 
         // Because this procedure is to be called after completing a kernel test workload, we don't care about extra latency and it's more important to have as controlled an environment as possible.
         irq_disable();
 
-        serial_out(KERNEL_TRACE_MAGIC_STRING, *global.COM2);
-
         last_entry_index := current_index;
         thread_count := global.next_task_id-1;
+
+        append(builder, KERNEL_TRACE_MAGIC_STRING);
 
         {
             header: Trace_Header;
@@ -159,15 +159,10 @@ Trace_Entry :: struct {
             header.num_cpu_cores     = global.processor_cores.count;
             header.num_threads       = thread_count;
 
-            s: string;
-            s.data = cast(*u8) *header;
-            s.count = size_of(Trace_Header);
-            serial_out(s, *global.COM2);
+            append_by_pointer(builder, *header);
         }
 
         {
-            string_table_builder: String_Builder;
-
             // Maybe we want to eventually switch to a data structure where readers don't need to get the lock.
             acquire(*global.task_info_storage_spinlock);
             for global.tasks {
@@ -179,33 +174,39 @@ Trace_Entry :: struct {
                 e.thread_id = it.id;
                 e.name_length = it.name.count;
 
-                append_by_pointer(*string_table_builder, *e);
-                append(*string_table_builder, it.name);
+                append_by_pointer(builder, *e);
+                append(builder, it.name);
             }
             release(*global.task_info_storage_spinlock);
-
-            write_string_builder_to_serial_port(*string_table_builder, *global.COM2);
         }
 
         buffer_index    := last_entry_index / TRACE_ENTRIES_PER_BUFFER;
         index_in_buffer := last_entry_index % TRACE_ENTRIES_PER_BUFFER;
 
-        for 0..buffer_index {
+        for b: 0..buffer_index {
             s: string;
-            s.data = cast(*u8)trace_buffers[it].data.data;
+            s.data = cast(*u8)trace_buffers[b].data.data;
 
-            if it != buffer_index {
+            if b != buffer_index {
                 // Write the whole buffer if this isn't the last one.
                 s.count = 0x20_0000;
             } else {
                 s.count = index_in_buffer * size_of(Trace_Entry);
             }
 
-            serial_out(s, *global.COM2);
+            append(builder, s);
         }
 
         irq_restore();
-
         return last_entry_index;
+    }
+
+    write_trace_buffers :: () -> int {
+        builder: String_Builder;
+
+        count := serialize_trace_buffers(*builder);
+        write_string_builder_to_serial_port(*builder, *global.COM2);
+
+        return count;
     }
 }
