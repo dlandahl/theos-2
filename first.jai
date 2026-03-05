@@ -339,7 +339,7 @@ format_disk :: () -> bool {
     disk      := format_gpt_disk_image(memory_buffer);
     partition := create_partition(disk, PARTITION_TYPE_EFI_BASIC_DATA, "UEFI", 2048, 0xa0_0000 / disk.sector_size);
 
-    fat16     := fat16_create_disk_image(partition, set_volume_label="THEOS BOOT");
+    fat16     := fat16_create_file_system(partition, set_volume_label="THEOS BOOT");
     root      := fat16_get_root_directory(*fat16);
 
     fat16_create_directory(root, "EFI");

@@ -372,8 +372,8 @@ disk_test :: (sd: Storage_Device) {
 
     {
         // Do some stuff with the loaded file system.
-        disk_image := fat16_parse_disk_image(buffer);
-        root       := fat16_get_root_directory(*disk_image);
+        file_system := fat16_parse_file_system(buffer);
+        root        := fat16_get_root_directory(*file_system);
 
         text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
 
@@ -381,7 +381,7 @@ disk_test :: (sd: Storage_Device) {
         fat16_write_file(root, "THEOS/TEST", text);
 
         fat16_print_directory_tree(root);
-        fat16_copy_fat_table(*disk_image);
+        fat16_copy_fat_table(*file_system);
     }
 
     {
