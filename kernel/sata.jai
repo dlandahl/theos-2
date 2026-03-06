@@ -227,9 +227,6 @@ sata_transfer_sectors :: (controller: *Sata_Controller, direction: type_of(Trans
     table := controller.command_table[0];
     table.CFIS__command_fis = fis;
 
-    // Todo: This driver uses only one physical region at a time, in one command list entry at a time, on one port.
-    // It needs to be generalised to access drives on any port, and should dynamically allocate command lists that
-    // contain more physical region descriptors, to reduce software overhead of disk access.
     controller.command_list[0].PRDTL__prd_table_length = 1;
     controller.command_list[0].PRDBC__prd_byte_count = 0;
     controller.command_list[0].flags = size_of(Sata_Command_Fis) / 4;

@@ -697,7 +697,6 @@ i8254x_interrupt :: (stack: *void) #c_call {
 
         write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
     }
-
 } @InterruptRoutine
 
 I8254x_Network_Interface_Card :: struct {
@@ -932,7 +931,7 @@ Transfer_Request :: struct {
 }
 
 do_storage_transfer :: (device: Storage_Device, transfer: Transfer_Request) {
-    assert(device.transfer != null);
+    assert(device.transfer     != null);
     assert(device.data_pointer != null);
 
     device.transfer(device.data_pointer, transfer);

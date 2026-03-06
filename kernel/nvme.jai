@@ -263,6 +263,7 @@ Nvme_Command_Queue :: struct {
     semaphore: Semaphore;
 
     next_command_id: u16;
+    last_seen_sqhd:  u16; // Up to this index, submission queue entries are guaranteed to be available for software to write to.
 }
 
 Nvme_Property_Memory_Map :: struct {
@@ -568,6 +569,12 @@ reset_controller :: (nvme: *Nvme_Controller) {
 enqueue_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Queue_Entry) {
     trace(.nvme_enqueue, sq_tail, queue.next_command_id);
 
+    #no_aoc {
+        while sq_tail == queue.last_seen_sqhd - 1 {
+            pause(); // Todo: This blocks the thread that made the transfer request. Really we should enqueue commands on the "completion_thread" to prevent this.
+        }
+    }
+
     sq[sq_tail] = command;
     sq[sq_tail].CID__command_identifier = queue.next_command_id;
 
@@ -590,6 +597,8 @@ begin_dequeueing_command :: (using queue: *Nvme_Command_Queue) -> *Nvme_Completi
         // This command has not finished yet.
         return null;
     }
+
+    queue.last_seen_sqhd = cqe.SQHD__sq_head_pointer;
 
     return cqe;
 }

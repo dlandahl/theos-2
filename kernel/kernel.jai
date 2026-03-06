@@ -338,7 +338,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        disk_test(sata_sd);
+        disk_test(nvme_sd);
 
         {
             set_flag(.stopped, get_current_task());

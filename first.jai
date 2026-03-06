@@ -334,13 +334,13 @@ format_disk :: () -> bool {
     bootloader := read_entire_file(".build/bootx64.efi");
     kernel     := read_entire_file(".build/kernel");
 
-    fat_filesystem_size :: 0xa0_0000; // 10 Meg
-    disk_image_size     :: fat_filesystem_size + 0x20_0000; // Add two megabytes for alignment and partition table.
+    filesystem_size :: 0xa0_0000; // 10 Meg
+    disk_image_size :: filesystem_size + 0x20_0000; // Add two megabytes for alignment and partition table.
 
     memory_buffer := NewArray(disk_image_size, u8);
 
     disk      := format_gpt_disk_image(memory_buffer);
-    partition := create_partition(disk, PARTITION_TYPE_EFI_BASIC_DATA, "UEFI", 2048, fat_filesystem_size / disk.sector_size);
+    partition := create_partition(disk, PARTITION_TYPE_EFI_BASIC_DATA, "UEFI", 2048, filesystem_size / disk.sector_size);
 
     fat16     := fat16_create_file_system(partition, set_volume_label="THEOS BOOT");
     root      := fat16_get_root_directory(*fat16);
