@@ -928,6 +928,7 @@ Transfer_Request :: struct {
     }
 
     semaphore: *Semaphore;
+    successful: bool;
 }
 
 do_storage_transfer :: (device: Storage_Device, transfer: Transfer_Request) {

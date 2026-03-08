@@ -82,7 +82,7 @@ Trace_Entry :: struct {
         trace_tag_mask: u32; // Set a bit to stop events with that tag from being recorded.
     }
 
-    init_tracing :: () #no_context {
+    init_tracing :: () {
         using global.trace_state;
 
         for* trace_buffers {

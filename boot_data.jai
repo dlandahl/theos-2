@@ -74,15 +74,16 @@ Large_Page :: struct {
         ALLOCATED;
         DISK_CACHE;
         RESERVED;
-    };
+    }
 
     // ------- Disk cache entry -------
-    more_recently_used: s32;
-    less_recently_used: s32;
-
+    pinned: s64;
+    more_recent: s32;
+    less_recent: s32;
 
     // ------- Disk cache hash table entry -------
     lru_entry: s32; // The 2MB disk block with the same index as this page, where is it in the cache
+    disk_id:   s32;
 
     // At the moment, the hash function of the LRU cache is f(x)=x mod N, where N is the number of large pages.
     // Collisions are resolved by evicting the old block.

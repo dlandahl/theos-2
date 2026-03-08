@@ -39,6 +39,7 @@ Kernel_Globals :: struct {
     debug_info_memory_pool: Pool;
 
     large_page_allocator: Large_Page_Allocator;
+    disk_cache_lock: Spinlock;
 
     physical_block_allocator: Block_Allocator;
     virtual_block_allocator: Block_Allocator;
@@ -179,42 +180,42 @@ kernel_entry :: () #no_context {
         }
     }
 
-    physical_heap_size: u64 = 0x2000_0000;
-
-    for region: global.memory_map {
-        if !it_index continue;
-
-        region_size          := region.pages * 4096;
-        required_region_size := physical_heap_size + 0x40_0000;
-        // Region might span pages on both ends, and we need all pages fully contained in the region, because we're reserving memory for the block allocator at page granularity.
-
-        if region_size >= required_region_size && region.type == .FREE {
-
-            first_page  := (region.address + 0x1f_ffff) / 0x20_0000; // First page that's completely within the region.
-            total_pages := physical_heap_size / 0x20_0000;
-
-            for first_page..first_page+total_pages-1 {
-                page := *global.large_pages[it];
-
-                if page.state != .FREE bluescreen();
-
-                page.state = .RESERVED;
-            }
-
-            init_block_allocator(*global.physical_block_allocator, region.address, physical_heap_size, 0x10);
-            break;
-        }
-    }
-
-    if global.physical_block_allocator.base_address == 0 {
-        write_string("Could not find enough memory for the kernel.\n");
-        while true #asm { cli; hlt; }
-    }
-
-    // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
-    init_tracing();
-
     push_context {
+        physical_heap_size: u64 = 0x2000_0000;
+
+        for region: global.memory_map {
+            if !it_index continue;
+
+            region_size          := region.pages * 4096;
+            required_region_size := physical_heap_size + 0x40_0000;
+            // Region might span pages on both ends, and we need all pages fully contained in the region, because we're reserving memory for the block allocator at page granularity.
+
+            if region_size >= required_region_size && region.type == .FREE {
+
+                first_page  := (region.address + 0x1f_ffff) / 0x20_0000; // First page that's completely within the region.
+                total_pages := physical_heap_size / 0x20_0000;
+
+                for first_page..first_page+total_pages-1 {
+                    page := *global.large_pages[it];
+
+                    if page.state != .FREE bluescreen();
+
+                    page.state = .RESERVED;
+                }
+
+                init_block_allocator(*global.physical_block_allocator, region.address, physical_heap_size, 0x10);
+                break;
+            }
+        }
+
+        if global.physical_block_allocator.base_address == 0 {
+            // Can't really assert here because font and debug info (for stack trace) is not available yet. Maybe assert should just detect that.
+            write_string("Could not find enough memory for the kernel.\n");
+            while true #asm { cli; hlt; }
+        }
+
+        // Let's init tracing as early as possible (as soon as physical memory allocation is available) so we can trace whatever we eventually want.
+        init_tracing();
 
         {
             // Put a virtual memory heap after the direct mapping.
@@ -307,6 +308,10 @@ kernel_entry :: () #no_context {
         sata_sd: Storage_Device;
 
         for *global.pci_devices {
+            if it.vendor_id == 0x10ec {
+                log("Realtek card: %", hex(it.device_id));
+            }
+
             if it.combined_class_code == {
               case .SATA_CONTROLLER;
                 sata, success := init_sata_controller(it);
@@ -841,12 +846,15 @@ Large_Page_Allocator :: struct {
     lru_most:  s32  = LRU_TAIL;
 
     spinlock: Spinlock;
+    disk_cache_spinlock: Spinlock;
 }
 
-allocate_large_page :: () -> u64 #no_context {
+#run log("Large page array usage ratio: %",  size_of(Large_Page) / (2.0*1024*1024));
+
+allocate_large_page :: () -> u64 {
 
     using global.large_page_allocator;
-    Scoped_Acquire(*spinlock);
+    acquire(*spinlock);
 
     if freelist != FREELIST_TAIL {
         // Todo: This memory needs to be zeroed, as there may be firmware/bootloader stuff there.
@@ -856,6 +864,7 @@ allocate_large_page :: () -> u64 #no_context {
         desc.state = .ALLOCATED;
         freelist = desc.list_next;
 
+        release(*spinlock);
         return cast(u64) address;
     }
 
@@ -870,19 +879,32 @@ allocate_large_page :: () -> u64 #no_context {
         }
 
         desc.state = .ALLOCATED;
+        release(*spinlock);
         return cast(u64) address;
     }
 
     // There are no free large pages, evict one from the disk cache.
+    release(*spinlock);
+    acquire(*global.disk_cache_lock);
+
     if lru_least != LRU_TAIL {
         desc := *global.large_pages[lru_least];
+
+        if (desc.state != .DISK_CACHE) bluescreen();
+        if desc.pinned > 0 {
+            // Todo.
+        }
+
         desc.state = .ALLOCATED;
 
         address := cast(u64) lru_least * 0x20_0000;
         evict_disk_cache_entry(address);
 
+        release(*global.disk_cache_lock);
         return address;
     }
+
+    release(*global.disk_cache_lock);
 
     // There's no free memory. Todo: Swap to disk.
     bluescreen();
@@ -890,15 +912,15 @@ allocate_large_page :: () -> u64 #no_context {
 }
 
 release_large_page :: (address: u64) {
-    using global;
+    using global.large_page_allocator;
 
-    acquire(*large_page_allocator.spinlock);
+    acquire(*spinlock);
 
-    index := cast(s32)(address / 0x20_0000);
-    large_pages[index].list_next = cast(s32)large_page_allocator.clearlist;
-    large_page_allocator.clearlist = index;
+    index := cast(s32) (address / 0x20_0000);
+    global.large_pages[index].list_next = cast(s32) clearlist;
+    clearlist = index;
 
-    release(*large_page_allocator.spinlock);
+    release(*spinlock);
 }
 
 clear_large_page :: () -> queue_empty: bool {
@@ -934,11 +956,14 @@ clear_large_page :: () -> queue_empty: bool {
     return false;
 }
 
-// These procs do a lot of hardcoded linked-list manipulation. It would be good to
-// move that into dedicated structs and procedures.
 
-find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
+
+
+find_or_add_disk_cache_entry :: (disk_address: u64) -> u64, was_present: bool {
     using global;
+
+    acquire(*disk_cache_lock);
+    defer release(*disk_cache_lock);
 
     block_index := disk_address / 0x20_0000;
     block_hash  := block_index % cast(u64) large_pages.count;
@@ -946,21 +971,23 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     hash_table_entry := *large_pages[block_hash];
     lru_entry        := *large_pages[hash_table_entry.lru_entry];
 
-    Cache_Page :: (page: u64) #expand {
-        page_index := cast(s32, page / 0x20_0000);
+    Cache_Page :: (page_base: u64) #expand {
+        // Todo: Cached entry needs to identify the disk from which the block is cached.
+        page_index := cast(s32, page_base / 0x20_0000);
 
         lru_entry := *large_pages[page_index];
         lru_entry.state = .DISK_CACHE;
+        lru_entry.pinned += 1;
 
         `hash_table_entry.lru_current_block = `block_index;
         `hash_table_entry.lru_entry = page_index;
 
         if large_page_allocator.lru_most != LRU_TAIL {
-            large_pages[large_page_allocator.lru_most].more_recently_used = page_index;
+            large_pages[large_page_allocator.lru_most].more_recent = page_index;
         }
 
-        lru_entry.less_recently_used = large_page_allocator.lru_most;
-        lru_entry.more_recently_used = LRU_TAIL;
+        lru_entry.less_recent = large_page_allocator.lru_most;
+        lru_entry.more_recent = LRU_TAIL;
         large_page_allocator.lru_most = page_index;
 
         if large_page_allocator.lru_least == LRU_TAIL {
@@ -970,67 +997,70 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
 
     if lru_entry.state != .DISK_CACHE {
         // The disk block is not in the cache.
-        page := allocate_large_page();
-        Cache_Page(page);
+        page_base := allocate_large_page();
+        Cache_Page(page_base);
 
-        return page;
+        return page_base, was_present = false;
     }
 
     if hash_table_entry.lru_current_block != block_index {
         // The cache entry is aliased to a different disk block. Evict it because we're more recent.
-        page := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
-        evict_disk_cache_entry(page);
-        Cache_Page(page);
+        // Todo: What if it's pinned.
 
-        return page;
+        page_base := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+        evict_disk_cache_entry(page_base);
+        Cache_Page(page_base);
+
+        return page_base, was_present = false;
     }
 
     // The disk block is already in the cache.
     page_index := hash_table_entry.lru_entry;
-    page := cast(u64) page_index * 0x20_0000;
+    page_base := cast(u64) page_index * 0x20_0000;
 
     // Move the page to the front of the list.
-    if lru_entry.more_recently_used != LRU_TAIL {
+    if lru_entry.more_recent != LRU_TAIL {
 
-        more := *large_pages[lru_entry.more_recently_used];
-        more.less_recently_used = lru_entry.less_recently_used;
+        more := *large_pages[lru_entry.more_recent];
+        more.less_recent = lru_entry.less_recent;
 
-        if lru_entry.less_recently_used != LRU_TAIL {
-            less := *large_pages[lru_entry.less_recently_used];
-            less.more_recently_used = lru_entry.more_recently_used;
+        if lru_entry.less_recent != LRU_TAIL {
+            less := *large_pages[lru_entry.less_recent];
+            less.more_recent = lru_entry.more_recent;
         }
 
-        lru_entry.less_recently_used = large_page_allocator.lru_most;
-        lru_entry.more_recently_used = LRU_TAIL;
+        lru_entry.less_recent = large_page_allocator.lru_most;
+        lru_entry.more_recent = LRU_TAIL;
 
-        large_pages[large_page_allocator.lru_most].more_recently_used = page_index;
+        large_pages[large_page_allocator.lru_most].more_recent = page_index;
         large_page_allocator.lru_most = page_index;
     }
 
-    return page;
+    return page_base, was_present = true;
 }
 
-evict_disk_cache_entry :: (page: u64) #no_context {
+evict_disk_cache_entry :: (page_base: u64) {
     using global;
+    assert(is_held(disk_cache_lock));
 
-    page_index := page / 0x20_0000;
+    page_index := page_base / 0x20_0000;
     lru_entry  := *large_pages[page_index];
 
-    if lru_entry.more_recently_used != LRU_TAIL {
-        more := *large_pages[lru_entry.more_recently_used];
-        more.less_recently_used = lru_entry.less_recently_used;
+    if lru_entry.more_recent != LRU_TAIL {
+        more := *large_pages[lru_entry.more_recent];
+        more.less_recent = lru_entry.less_recent;
     }
 
-    if lru_entry.less_recently_used != LRU_TAIL {
-        less := *large_pages[lru_entry.less_recently_used];
-        less.more_recently_used = lru_entry.more_recently_used;
+    if lru_entry.less_recent != LRU_TAIL {
+        less := *large_pages[lru_entry.less_recent];
+        less.more_recent = lru_entry.more_recent;
     }
 
     if page_index == cast,no_check(u64) large_page_allocator.lru_least {
-        large_page_allocator.lru_least = lru_entry.more_recently_used;
+        large_page_allocator.lru_least = lru_entry.more_recent;
     }
 
-    // Todo: actually flush the data
+    // Todo: actually flush the data.
 }
 
 
@@ -1332,7 +1362,7 @@ Block_Allocator :: struct {
     spinlock: Spinlock;
 }
 
-init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64, alignment := 0) #no_context {
+init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64, alignment := 0) {
     // For bootstrapping, use a large page to hold block descriptors
     page := allocate_large_page();
 
@@ -2203,15 +2233,26 @@ Spinlock :: struct (lock_type := Lock_Type.PREEMPT) {
     next_ticket: u16;
 
     #if DEBUG_SPINLOCKS {
-        held_by: *X64_Core;
+        held_by: *X64_Core; // Todo: Probably make this the integer ID of the core.
     }
 }
 
 is_held :: (lock: Spinlock) -> bool #no_context {
-    return (lock.now_serving != lock.next_ticket) && (lock.held_by == get_current_core());
+    #if DEBUG_SPINLOCKS {
+        return (lock.now_serving != lock.next_ticket) && (lock.held_by == get_current_core());
+    }
+
+    return true;
 }
 
 acquire :: (lock: *Spinlock) #no_context {
+    #if DEBUG_SPINLOCKS {
+        if lock.held_by == get_current_core() {
+            write_string("Reentered spinlock.");
+            bluescreen();
+        }
+    }
+
     #if lock.lock_type == {
         case .PREEMPT; preempt_disable();
         case .IRQ;     irq_disable();
@@ -2682,7 +2723,7 @@ fill_random :: (buffer: []u8) {
 
 #import "Basic";
 #import "Machine_X64";
-using,except(byte_swap_in_place) _ :: #import "Bit_Operations";
+using,except(byte_swap_in_place) _ :: #import "Bit_Operations"; // We have our own byte_swap_in_place that does structs.
 #import "Hash_Table";
 #import "String";
 #import "Random";
@@ -2731,7 +2772,7 @@ Curve25519 :: #import "Curve25519";
 #load "pci_express.jai";
 #load "multitasking.jai";
 #load "time.jai";
-// #load "file_system.jai";
+#load "file_system.jai";
 #load "nvme.jai";
 #load "sata.jai";
 
