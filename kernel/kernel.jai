@@ -2246,13 +2246,6 @@ is_held :: (lock: Spinlock) -> bool #no_context {
 }
 
 acquire :: (lock: *Spinlock) #no_context {
-    #if DEBUG_SPINLOCKS {
-        if lock.held_by == get_current_core() {
-            write_string("Reentered spinlock.");
-            bluescreen();
-        }
-    }
-
     #if lock.lock_type == {
         case .PREEMPT; preempt_disable();
         case .IRQ;     irq_disable();

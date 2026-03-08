@@ -263,6 +263,7 @@ schedule_tasks :: () {
 
         // We could set it up so the idle task's scheduling quantum is set to INFINITE.
         if !is_idle && next.remaining_quantum < shortest_time && next.remaining_quantum > 0 {
+            // Todo: This will run the scheduler even if no one's on the run queue.
             shortest_time = next.remaining_quantum;
             trace(.resched_by_quantum, to_milliseconds(shortest_time));
         }

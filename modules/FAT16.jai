@@ -419,7 +419,7 @@ erase_cluster_chain :: (image: *Fat16_File_System, cluster: u16) {
 
         if old_value >= 0xfff8 return;
 
-        next = image.file_allocation_table[old_value];
+        next = old_value - 2;
     }
 }
 

@@ -18,7 +18,7 @@ Nvme_Controller :: struct {
 
     initialized: bool;
 
-    active_transfers: List_Node(Nvme_Transfer_Metadata);
+    active_transfers: [..] Nvme_Transfer_Metadata;
     metadata_lock: Spinlock;
 }
 
@@ -40,16 +40,15 @@ nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
     remainder       := block_count % max_blocks;
 
 
-    metadata := New(Nvme_Transfer_Metadata,, global.small_objects);
+    metadata: Nvme_Transfer_Metadata;
     metadata.prp_pages.allocator = temp;
 
     metadata.first_command   = nvme.io_queue.next_command_id;
     metadata.total_commands  = full_transfers + cast(int) (remainder > 0);
     metadata.semaphore = request.semaphore;
 
-    // Could probably make this a singly linked list that doesn't need locks.
     acquire(*nvme.metadata_lock);
-    list_append(*nvme.active_transfers, *metadata.list);
+    array_add(*nvme.active_transfers, metadata);
     release(*nvme.metadata_lock);
 
     memory_base := cast(*void) request.physical_memory_address + DIRECT_MAPPING_BASE;
@@ -226,8 +225,6 @@ init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
 
         nvme.io_queue.async_completion_enabled = true;
     }
-
-    list_init(*nvme.active_transfers);
 
     thread := create_task(completion_thread, name = "NVMe");
     thread.user_data = nvme;
@@ -570,7 +567,7 @@ enqueue_command :: (using queue: *Nvme_Command_Queue, command: Nvme_Submission_Q
     trace(.nvme_enqueue, sq_tail, queue.next_command_id);
 
     #no_aoc {
-        while sq_tail == queue.last_seen_sqhd - 1 {
+        while (sq_tail == queue.last_seen_sqhd - 1) || (sq_tail == 0 && queue.last_seen_sqhd == sq.count-1) {
             pause(); // Todo: This blocks the thread that made the transfer request. Really we should enqueue commands on the "completion_thread" to prevent this.
         }
     }
@@ -610,8 +607,6 @@ finish_dequeueing_command :: (using queue: *Nvme_Command_Queue) {
         cq_head = 0;
         current_phase = !current_phase;
     }
-
-    for 1..10_000 #asm {pause;}
 
     memory_fence();
     head_doorbell.* = cq_head;
@@ -677,8 +672,6 @@ Nvme_Transfer_Metadata :: struct {
     first_command:       int;
     total_commands:      int;
     completed_commands:  int;
-
-    list: List_Node(#this);
 }
 
 #program_export
@@ -730,8 +723,6 @@ completion_thread :: () {
                 it.completed_commands += 1;
 
                 if it.completed_commands == it.total_commands {
-                    list_remove(*it.list);
-
                     if it.semaphore {
                         signal(it.semaphore);
                     }
@@ -741,7 +732,7 @@ completion_thread :: () {
                     }
 
                     array_free(it.prp_pages);
-                    free(it,, global.small_objects);
+                    remove it;
                 }
 
                 break;

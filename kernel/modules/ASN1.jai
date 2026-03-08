@@ -54,7 +54,7 @@ read_length :: (parser: *Asn1_Parser) -> int {
     if parser.error return 0;
 
     parse_error :: () #expand {
-        `parser.error = true;
+        parser.error = true;
         `return 0;
     }
 
@@ -81,9 +81,12 @@ read_length :: (parser: *Asn1_Parser) -> int {
     }
 
     cursor += bytes;
-    return length;
 
-    // Todo error: return parser.cursor + length.* <= parser.data.count;
+    if parser.cursor + length > parser.data.count {
+        parse_error();
+    }
+
+    return length;
 }
 
 read_value :: (parser: *Asn1_Parser, expected_tag: Asn1_Tag) -> [] u8 {
