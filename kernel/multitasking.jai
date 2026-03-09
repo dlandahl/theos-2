@@ -147,6 +147,11 @@ core_begin_multitasking :: () {
         current_task.priority = .Normal;
     }
 
+    current_task.trace_name = add_trace_string(current_task.name);
+
+    trace(.create_task, current_task.id, current_task.trace_name);
+
+
     for *waiting_to_run list_init(it);
     list_init(*sleeping);
 
@@ -233,6 +238,8 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task.user_data = user_data;
     new_task.priority = .Normal;
     new_task.trace_name = add_trace_string(name);
+
+    trace(.create_task, new_task.id, new_task.trace_name);
 
     return new_task;
 }

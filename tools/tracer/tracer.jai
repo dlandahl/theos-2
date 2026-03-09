@@ -38,8 +38,17 @@ Trace_Data :: struct {
     num_cores: int;
     tsc_frequency: u64;
 
+    string_table: *u8;
+
     threads: [..] string;
     entries: [] Trace_Entry;
+}
+
+get_string :: (id: Trace_String) -> string {
+    s: string;
+    s.data  = trace_data.string_table + cast(int) id;
+    s.count = c_style_strlen(s.data);
+    return s;
 }
 
 parse_trace_data :: (_trace_file: string) {
@@ -61,27 +70,29 @@ parse_trace_data :: (_trace_file: string) {
     trace_data.num_cores     = header.num_cpu_cores;
     trace_data.tsc_frequency = header.tsc_frequency;
 
-    array_resize(*trace_data.threads, header.num_threads+1);
-    trace_data.threads[0] = "Early Boot";
+    array_add(*trace_data.threads, "Early Boot");
 
-    string_table := *header.string_table;
+    trace_data.string_table = *header.string_table;
 
-    for 0..header.num_threads-1 {
-        entry := cast(*Trace_Header.String_Table_Entry)string_table;
-
-        s: string;
-        s.data = *entry.data;
-        s.count = entry.name_length;
-
-        trace_data.threads[entry.thread_id] = s;
-        assert(entry.thread_id != 0);
-        log("Found thread %. (id %)", s, entry.thread_id);
-
-        string_table = *entry.data + entry.name_length;
-    }
-
-    trace_data.entries.data = string_table;
+    trace_data.entries.data = *header.string_table + header.string_table_size;
     trace_data.entries.count = header.num_trace_entries;
+
+    for trace_data.entries {
+        // Detect all threads that were created.
+        if it.tag != .create_task continue;
+
+        thread_id := cast(int)          it.user[0];
+        string_id := cast(Trace_String) it.user[1];
+
+        if trace_data.threads.count <= thread_id {
+            array_resize(*trace_data.threads, thread_id + 1);
+        }
+
+        name := get_string(string_id);
+        trace_data.threads[thread_id] = name;
+
+        log("Found thread % (id %).", name, thread_id); 
+    }
 
     array_resize(*show_hide_settings.cores,   trace_data.num_cores);
     array_resize(*show_hide_settings.threads, trace_data.threads.count);
@@ -573,13 +584,14 @@ draw_one_frame :: (dt: float) {
             }
 
             // Display tag-specific explanation of what's going on with this trace entry.
+            text = "";
 
             if it.tag == {
               case .scheduling_timer;
                 text = tprint("Preempt disable count: %", it.user[0]);
 
-              case .nvme_FAILURE; #through;
-              case .nvme_SUCCESS; #through;
+              case .nvme_failure; #through;
+              case .nvme_success; #through;
               case .nvme_enqueue;
                 text = tprint("Queue index: %", it.user[0]);
 
@@ -613,9 +625,15 @@ draw_one_frame :: (dt: float) {
                 text = tprint("Task % wakes in %ms", trace_data.threads[it.user[1]], it.user[0]);
               case .resched_by_quantum;
                 text = tprint("Remaining quantum %ms", it.user[0]);
+
+              case .message;
+                text = get_string(cast(Trace_String) it.user[0]);
+
+              case .create_task;
+                text = get_string(cast(Trace_String) it.user[1]);
             }
 
-            label(label_rect, text, lt);
+            if text label(label_rect, text, lt);
         }
 
         end_scrollable_region(state, row_rect.x, row_rect.y, *scroll_position);
@@ -829,7 +847,7 @@ update_highlighted_trace_entries :: () {
             }
 
           case .nvme_enqueue;
-            if (other.tag == .nvme_SUCCESS || other.tag == .nvme_FAILURE) && other.user[1] == sel.user[1] {
+            if (other.tag == .nvme_success || other.tag == .nvme_failure) && other.user[0] == sel.user[0] {
                 array_add(*highlighted_trace_entries, it);
                 break;
             }
@@ -850,9 +868,9 @@ update_highlighted_trace_entries :: () {
                 }
             }
 
-          case .nvme_SUCCESS; #through;
-          case .nvme_FAILURE;
-            if other.tag == .nvme_enqueue && other.user[1] == sel.user[1] {
+          case .nvme_success; #through;
+          case .nvme_failure;
+            if other.tag == .nvme_enqueue && other.user[0] == sel.user[0] {
                 array_add(*highlighted_trace_entries, it);
                 break;
             }

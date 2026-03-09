@@ -769,6 +769,7 @@ fat16_print_directory_tree :: (root: Fat16_Tree_Cursor) {
     }
 
     stack: [..] Dir_Stack_Entry;
+    stack.allocator = temp;
 
     root_stack_entry := array_add(*stack);
     root_stack_entry.cursor = root;

@@ -2154,6 +2154,24 @@ write_string_builder_to_serial_port :: (using builder: *String_Builder, serial_p
 kernel_write_string :: (text: string) #no_context {
     serial_out(text, *global.COM1);
     draw_text(text);
+
+    s: string;
+    s.data = text.data;
+    s.count = 0;
+
+    for cast([]u8) text {
+        if it == #char "\n" || it_index == text.count-1 {
+            if s.count != 0 {
+                trace(.message, add_trace_string(s));
+            }
+
+            s.data = text.data + it_index + 1;
+            s.count = 0;
+            continue;
+        }
+
+        s.count += 1;
+    }
 }
 
 

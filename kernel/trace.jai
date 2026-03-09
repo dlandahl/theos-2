@@ -13,6 +13,7 @@ TRACE_ENTRIES_PER_BUFFER :: 0x20_0000 / size_of(Trace_Entry);
 Trace_Tag :: enum u16 {
     context_switch;
     start_task;
+    create_task;
     scheduling_timer;
     syscall;
     small_object_alloc;
@@ -24,15 +25,15 @@ Trace_Tag :: enum u16 {
     irq_disable;
     irq_restore;
     nvme_enqueue;
-    nvme_SUCCESS;
-    nvme_FAILURE;
+    nvme_success;
+    nvme_failure;
     resched_by_wakeup;
     resched_by_quantum;
     section_break;
-    count;
+    message;
 }
 
-#assert Trace_Tag.count <= 32; // Don't accidentally run out of slots in the trace tag mask.
+#assert enum_highest_value(Trace_Tag) <= 32; // Don't accidentally run out of slots in the trace tag mask.
 
 Trace_Header :: struct {
     tsc_frequency:     u64;
@@ -48,7 +49,7 @@ KERNEL_TRACE_MAGIC_STRING :: "kerneltrace";
 
 Trace_Entry :: struct {
     tsc:     u64;
-    task_id: Trace_String;
+    task_id: u32;
     core_id: u16;
     tag:     Trace_Tag;
 
@@ -125,18 +126,16 @@ Trace_String :: #type,distinct s32;
             return;
         }
 
-        task := get_current_task();
-
         entry: Trace_Entry;
         entry.tsc = rdtsc();
-        entry.task_id = ifx task then task.trace_name else -1;
+        entry.task_id = cast(u32)get_task_id();
         entry.core_id = cast(u16)get_core_id();
         entry.tag  = tag;
 
-        if (user_data.count > entry.user.count) bluescreen(); // Todo: Would like to compile-time check this.
-
         for user_data {
-            if (it.type.runtime_size > size_of(u64)) bluescreen();
+            if it.type.runtime_size > size_of(u64) bluescreen();
+            if it_index > entry.user.count         bluescreen();
+
             memcpy(*entry.user[it_index], it.value_pointer, it.type.runtime_size);
         }
 
@@ -148,12 +147,12 @@ Trace_String :: #type,distinct s32;
         trace_buffers[buffer_index].data[index_in_buffer] = entry;
     }
 
-    add_trace_string :: (value: string) -> Trace_String {
+    add_trace_string :: (value: string) -> Trace_String #no_context {
         using global.trace_state;
 
         offset := fetch_add(*string_table_size, value.count + 1);
         memcpy(*string_table[offset], value.data, value.count);
-        string_table[offset + value.count] = #char "0";
+        string_table[offset + value.count] = 0;
 
         return cast(Trace_String) offset;
     }
@@ -209,6 +208,7 @@ Trace_String :: #type,distinct s32;
 
     write_trace_buffers :: () -> int {
         builder: String_Builder;
+        init_string_builder(*builder, 0x1_0000); // Use large buffers as the traces can get really big.
 
         count := serialize_trace_buffers(*builder);
         write_string_builder_to_serial_port(*builder, *global.COM2);

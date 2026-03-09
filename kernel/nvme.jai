@@ -228,7 +228,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
 
     thread := create_task(completion_thread, name = "NVMe");
     thread.user_data = nvme;
-    put_task_on_core(thread, *global.processor_cores[3]);
+    put_task_on_core(thread, *global.processor_cores[1]);
 
     sd: Storage_Device;
     sd.data_pointer = nvme;
@@ -618,7 +618,7 @@ report_errors :: (cqe: *Nvme_Completion_Queue_Entry) {
     clear_bit(*status, .PHASE);
 
     if status != 0 {
-        trace(.nvme_FAILURE, cqe.CID__command_identifier);
+        trace(.nvme_failure, cqe.CID__command_identifier);
 
         ps := push_print_style();
         ps.use_newlines_if_long_form = true;
@@ -627,7 +627,7 @@ report_errors :: (cqe: *Nvme_Completion_Queue_Entry) {
         s := to_string(status,, temp);
         log_error("Command failed with status: %", s);
     } else {
-        trace(.nvme_SUCCESS, cqe.CID__command_identifier);
+        trace(.nvme_success, cqe.CID__command_identifier);
     }
 }
 

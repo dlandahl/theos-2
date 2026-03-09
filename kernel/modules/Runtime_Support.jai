@@ -158,7 +158,7 @@ __array_bounds_check_fail :: (index: s64, limit: s64, line_number: s64, filename
     write_number(line_number, to_standard_error = true);
     write_string(".\n", to_standard_error = true);
 
-    my_panic();
+    #asm { int3; }
 }
 
 __cast_bounds_check_fail :: (pre_value: s64, pre_flags: u32, post_value: s64, post_flags: u32, fatal: u8, line_number: s64, filename: *u8) #no_context {
@@ -212,7 +212,7 @@ __cast_bounds_check_fail :: (pre_value: s64, pre_flags: u32, post_value: s64, po
     write_number(line_number, to_standard_error = true);
     write_string(".\n", to_standard_error = true);
 
-    if fatal my_panic();
+    if fatal #asm { int3; }
 }
 
 __null_pointer_check_fail :: (index: s64, line_number: s64, filename: *u8) #no_context {
@@ -232,7 +232,7 @@ __null_pointer_check_fail :: (index: s64, line_number: s64, filename: *u8) #no_c
     write_number(line_number, to_standard_error = true);
     write_string(".\n", to_standard_error = true);
 
-    my_panic();
+    #asm { int3; }
 }
 
 __arithmetic_overflow :: (left: s64, right: s64, type_code: u16, line_number: s64, filename: *u8) #no_context #no_aoc {
@@ -263,7 +263,7 @@ __arithmetic_overflow :: (left: s64, right: s64, type_code: u16, line_number: s6
     write_nonnegative_number(size, to_standard_error = true);
     write_string(", but the result does not fit into this type.\n", to_standard_error = true);
 
-    if fatal my_panic();
+    if fatal #asm { int3; }
 }
 
 // write_string is implemented in the main program.
@@ -290,10 +290,6 @@ write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context
 
 #scope_module;
 
-my_panic :: () #no_context {
-    debug_break();
-}
-
 __panic_due_to_runtime_call_of_compile_time_procedure :: (line_number: s64, filename: *u8) #no_context {
     write_string("Error: Attempt to call a compile-time procedure at runtime. The location of the call was: ", to_standard_error = true);
     write_string(to_string(filename), to_standard_error = true);
@@ -301,7 +297,7 @@ __panic_due_to_runtime_call_of_compile_time_procedure :: (line_number: s64, file
     write_number(line_number, to_standard_error = true);
     write_string(".\n", to_standard_error = true);
 
-    my_panic();
+    #asm { int3; }
 }
 
 #if DEFINE_INITIALIZATION {
@@ -418,7 +414,7 @@ one_time_init :: (synch_value: *s32, to_insert: Code) #expand {
           case 0;
             #insert to_insert;
 
-            if !compare_and_swap(synch_value, 1, 2)  debug_break();  // Should not happen!
+            if !compare_and_swap(synch_value, 1, 2)  #asm {int 3; }  // Should not happen!
           case 1;
             // Maybe some exponential fall offy thing here?
             #if CPU == .X64 {
