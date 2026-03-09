@@ -337,13 +337,17 @@ kernel_entry :: () #no_context {
         simple_create_thread(() {
             get_current_task().priority = .High;
 
-            sleep(10, .seconds);
+            sleep(5, .seconds);
             log("\n=== Writing trace buffers. ===\n\n");
             trace_event_count := write_trace_buffers();
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        disk_test(nvme_sd);
+        for 1..25 {
+            log("%", it);
+            disk_test(nvme_sd);
+            trace(.section_break);
+        }
 
         {
             set_flag(.stopped, get_current_task());
@@ -354,7 +358,7 @@ kernel_entry :: () #no_context {
 
 disk_test :: (sd: Storage_Device) {
 
-    _, physical := allocate_page_aligned_physical_memory(0xa0_0000);
+    buffer_base, physical := allocate_page_aligned_physical_memory(0xa0_0000);
 
     buffer: string;
     buffer.data  = cast(*u8) physical + DIRECT_MAPPING_BASE;
@@ -387,9 +391,11 @@ disk_test :: (sd: Storage_Device) {
         fat16_write_file(root, "THEOS/TEST", text);
 
         trace: String_Builder;
+        init_string_builder(*trace, buffer_size = 0x1_0000);
         serialize_trace_buffers(*trace);
         fat16_write_file(root, "THEOS/TRACE", builder_to_string(*trace));
 
+        fat16_report_space(file_system);
         fat16_print_directory_tree(root);
         fat16_copy_fat_table(*file_system);
     }
@@ -404,6 +410,8 @@ disk_test :: (sd: Storage_Device) {
 
     end   := get_monotonic_time();
     log("Elapsed: %ms", to_milliseconds(end - start));
+
+    free_block(*global.physical_block_allocator, buffer_base);
 }
 
 
@@ -848,8 +856,6 @@ Large_Page_Allocator :: struct {
     spinlock: Spinlock;
     disk_cache_spinlock: Spinlock;
 }
-
-#run log("Large page array usage ratio: %",  size_of(Large_Page) / (2.0*1024*1024));
 
 allocate_large_page :: () -> u64 {
 
@@ -1430,7 +1436,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
             // We didn't use the whole block, make a new one and move the others over.
 
             if blocks.count >= max_block_descriptors-1 {
-                write_string("Block allocator out of block descriptors.");
+                write_string("Block allocator out of block descriptors.\n");
                 bluescreen();
             }
 
@@ -1454,7 +1460,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) 
 
     // If we get here there isn't a large enough free block.
 
-    write_string("Block allocator out of memory.");
+    write_string("Block allocator out of memory.\n");
     bluescreen();
     return 0;
 }
@@ -2208,9 +2214,9 @@ irq_restore :: () #no_context {
     trace(.irq_restore, core.irq_disable_count);
 
     if core.irq_disable_count == 0 {
-        #asm { sti; }
-
         maybe_reschedule();
+
+        #asm { sti; }
     }
 }
 

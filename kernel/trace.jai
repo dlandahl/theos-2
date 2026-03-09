@@ -77,6 +77,7 @@ Trace_Entry :: struct {
         trace_buffers: [4] *Trace_Buffer;
 
         current_index: int;
+        max_trace_entries: int;
 
         tracing_enabled: bool;
         trace_tag_mask: u32; // Set a bit to stop events with that tag from being recorded.
@@ -93,14 +94,16 @@ Trace_Entry :: struct {
             global.boot_data.trace_buffers[it_index] = page;
         }
 
+        max_trace_entries = trace_buffers.count * TRACE_ENTRIES_PER_BUFFER;
+
         tracing_enabled = true;
 
         // Disable the spammy tags by default.
         using Trace_Tag;
-        trace_tag_mask  |= (1 << irq_disable)  | (1 << irq_restore);
+        trace_tag_mask |= (1 << irq_disable)  | (1 << irq_restore);
         // trace_tag_mask |= (1 << nvme_enqueue) | (1 << nvme_SUCCESS) | (1 << nvme_FAILURE);
     }
-
+    
     trace :: (tag: Trace_Tag, user_data: ..Any) #no_context {
         using global.trace_state;
 
@@ -113,6 +116,13 @@ Trace_Entry :: struct {
         }
 
         index := fetch_add(*current_index, 1);
+
+        if index >= max_trace_entries {
+            // Since trace buffers use no synchronization, it's possible to see this message multiple times from different CPU cores if they race.
+            write_string("Warning: Trace buffer overflow.\n");
+            tracing_enabled = false;
+            return;
+        }
 
         entry: Trace_Entry;
         entry.tsc = rdtsc();
@@ -132,12 +142,6 @@ Trace_Entry :: struct {
         buffer_index    := index / TRACE_ENTRIES_PER_BUFFER;
         index_in_buffer := index % TRACE_ENTRIES_PER_BUFFER;
 
-        if buffer_index >= trace_buffers.count {
-            write_string("Warning: Trace buffer overflow.\n"); // Since trace buffers use no synchronization, it's possible to see this message multiple times from different CPU cores if they race.
-            tracing_enabled = false;
-            return;
-        }
-
         trace_buffers[buffer_index].data[index_in_buffer] = entry;
     }
 
@@ -147,7 +151,7 @@ Trace_Entry :: struct {
         // Because this procedure is to be called after completing a kernel test workload, we don't care about extra latency and it's more important to have as controlled an environment as possible.
         irq_disable();
 
-        last_entry_index := current_index;
+        last_entry_index := min(current_index, max_trace_entries - 1);
         thread_count := global.next_task_id-1;
 
         append(builder, KERNEL_TRACE_MAGIC_STRING);

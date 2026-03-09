@@ -209,7 +209,10 @@ main :: () {
                             selected_entry -= 1;
 
                             entry := trace_data.entries[selected_entry];
+
                             if trace_entry_should_be_hidden(entry) continue;
+                            if entry.tag == .section_break         continue;
+
                             update_highlighted_trace_entries();
                             break;
                         }
@@ -224,7 +227,10 @@ main :: () {
                             selected_entry += 1;
 
                             entry := trace_data.entries[selected_entry];
+
                             if trace_entry_should_be_hidden(entry) continue;
+                            if entry.tag == .section_break         continue;
+
                             update_highlighted_trace_entries();
                             break;
                         }

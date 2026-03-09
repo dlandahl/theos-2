@@ -11,13 +11,13 @@ Info_Node :: struct {
     created:  Apollo_Time;
     modified: Apollo_Time;
 
-    data_blocks:         [8] u64;
-    indirect_data_block:     u64;
+    data_blocks:         [8] s32;
+    indirect_data_block:     s32;
 }
 
 Directory_Entry :: struct {
-    inode_id:    s64;
-    name_length: s64;
+    inode_id:    s64 #align 4;
+    name_length: s32;
     name_bytes:  void;
 }
 
@@ -85,9 +85,9 @@ lookup_inode :: (fs: Mounted_File_System, identifier: int) -> *Info_Node {
     return *fs.inodes_block[identifier - 1];
 }
 
-allocate_block :: (fs: Mounted_File_System) -> u64 {
+allocate_block :: (fs: Mounted_File_System) -> s32 {
     index := allocate_bit_tree_slot(*fs.super_block.free_blocks);
-    return cast(u64) index;
+    return cast(s32) index;
 }
 
 create_child_inode :: (fs: Mounted_File_System, parent_id: int, child_name: string) -> *Info_Node {
@@ -123,13 +123,13 @@ create_child_inode :: (fs: Mounted_File_System, parent_id: int, child_name: stri
             }
 
             // Found a free entry. Is there enough space?
-            space_available := ifx entry.name_length else 0x20_0000 - offset - size_of(Directory_Entry);
+            space_available := ifx cast(s64) entry.name_length else 0x20_0000 - offset - size_of(Directory_Entry);
 
             if space_available >= child_name.count {
                 // Found a suitable directory entry.
 
                 entry.inode_id    = new_inode_id;
-                entry.name_length = child_name.count;
+                entry.name_length = cast(s32) child_name.count;
                 memcpy(*entry.name_bytes, child_name.data, child_name.count);
 
                 parent.modified = time_now;
@@ -150,8 +150,8 @@ get_child_inode :: (fs: Mounted_File_System, parent_id: int, child_name: string)
 
 
 
-pin_disk_block :: (fs: Mounted_File_System, block_index: u64, overwrite := false) -> *void {
-    disk_byte_address := fs.disk_offset_in_bytes + block_index * 0x20_0000;
+pin_disk_block :: (fs: Mounted_File_System, block_index: s32, overwrite := false) -> *void {
+    disk_byte_address := fs.disk_offset_in_bytes + cast(u64) block_index * 0x20_0000;
 
     page_base, was_present := find_or_add_disk_cache_entry(disk_byte_address);
 

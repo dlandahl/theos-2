@@ -352,6 +352,7 @@ format_disk :: () -> bool {
     fat16_write_file(root, "kernel", kernel);
     fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
 
+    fat16_report_space(fat16);
     fat16_print_directory_tree(root);
     fat16_copy_fat_table(*fat16);
 

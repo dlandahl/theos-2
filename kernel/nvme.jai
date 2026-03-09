@@ -40,15 +40,14 @@ nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
     remainder       := block_count % max_blocks;
 
 
-    metadata: Nvme_Transfer_Metadata;
+    acquire(*nvme.metadata_lock);
+    metadata := array_add(*nvme.active_transfers);
+
     metadata.prp_pages.allocator = temp;
 
     metadata.first_command   = nvme.io_queue.next_command_id;
     metadata.total_commands  = full_transfers + cast(int) (remainder > 0);
     metadata.semaphore = request.semaphore;
-
-    acquire(*nvme.metadata_lock);
-    array_add(*nvme.active_transfers, metadata);
     release(*nvme.metadata_lock);
 
     memory_base := cast(*void) request.physical_memory_address + DIRECT_MAPPING_BASE;
@@ -224,11 +223,12 @@ init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
         nvme.io_queue.head_doorbell = *nvme.doorbell_base + 3 * (4 << get(nvme.CAP__capabilities, .DSTRD__doorbell_stride));
 
         nvme.io_queue.async_completion_enabled = true;
+        nvme.io_queue.semaphore.counter_max = 1;
     }
 
     thread := create_task(completion_thread, name = "NVMe");
     thread.user_data = nvme;
-    put_task_on_core(thread, get_current_core());
+    put_task_on_core(thread, *global.processor_cores[3]);
 
     sd: Storage_Device;
     sd.data_pointer = nvme;
@@ -472,7 +472,7 @@ Nvme_LBA_Format :: struct {
         better   :: 0b01;
         good     :: 0b10;
         degraded :: 0b11;
-    };
+    }
 }
 
 #assert size_of(Nvme_Identify_Controller_Structure) == 78;
@@ -694,8 +694,8 @@ nvme_interrupt :: (stack: *void) #c_call {
 completion_thread :: () {
     log_category("NVMe");
 
-    task := get_current_task();
-    controller := cast(*Nvme_Controller) task.user_data;
+    task        := get_current_task();
+    controller  := cast(*Nvme_Controller) task.user_data;
 
     while true {
         wait_for(*controller.io_queue.semaphore);
@@ -712,11 +712,18 @@ completion_thread :: () {
             found_metadata := false;
             acquire(*controller.metadata_lock);
 
-            for *controller.active_transfers {
-                last_command := it.first_command + it.total_commands;
+            cid := completed.CID__command_identifier;
 
-                if it.first_command >  completed.CID__command_identifier  continue;
-                if last_command     <= completed.CID__command_identifier  continue;
+            for *controller.active_transfers {
+
+                last_command := it.first_command + it.total_commands;
+                last_command %= 0xffff;
+
+                if last_command > it.first_command {
+                    if !(it.first_command <= cid && cid < last_command) continue;
+                } else {
+                    if !(it.first_command <= cid || cid < last_command) continue;
+                }
 
                 found_metadata = true;
 
@@ -808,7 +815,7 @@ do_single_transfer :: (using nvme: *Nvme_Controller, starting_disk_block: u64, m
 
     command.NSID__namespace_id = nvme.nsid;
     command.SLBA__starting_lba = starting_disk_block;
-    command.NLB__number_of_logical_blocks = cast(u16)number_of_blocks-1;
+    command.NLB__number_of_logical_blocks = cast(u16) number_of_blocks - 1;
 
     enqueue_command(*nvme.io_queue, command);
 }
