@@ -8,6 +8,7 @@ Task_Info :: struct {
 
     id: int;
     name: string;
+    trace_name: Trace_String;
 
     entry_point: ();
     user_data: *void;
@@ -231,6 +232,7 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task.name = name;
     new_task.user_data = user_data;
     new_task.priority = .Normal;
+    new_task.trace_name = add_trace_string(name);
 
     return new_task;
 }

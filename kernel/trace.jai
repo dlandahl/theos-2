@@ -38,15 +38,8 @@ Trace_Header :: struct {
     tsc_frequency:     u64;
     num_trace_entries: int;
     num_cpu_cores:     int;
-    num_threads:       int;
+    string_table_size: int;
 
-    String_Table_Entry :: struct {
-        thread_id:   int;
-        name_length: int;
-        data: void;
-    }
-
-    // An array of structs containing the id and length of each thread name as integers, followed by the actual variable length name.
     string_table: void;
 }
 
@@ -55,16 +48,18 @@ KERNEL_TRACE_MAGIC_STRING :: "kerneltrace";
 
 Trace_Entry :: struct {
     tsc:     u64;
-    task_id: u32;
+    task_id: Trace_String;
     core_id: u16;
     tag:     Trace_Tag;
 
     // Meaning of these depends on the trace tag. Could maybe use the new tagged union to type check these.
-    user:        [2] u64;
+    user:        [2]  u64;
     stack_trace: [24] u32;
 }
 
-#assert size_of(Trace_Entry) == 128; // Two cache block.
+Trace_String :: #type,distinct s32;
+
+#assert size_of(Trace_Entry) == 128; // Two cache blocks.
 
 // This file will also be #load-ed by any trace analyser software we create, in which case we only need the above descriptions of the format.
 #if TRACE_INCLUDE_RUNTIME_CODE {
@@ -75,8 +70,11 @@ Trace_Entry :: struct {
         }
 
         trace_buffers: [4] *Trace_Buffer;
+        string_table:   []  u8;
 
         current_index: int;
+        string_table_size: int;
+
         max_trace_entries: int;
 
         tracing_enabled: bool;
@@ -96,6 +94,9 @@ Trace_Entry :: struct {
 
         max_trace_entries = trace_buffers.count * TRACE_ENTRIES_PER_BUFFER;
 
+        string_table.data  = cast(*u8) allocate_large_page() + DIRECT_MAPPING_BASE;
+        string_table.count = 0x20_0000;
+
         tracing_enabled = true;
 
         // Disable the spammy tags by default.
@@ -103,7 +104,7 @@ Trace_Entry :: struct {
         trace_tag_mask |= (1 << irq_disable)  | (1 << irq_restore);
         // trace_tag_mask |= (1 << nvme_enqueue) | (1 << nvme_SUCCESS) | (1 << nvme_FAILURE);
     }
-    
+
     trace :: (tag: Trace_Tag, user_data: ..Any) #no_context {
         using global.trace_state;
 
@@ -111,7 +112,7 @@ Trace_Entry :: struct {
             return;
         }
 
-        if (1 << tag) & trace_tag_mask > 0 {
+        if trace_tag_mask & (1 << tag) > 0 {
             return;
         }
 
@@ -124,9 +125,11 @@ Trace_Entry :: struct {
             return;
         }
 
+        task := get_current_task();
+
         entry: Trace_Entry;
         entry.tsc = rdtsc();
-        entry.task_id = cast(u32)get_task_id();
+        entry.task_id = ifx task then task.trace_name else -1;
         entry.core_id = cast(u16)get_core_id();
         entry.tag  = tag;
 
@@ -145,6 +148,16 @@ Trace_Entry :: struct {
         trace_buffers[buffer_index].data[index_in_buffer] = entry;
     }
 
+    add_trace_string :: (value: string) -> Trace_String {
+        using global.trace_state;
+
+        offset := fetch_add(*string_table_size, value.count + 1);
+        memcpy(*string_table[offset], value.data, value.count);
+        string_table[offset + value.count] = #char "0";
+
+        return cast(Trace_String) offset;
+    }
+
     serialize_trace_buffers :: (builder: *String_Builder) -> num_written: int {
         using global.trace_state;
 
@@ -152,7 +165,7 @@ Trace_Entry :: struct {
         irq_disable();
 
         last_entry_index := min(current_index, max_trace_entries - 1);
-        thread_count := global.next_task_id-1;
+        last_string_byte := string_table_size;
 
         append(builder, KERNEL_TRACE_MAGIC_STRING);
 
@@ -161,27 +174,16 @@ Trace_Entry :: struct {
             header.tsc_frequency     = global.tsc_frequency;
             header.num_trace_entries = last_entry_index;
             header.num_cpu_cores     = global.processor_cores.count;
-            header.num_threads       = thread_count;
+            header.string_table_size = string_table_size;
 
             append_by_pointer(builder, *header);
         }
 
         {
-            // Maybe we want to eventually switch to a data structure where readers don't need to get the lock.
-            acquire(*global.task_info_storage_spinlock);
-            for global.tasks {
-                if it.id > thread_count {
-                    continue;
-                }
-
-                e: Trace_Header.String_Table_Entry;
-                e.thread_id = it.id;
-                e.name_length = it.name.count;
-
-                append_by_pointer(builder, *e);
-                append(builder, it.name);
-            }
-            release(*global.task_info_storage_spinlock);
+            s: string;
+            s.data = string_table.data;
+            s.count = last_string_byte;
+            append(builder, s);
         }
 
         buffer_index    := last_entry_index / TRACE_ENTRIES_PER_BUFFER;
