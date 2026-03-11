@@ -41,7 +41,7 @@ section .text
 
 extern irq_restore
 extern irq_disable    
-
+extern maybe_reschedule
 
 
 global context_switch

@@ -1,13 +1,4 @@
 
-//
-// Tracing code restrictions: code in here should be very fast and simple, so that it can easily be called from
-// anywhere and not falsify profiling information or influence memory or synchronization bugs. Therefore it
-// should not allocate memory (aside from some physical pages during initalization) and it should not use locks
-// (except to write out tracing data to the serial port). It should also be available early in boot, so we can debug
-// the boot process using it. This means it cannot rely on e.g. CPU-local data or system time to be set up. It
-// should also be very simple just to make it easy to keep it bug-free.
-//
-
 TRACE_ENTRIES_PER_BUFFER :: 0x20_0000 / size_of(Trace_Entry);
 
 Trace_Tag :: enum u16 {
@@ -98,6 +89,8 @@ Trace_String :: #type,distinct s32;
         string_table.data  = cast(*u8) allocate_large_page() + DIRECT_MAPPING_BASE;
         string_table.count = 0x20_0000;
 
+        add_trace_string(""); // Make it so that trace string 0 is the always an empty string.
+
         tracing_enabled = true;
 
         // Disable the spammy tags by default.
@@ -128,8 +121,8 @@ Trace_String :: #type,distinct s32;
 
         entry: Trace_Entry;
         entry.tsc = rdtsc();
-        entry.task_id = cast(u32)get_task_id();
-        entry.core_id = cast(u16)get_core_id();
+        entry.task_id = cast(u32) get_task_id();
+        entry.core_id = cast(u16) get_core_id();
         entry.tag  = tag;
 
         for user_data {
@@ -157,7 +150,7 @@ Trace_String :: #type,distinct s32;
         return cast(Trace_String) offset;
     }
 
-    serialize_trace_buffers :: (builder: *String_Builder) -> num_written: int {
+    serialize_trace_buffers :: (callback: (data: string, user_data: *void), user_data := null) -> num_written: int {
         using global.trace_state;
 
         // Because this procedure is to be called after completing a kernel test workload, we don't care about extra latency and it's more important to have as controlled an environment as possible.
@@ -166,7 +159,7 @@ Trace_String :: #type,distinct s32;
         last_entry_index := min(current_index, max_trace_entries - 1);
         last_string_byte := string_table_size;
 
-        append(builder, KERNEL_TRACE_MAGIC_STRING);
+        callback(KERNEL_TRACE_MAGIC_STRING, user_data);
 
         {
             header: Trace_Header;
@@ -175,14 +168,18 @@ Trace_String :: #type,distinct s32;
             header.num_cpu_cores     = global.processor_cores.count;
             header.string_table_size = string_table_size;
 
-            append_by_pointer(builder, *header);
+            s: string;
+            s.data = cast(*u8) *header;
+            s.count = size_of(Trace_Header);
+
+            callback(s, user_data);
         }
 
         {
             s: string;
-            s.data = string_table.data;
+            s.data  = string_table.data;
             s.count = last_string_byte;
-            append(builder, s);
+            callback(s, user_data);
         }
 
         buffer_index    := last_entry_index / TRACE_ENTRIES_PER_BUFFER;
@@ -190,7 +187,7 @@ Trace_String :: #type,distinct s32;
 
         for b: 0..buffer_index {
             s: string;
-            s.data = cast(*u8)trace_buffers[b].data.data;
+            s.data = cast(*u8) trace_buffers[b].data.data;
 
             if b != buffer_index {
                 // Write the whole buffer if this isn't the last one.
@@ -199,19 +196,32 @@ Trace_String :: #type,distinct s32;
                 s.count = index_in_buffer * size_of(Trace_Entry);
             }
 
-            append(builder, s);
+            callback(s, user_data);
         }
 
         irq_restore();
         return last_entry_index;
     }
 
-    write_trace_buffers :: () -> int {
-        builder: String_Builder;
-        init_string_builder(*builder, 0x1_0000); // Use large buffers as the traces can get really big.
+    serialize_trace_buffers :: () -> string {
+        trace: String_Builder;
+        init_string_builder(*trace, 0x1_0000);
 
-        count := serialize_trace_buffers(*builder);
-        write_string_builder_to_serial_port(*builder, *global.COM2);
+        callback :: (s: string, trace: *String_Builder) {
+            append(trace, s);
+        }
+
+        serialize_trace_buffers(xx callback, *trace);
+
+        return builder_to_string(*trace);
+    }
+
+    write_trace_buffers :: () -> int {
+        callback :: (s: string, data: *void) {
+            serial_out(s, *global.COM2);
+        }
+
+        count := serialize_trace_buffers(callback);
 
         return count;
     }

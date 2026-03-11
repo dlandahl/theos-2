@@ -230,6 +230,30 @@ kernel_entry :: () #no_context {
         }
 
         {
+            // Ensure all the highest-level page tables for the kernel address space are allocated. We'll likely never need them all, since they each
+            // cover half a terabyte. But this way, when we copy the kernel address space into a new process address space, and subsequently allocate
+            // virtual memory in the kernel region, the new kernel mappings will be guaranteed to be visible from all process address spaces.
+            //
+            // Todo: This wastes nearly 2MB of RAM. It might be worth it to create a more complex solution.
+
+            vm_it: VM_Iterator;
+            vm_it.start_address = cast(*void) 0xffff_8000_0000_0000;
+            vm_it.page_count    = 0x7fff_ffff_f;
+
+            space_for_page_tables := allocate_large_page();
+
+            for vm_it {
+                if it.level != 3       continue;
+                if it.flags & .PRESENT continue;
+
+                it.value  = space_for_page_tables;
+                it.flags |= .PRESENT | .READ_WRITE;
+
+                space_for_page_tables += 4096;
+            }
+        }
+
+        {
             // Initialize the software framebuffer.
             using global.framebuffer;
 
@@ -343,11 +367,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        for 1..25 {
-            log("%", it);
-            disk_test(nvme_sd);
-            trace(.section_break);
-        }
+        priority_test();
 
         {
             set_flag(.stopped, get_current_task());
@@ -390,10 +410,8 @@ disk_test :: (sd: Storage_Device) {
         text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
         fat16_write_file(root, "THEOS/TEST", text);
 
-        trace: String_Builder;
-        init_string_builder(*trace, buffer_size = 0x1_0000);
-        serialize_trace_buffers(*trace);
-        fat16_write_file(root, "THEOS/TRACE", builder_to_string(*trace));
+        trace := serialize_trace_buffers();
+        fat16_write_file(root, "THEOS/TRACE", trace);
 
         fat16_report_space(file_system);
         fat16_print_directory_tree(root);
@@ -1135,6 +1153,7 @@ VM_Iterator :: struct {
 
 for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
     // Depth-first page table walker. "page_count" is how much memory you want to cover, measured in 4k pages. So if vm_it.page_count == 512 and it finds a 2MB page, it will be done after that.
+    #assert flags == 0;
 
     pt_index := decode_virtual_address(cast(u64) vm_it.start_address);
 
@@ -1167,7 +1186,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
         }
 
         // We just visited a page.
-        small_pages_per_page_at_this_level := int.[1, 512, 262144][it.level];
+        small_pages_per_page_at_this_level := 1 << (it.level * 9);
         it_index += small_pages_per_page_at_this_level;
 
         if it_index >= vm_it.page_count {
@@ -1189,7 +1208,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
             }
         }
 
-        for 0..it.level-1 {
+        for 0..it.level-1 { // Todo: Clean this up.
             pt_index[it] = 0;
         }
     }

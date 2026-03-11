@@ -2,8 +2,19 @@
 [org 0x8000]
 [bits 16]
 
+%define BIT(a)           (1 << a)
+
 %define code_segment     0x0008
 %define data_segment     0x0010
+
+%define CR0_PE           BIT(0)
+%define CR0_PG           BIT(31)
+
+%define CR4_PAE          BIT(5)
+%define CR4_PGE          BIT(7)
+
+%define IA32_EFER        0xc0000080
+%define IA32_EFER_LME    BIT(8)
 
 ap_startup_asm:
 start equ $
@@ -12,21 +23,19 @@ start equ $
 
     lidt [idt]
 
-    ; Enable paging and memory protection
-    mov eax, 10100000b
+    mov eax, CR4_PAE | CR4_PGE
     mov cr4, eax
 
     mov edx, [pml4]
     mov cr3, edx
 
-    mov ecx, 0xc0000080
+    mov ecx, IA32_EFER
     rdmsr
-
-    or eax, 0x00000100
+    or  eax, IA32_EFER_LME
     wrmsr
 
     mov ebx, cr0
-    or ebx, 0x80000001
+    or  ebx, CR0_PG | CR0_PE
     mov cr0, ebx
 
     lgdt [gdt]

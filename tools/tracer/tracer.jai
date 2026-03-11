@@ -524,8 +524,6 @@ draw_one_frame :: (dt: float) {
 
             row_theme := my_theme.button_theme;
             row_theme.alignment = .Left;
-            // row_theme.text_color = .{.75, .75, .75, 1};
-            // row_theme.surface_color = .{};
             row_theme.frame_color_over = row_theme.frame_color;
             row_theme.font = mono_font;
 
@@ -642,10 +640,6 @@ draw_one_frame :: (dt: float) {
     switch_to_right_rect(slide_state);
 
     {
-        // st.orientation = .VERTICAL;
-        // slide_state, top_rect, bottom_rect := slidable_region(right_rect, *st);
-        // switch_to_bottom_rect(slide_state);
-
         if trace_data.entries.count {
             // Bottom slide region of the right slide region (stack trace.)
             entry := trace_data.entries[selected_entry];
@@ -730,8 +724,6 @@ draw_one_frame :: (dt: float) {
                 row_rect.y -= 5*UI_SCALE;
             }
         }
-
-        // finish(slide_state);
     }
 
     finish(slide_state);

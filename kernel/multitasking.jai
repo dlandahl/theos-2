@@ -99,15 +99,17 @@ get_current_task :: () -> *Task_Info #no_context {
 }
 
 set_flag :: (flag: Task_Flags, task: *Task_Info) #no_context {
-    offset := offset_of(Task_Info, "flags");
-    #asm { lock_or.8 [task + offset], flag; }
+    address := *task.flags;
+
+    #asm { lock_or.8 [address], flag; }
 }
 
 unset_flag :: (flag: Task_Flags, task: *Task_Info) {
-    offset := offset_of(Task_Info, "flags");
+    address := *task.flags;
+
     #asm {
         not.8 flag;
-        lock_and.8 [task + offset], flag;
+        lock_and.8 [address], flag;
     }
 }
 
@@ -185,7 +187,9 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
 
     queue_to_run(task);
 
-    execute_ipi(.RESCHEDULE_IPI, core);
+    if core.id != get_core_id() {
+        execute_ipi(.RESCHEDULE_IPI, core);
+    }
 
     release(*scheduler.spinlock);
 }
@@ -879,9 +883,7 @@ sleep_from_user_mode :: (time: Apollo_Time) #no_context {
 
 print_from_user_mode :: (format: string, args: .. Any) {
 
-    builder: String_Builder;
-    print(*builder, format, ..args);
-    result := builder_to_string(*builder, do_reset=true,, temp);
+    result := tprint(format, ..args);
 
     data  := result.data;
     count := result.count;
@@ -895,7 +897,7 @@ print_from_user_mode :: (format: string, args: .. Any) {
 
         syscall c:, _11:, count, data, syscall_number;
     }
-}
+} @PrintLike
 
 allocate_from_user_mode :: (size: int) -> *void {
     syscall_number := 5;
@@ -1118,7 +1120,7 @@ memory_test :: () {
     proc :: () {
         task := get_current_task();
 
-        random_seed(rdtsc() ^ (cast(u64)task.id) ^ cast(u64)(task & 0xffff_ffff));
+        random_seed(rdtsc() ^ (cast(u64) task.id) ^ cast(u64) (task & 0xffff_ffff));
 
         memory_buffers: [4] struct {
             used: bool;

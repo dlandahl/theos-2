@@ -215,9 +215,9 @@ allocate_bit_tree_slot :: (bt: *Bit_Tree) -> int {
 }
 
 free_bit_tree_slot :: (bt: *Bit_Tree, index: int) {
-    index_0 := (index / 4096);
-    index_1 := (index / 64)   % 64;
-    index_2 := (index)        % 64;
+    index_0 := (index >> 12);
+    index_1 := (index >> 6)   & 63;
+    index_2 := (index)        & 63;
 
     assert(bt.level_2[index_0 * 64 + index_1] & cast(u64) (1 << index_2) > 0, "Attempting to free bit tree slot that wasn't occupied.");
 

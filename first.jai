@@ -409,9 +409,10 @@ isr__%1:
     cld
     call %1
 
-    call irq_restore
-
     dec qword [gs:interrupt_context_active]
+
+    dec qword [gs:irq_disable_count]
+    call maybe_reschedule
 
     ; Remove the manually created call stack frame from the stack.
     add rsp, 16
