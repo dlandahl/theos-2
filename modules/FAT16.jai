@@ -1,4 +1,6 @@
 
+// Todo: We can probably clean up some of the path code using the File_Utilities module
+
 // Todo: Can we easily generalise this code to do FAT32 as well?
 
 #module_parameters(
@@ -392,7 +394,7 @@ fat16_read_file :: (relative_to: Fat16_Tree_Cursor, path: string) -> success: bo
     buffer := alloc(file.file_size);
 
     whole_clusters := file.file_size / image.bytes_per_cluster;
-    next_cluster := file.cluster - 2;
+    next_cluster   := file.cluster - 2;
 
     for 0..whole_clusters-1 {
         source      := image.data_area + next_cluster * image.bytes_per_cluster;
@@ -400,7 +402,7 @@ fat16_read_file :: (relative_to: Fat16_Tree_Cursor, path: string) -> success: bo
 
         memcpy(destination, source, image.bytes_per_cluster);
 
-        next_cluster = image.file_allocation_table[next_cluster];
+        next_cluster = image.file_allocation_table[next_cluster]-2;
     }
 
     {

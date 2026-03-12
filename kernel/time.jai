@@ -333,8 +333,8 @@ initialize_hpet :: () {
         status := uacpi_table_find_by_signature(ACPI_HPET_SIGNATURE, *table);
         assert(status == .OK, "HPET is not available.");
 
-        acpi_table := cast(*acpi_hpet)table.hdr;
-        assert(cast(uacpi_address_space)acpi_table.address.address_space_id == .SYSTEM_MEMORY);
+        acpi_table := cast(*acpi_hpet) table.hdr;
+        assert(cast(uacpi_address_space) acpi_table.address.address_space_id == .SYSTEM_MEMORY);
 
         virtual := cast(*void) alloc_block(*global.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
         map_pages(virtual, acpi_table.address.address, 1, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
@@ -352,8 +352,8 @@ initialize_hpet :: () {
         bluescreen();
     }
 
-    hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
-    hpet.tick_period_femtoseconds = cast(u64, capabilities >> 32);
+    hpet.counters_are_64_bit      = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
+    hpet.tick_period_femtoseconds = cast(u64) capabilities >> 32;
 
     write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 

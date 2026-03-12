@@ -41,39 +41,45 @@ get_current_construction :: (parser: Asn1_Parser) -> *Asn1_Parser.Construction {
     return *parser.root;
 }
 
-peek_tag :: (parser: Asn1_Parser) -> Asn1_Tag {
+peek_tag :: (parser: *Asn1_Parser) -> Asn1_Tag {
     if parser.error return 0;
 
     using get_current_construction(parser);
 
-    // if cursor >= data.count return 0xff;
+    if cursor >= data.count {
+        parser.error = true;
+        return 0xff;
+    }
+
     return cast(Asn1_Tag) data[cursor];
 }
 
 read_length :: (parser: *Asn1_Parser) -> int {
     if parser.error return 0;
 
-    parse_error :: () #expand {
-        parser.error = true;
-        `return 0;
+    check :: (condition: bool) #expand {
+        if !condition {
+            parser.error = true;
+           `return 0;
+        }
     }
 
     using get_current_construction(parser);
 
-    if cursor >= data.count parse_error();
+    check(cursor < data.count);
 
     first := data[cursor];
     cursor += 1;
 
     if (first & 0x80) == 0 {
-        if cursor + first > data.count parse_error();
+        check(cursor + first <= data.count);
         return first;
     }
 
     bytes := first & 0x7f;
 
-    if bytes == 0 || bytes > 4     parse_error();
-    if cursor + bytes > data.count parse_error();
+    check(bytes > 0 && bytes <= 4);
+    check(cursor + bytes <= data.count);
 
     length: int;
     for 0..bytes-1 {
@@ -82,10 +88,7 @@ read_length :: (parser: *Asn1_Parser) -> int {
 
     cursor += bytes;
 
-    if parser.cursor + length > parser.data.count {
-        parse_error();
-    }
-
+    check(parser.cursor + length <= parser.data.count);
     return length;
 }
 

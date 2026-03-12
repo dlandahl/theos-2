@@ -325,6 +325,9 @@ kernel_entry :: () #no_context {
             while !core.online pause();
         }
 
+        // Clear the identity map now that booting is complete.
+        for *global.page_tables.boot_pdpt it.* = 0;
+
         irq_restore();
 
         // Todo: Clean this up.
@@ -367,7 +370,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        priority_test();
+        disk_test(nvme_sd);
 
         {
             set_flag(.stopped, get_current_task());
@@ -409,6 +412,11 @@ disk_test :: (sd: Storage_Device) {
 
         text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
         fat16_write_file(root, "THEOS/TEST", text);
+
+        success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
+        assert(success);
+
+        simple_create_thread(load_and_run_elf_executable, elf);
 
         trace := serialize_trace_buffers();
         fat16_write_file(root, "THEOS/TRACE", trace);
@@ -1233,6 +1241,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
 
 map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
     assert(physical_start & 0xfff == 0);
+    assert(virtual_start  & 0xfff == null);
 
     for VM_Iterator.{virtual_start, page_count} {
         assert(it.flags & .PAGE_SIZE == 0);

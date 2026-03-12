@@ -265,10 +265,10 @@ schedule_tasks :: () {
         // Todo: This is O(n), but we could switch to having sleep queues per-priority level to make it O(1).
         for scheduler.sleeping {
             if it.priority <= next.priority && !is_idle continue;
-            if it.sleep_until == INFINITE_TIMEOUT continue;
+            if it.sleep_until == INFINITE_TIMEOUT       continue;
 
             sleep_time := it.sleep_until - time_now;
-            if sleep_time >= shortest_time break;
+            if sleep_time >= shortest_time              break;
 
             shortest_time = sleep_time;
             trace(.resched_by_wakeup, to_milliseconds(shortest_time), it.id);
@@ -287,9 +287,7 @@ schedule_tasks :: () {
         }
 
         // Todo: Proably need to make this higher than millisecond resolution.
-        delay_ms := max(0, to_milliseconds(shortest_time));
-
-        delay_ms += 1;
+        delay_ms := max(1, to_milliseconds(shortest_time));
 
         if global.tsc_deadline_support {
             schedule_tsc_deadline_interrupt(cast(u64) delay_ms);
@@ -824,13 +822,12 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     data := alloc(size_of(T));
     memcpy(data, *user_data, size_of(T));
 
-    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data);
+    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data, user_stack_size = 0x1_0000);
 
     core := *global.processor_cores[core_id];
     assert(core.online);
 
     put_task_on_core(task, core);
-
 }
 
 simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2) {
@@ -844,118 +841,47 @@ simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 
 
 
 
-// In the future we should generate these using metaprogramming, from a table.
+load_and_run_elf_executable :: (elf_data: string) {
+    success, elf := parse_elf(elf_data);
+    assert(success);
 
-yield_from_user_mode :: () #no_context {
-    syscall_number := 1;
+    for elf.program_header_table {
+        if it.type != .LOAD {
+            continue;
+        }
 
-    #asm SYSCALL_SYSRET {
-        syscall_number === a;
-        syscall c:, _11:, syscall_number;
+        region_size := align(4096, cast(s64) (it.memsz + it.vaddr & 0xfff));
+
+        _, physical := allocate_page_aligned_physical_memory(region_size);
+
+        pages := region_size / 4096;
+
+        map_pages(cast(*void) it.vaddr & ~0xfff, physical, pages);
+
+        memcpy(
+            cast(*void)     it.vaddr,
+            elf_data.data + it.offset,
+            cast(s32)       it.filesz
+        );
+
+        if it.memsz > it.filesz {
+            start := cast(*void) (it.vaddr + it.filesz);
+            count := cast(s64)   (it.memsz - it.filesz);
+
+            memset(start, 0, count);
+        }
     }
+
+    // Todo: This should be no_context, not c_call
+    entry_point := (.*) cast(*() #c_call) *(elf.header.entry);
+
+    task := get_current_task();
+    assert(task.user_stack != null);
+
+    enter_user_mode(entry_point, task.user_stack);
 }
 
-get_current_core_from_user_mode :: () -> *X64_Core #no_context {
-    syscall_number := 2;
-    core: *X64_Core;
 
-    #asm SYSCALL_SYSRET {
-        rax: gpr === a;
-        mov rax, syscall_number;
-        syscall c:, _11:, rax;
-        mov core, rax;
-    }
-
-    return core;
-}
-
-sleep_from_user_mode :: (time: Apollo_Time) #no_context {
-    syscall_number := 3;
-
-    #asm SYSCALL_SYSRET {
-        syscall_number === a;
-        mov low:  gpr === b, [*time + 0];
-        mov high: gpr === d, [*time + 8];
-
-        syscall c:, _11:, low, high, syscall_number;
-    }
-}
-
-print_from_user_mode :: (format: string, args: .. Any) {
-
-    result := tprint(format, ..args);
-
-    data  := result.data;
-    count := result.count;
-
-    syscall_number := 4;
-
-    #asm SYSCALL_SYSRET {
-        syscall_number === a;
-        count === b;
-        data === d;
-
-        syscall c:, _11:, count, data, syscall_number;
-    }
-} @PrintLike
-
-allocate_from_user_mode :: (size: int) -> *void {
-    syscall_number := 5;
-
-    buffer: *void;
-
-    #asm SYSCALL_SYSRET {
-        rax: gpr === a;
-        mov rax, syscall_number;
-        size === b;
-
-        syscall c:, _11:, rax, size;
-        mov buffer, rax;
-    }
-
-    return buffer;
-}
-
-trylock_from_user_mode :: (mutex: *Mutex) -> bool {
-    if mutex.held_by != null return false;
-
-    syscall_number := 6;
-
-    success: u64;
-
-    #asm SYSCALL_SYSRET {
-        rax: gpr === a;
-        mov rax, syscall_number;
-        mutex === b;
-
-        syscall c:, _11:, rax, mutex;
-        mov success, rax;
-    }
-
-    return success > 0;
-}
-
-unlock_from_user_mode :: (mutex: *Mutex) {
-    syscall_number := 7;
-
-    #asm SYSCALL_SYSRET {
-        syscall_number === a;
-        mutex          === b;
-
-        syscall c:, _11:, syscall_number, mutex;
-    }
-}
-
-free_from_user_mode :: (address: *void) {
-    syscall_number := 8;
-
-    #asm SYSCALL_SYSRET {
-        syscall_number === a;
-        address        === b;
-
-        syscall c:, _11:, syscall_number, address;
-    }
-}
 
 #program_export
 syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
@@ -966,54 +892,31 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     task := get_current_task();
     context.temporary_storage = task.temporary_storage;
 
-    if data.rax == {
-      case 1;
-        yield_execution();
+    // I would prefer to generate syscalls based on an array, using #run.
+    // But for know it's done in first.jai using @notes.
 
-      case 2;
-        data.rax = cast(u64) get_current_core();
-
-      case 3;
-        t: Apollo_Time;
-        t.low  = data.rbx;
-        t.high = cast(s64) data.rdx;
-
-        sleep(t);
-
-      case 4;
-        s: string;
-        s.count = cast(s64) data.rbx;
-        s.data  = cast(*u8) data.rdx;
-        write_string(s);
-
-      case 5;
-        size     := cast(s64) data.rbx;
-        data.rax  = cast(u64) allocate_guarded_memory(size, 0x1_0000);
-
-      case 6;
-        mutex    := cast(*Mutex) data.rbx;
-        data.rax  = cast(u64) trylock(mutex);
-
-      case 7;
-        mutex := cast(*Mutex) data.rbx;
-        release(mutex);
-
-      case 8;
-        address := cast(*void) data.rbx;
-
-        free_guarded_memory(address);
-        
-      case;
-        write_string("Invalid syscall parameter.\n");
-        write_nonnegative_number(data.rax);
-        write_string("\n");
-        bluescreen();
-    }
+    inline do_auto_generated_syscall_dispatch(data);
 
     reset_temporary_storage();
 
     maybe_reschedule();
 }
+
+
+
+display_string :: (data: *u8, count: s64) {
+    kernel_write_string({count, data});
+} @Syscall(1)
+
+stop_executing :: () {
+    task := get_current_task();
+
+    set_flag(.stopped, task);
+    yield_execution();
+} @Syscall(2)
+
+
+
 
 // This is needed by the syscall handler implemented in assembly.
 #program_export
@@ -1025,52 +928,6 @@ get_kernel_stack :: () -> *void #c_call {
 enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
 
 
-
-task_do_work :: () {
-    task := get_current_task();
-
-    user_stack := task.user_stack;
-    entry_point := task_do_work_in_ring_3;
-
-    log("Task % entering user mode.", task.name);
-
-    enter_user_mode(entry_point, user_stack);
-}
-
-ring_3_work_mutex: Mutex;
-
-ring_3_allocator :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-    if mode == {
-      case .RESIZE;
-        assert(false);
-
-      case .ALLOCATE;
-        return allocate_from_user_mode(size);
-
-      case .FREE;
-        free_from_user_mode(old_memory);
-    }
-
-    return null;
-}
-
-user_mode_stress_test :: (threads_per_core := 4, core_mask: u32 = 0xffff_ffff) {
-    thread_index := 1;
-
-    for *core: global.processor_cores {
-        if core_mask & (1 << core.id) == 0 {
-            continue;
-        }
-
-        for 1..threads_per_core {
-            name := tprint("Do Work %:%", core.id, thread_index);
-            task := create_task(task_do_work, kernel_stack_size = 0x4_0000, user_stack_size = 0x4_0000, name = name);
-            put_task_on_core(task, core);
-
-            thread_index += 1;
-        }
-    }
-}
 
 priority_test :: () {
 
@@ -1173,49 +1030,6 @@ memory_test :: () {
             task := create_task(proc, kernel_stack_size = 0x4_0000, name = "Memory Tester");
             put_task_on_core(task, core);
 
-        }
-    }
-}
-
-task_do_work_in_ring_3 :: () #c_call {
-
-    push_context {
-        context.allocator.proc = ring_3_allocator;
-
-        ts: Temporary_Storage;
-        set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
-        context.temporary_storage = *ts;
-
-        core := get_current_core_from_user_mode();
-        thread := core.scheduler.current_task;
-
-        random_seed(rdtsc());
-
-        while true {
-            auto_release_temp();
-
-            print_from_user_mode("Thread \"%\" doing some work in user mode, on core %.\n", thread.name, core.id);
-
-            for 1..1_000_000 {
-                #asm { pause; }
-            }
-
-            if core.id != 0 if trylock_from_user_mode(*ring_3_work_mutex) {
-                print_from_user_mode("Thread \"%\" got the mutex - holding for one second.\n", thread.name);
-                sleep_from_user_mode(seconds_to_apollo(1));
-                print_from_user_mode("Thread \"%\" releasing mutex.\n", thread.name);
-                unlock_from_user_mode(*ring_3_work_mutex);
-            }
-
-            ms := random_get() % 2000 + 500;
-
-            print_from_user_mode("Sleeping for % ms.\n", ms);
-
-            start := get_monotonic_time();
-            sleep_from_user_mode(milliseconds_to_apollo(xx ms));
-            end   := get_monotonic_time();
-
-            print_from_user_mode("Sleep time error: %ms\n", to_milliseconds(end - start) - cast(s64) ms);
         }
     }
 }

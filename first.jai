@@ -3,9 +3,11 @@
 #import "Process";
 #import "Compiler";
 #import "File";
+#import "File_Utilities";
 #import "String";
 #import "System";
 #import "Metaprogram_Plugins";
+#import "Program_Print";
 
 #if OS == .WINDOWS {
     #import "Windows_Utf8";
@@ -19,8 +21,9 @@
 
 #run,stallable main();
 
-kernel_only := false;
-bootloader_only := false;
+kernel_only      := false;
+bootloader_only  := false;
+userspace_only   := false;
 
 main :: () {
     set_build_options_dc(.{ do_output = false });
@@ -53,6 +56,8 @@ main :: () {
         return;
     }
 
+    push_allocator(temp);
+
     nasm_result := run_command("nasm", "-v");
     if nasm_result.exit_code != 0 {
         log_error("\nThe NASM assembler is required by this build program to assemble the interrupt routines. Please install it and try again.");
@@ -72,8 +77,9 @@ main :: () {
     }
 
     for remaining_args if it == {
-        case "kernel";     kernel_only = true;
+        case "kernel";     kernel_only     = true;
         case "bootloader"; bootloader_only = true;
+        case "userspace";  userspace_only  = true;
         case "format"; format_disk(); return;
         case; log_error("Command line argument not understood: %", it);
     }
@@ -86,13 +92,18 @@ main :: () {
 
     make_directory_if_it_does_not_exist(".build/");
 
-    if (!kernel_only || bootloader_only) && !compile_bootloader(to_create) {
+    if ((!userspace_only && !kernel_only) || bootloader_only) && !compile_bootloader(to_create) {
         log_error("Failed to compile the bootloader.");
         exit(1);
     }
 
-    if (!bootloader_only || kernel_only) && !compile_kernel(to_create) {
+    if ((!userspace_only && !bootloader_only) || kernel_only) && !compile_kernel(to_create) {
         log_error("Failed to compile the kernel.");
+        exit(1);
+    }
+
+    if ((!kernel_only && !bootloader_only) || userspace_only) && !compile_userspace() {
+        log_error("Failed to compile the userspace.");
         exit(1);
     }
 
@@ -236,7 +247,14 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
     interrupt_assembly: String_Builder;
     append(*interrupt_assembly, read_entire_file("kernel/assembly.asm"));
+
     found_interrupts: [..] string;
+
+    generated_syscall_dispatcher: bool;
+    found_syscalls: [..] struct {
+        number: int;
+        header: *Code_Procedure_Header;
+    };
 
     success: bool;
 
@@ -250,19 +268,25 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                 proc := header.expression;
 
                 for proc.notes {
-                    if !begins_with(it.text, "InterruptRoutine") {
-                        continue;
-                    }
+                    if begins_with(it.text, "InterruptRoutine") {
+                        pop_error_code := "";
+                        ip_offset := 15*8; // So we can find the return address, to create a stack frame for the stack tracer. 15 comes from the number of GPRs pushed to the stack after the CPU pushes the instruction pointer.
+                        if begins_with(it.text, "InterruptRoutineWithErrorCode") {
+                            pop_error_code = "    sub rsp, 8\n";
+                            ip_offset += 8;
+                        }
 
-                    pop_error_code := "";
-                    ip_offset := 15*8; // So we can find the return address, to create a stack frame for the stack tracer. 15 comes from the number of GPRs pushed to the stack after the CPU pushes the instruction pointer.
-                    if begins_with(it.text, "InterruptRoutineWithErrorCode") {
-                        pop_error_code = "    sub rsp, 8\n";
-                        ip_offset += 8;
-                    }
+                        print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name, pop_error_code, ip_offset);
+                        array_add(*found_interrupts, proc.name);
+                    } else if begins_with(it.text, "Syscall") {
+                        assert(!generated_syscall_dispatcher);
 
-                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name, pop_error_code, ip_offset);
-                    array_add(*found_interrupts, proc.name);
+                        number: int;
+                        success := scan2(it.text, "Syscall(%)", *number);
+                        assert(success, "Failed to scan syscall annotation: %", it.text);
+
+                        array_add(*found_syscalls, { number, proc });
+                    }
                 }
             }
         }
@@ -276,12 +300,90 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                 }
 
                 array_reset(*found_interrupts);
+
+                if !generated_syscall_dispatcher {
+
+                    // The registers used to pass parameters in order to syscalls.
+                    input_registers     :: string.["rbx", "rdx", "rsi", "rdi"];
+
+                    // Jai's names for the same registers, omitting the size prefix/suffix.
+                    input_registers_jai :: string.["b",   "d",   "si",  "di"];
+
+                    dispatcher_body: String_Builder;
+
+                    for found_syscalls {
+                        parameters: string;
+
+                        for it.header.arguments {
+                            parameters = join(parameters, "xx data.", input_registers[it_index], ",");
+                        }
+
+                        assert(it.header.returns.count <= 1);
+                        returns := ifx it.header.returns then "data.rax = xx ";
+
+                        print(*dispatcher_body, "      case %;\n       %%(%);\n\n", it.number, returns, it.header.name, parameters);
+                    }
+
+                    add_build_string(tprint(SYSCALL_DISPATCHER, builder_to_string(*dispatcher_body)), workspace);
+
+                    call_wrappers: String_Builder;
+
+                    for found_syscalls {
+                        parameters: string;
+
+                        for it.header.arguments {
+                            type: String_Builder;
+                            print_expression(*type, it.type_inst);
+
+                            if parameters parameters = join(parameters, ", ");
+                            parameters = join(parameters, it.name, ": ", builder_to_string(*type));
+                        }
+
+                        returns: string;
+                        return_type_expression: string;
+
+                        if it.header.returns {
+                            type: String_Builder;
+                            print_expression(*type, it.header.returns[0]);
+                            return_type_expression = builder_to_string(*type);
+
+                            returns = join(" -> ", return_type_expression);
+                        }
+
+                        // Todo: If the syscall return value has a name in the kernel, we should automatically use the name here for the return value as well.
+
+                        print(*call_wrappers, "% :: (%)% #no_context {\n", it.header.name, parameters, returns);
+                        print(*call_wrappers, "    syscall_number := %;\n\n", it.number);
+                        if returns print(*call_wrappers, "    result: u64;\n\n");
+                        print(*call_wrappers, "    #asm SYSCALL_SYSRET {\n");
+                        print(*call_wrappers, "        %;\n", ifx it.header.returns then "mov rax: gpr === a, syscall_number" else "syscall_number === a");
+                        for it.header.arguments {
+                            print(*call_wrappers, "        % === %;\n", it.name, input_registers_jai[it_index]);
+                        }
+                        print(*call_wrappers, "\n        syscall c:, _11:");
+                        print(*call_wrappers, ifx returns then ", rax" else ", syscall_number");
+                        for it.header.arguments {
+                            print(*call_wrappers, ", %", it.name);
+                        }
+                        print(*call_wrappers, ";\n");
+                        if returns print(*call_wrappers, "        mov result, rax;\n");
+                        print(*call_wrappers, "    }\n");
+                        if returns print(*call_wrappers, "\n    return cast(%) result;\n", return_type_expression);
+                        print(*call_wrappers, "}\n\n");
+                    }
+
+                    make_directory_if_it_does_not_exist("userspace/modules");
+
+                    write_entire_file("userspace/modules/Syscall.jai", builder_to_string(*call_wrappers));
+
+                    generated_syscall_dispatcher = true;
+                }
             }
 
             if phase.phase == .ALL_TARGET_CODE_BUILT {
                 if !kernel_only {
                     log("Assembling interrupt routines");
-                    result_assembly_code := builder_to_string(*interrupt_assembly,, temp);
+                    result_assembly_code := builder_to_string(*interrupt_assembly);
 
                     {
                         // We save these on the stack during context switch, so assembly needs to know their offset within CPU-local data.
@@ -289,7 +391,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         offset_idq := get_struct_field_offset_from_another_workspace("X64_Core", "irq_disable_count", workspace);
 
                         offset_string := tprint("\ninterrupt_context_active equ %\nirq_disable_count equ %\n\n", offset_ica, offset_idq);
-                        result_assembly_code = join(offset_string, result_assembly_code,, temp);
+                        result_assembly_code = join(offset_string, result_assembly_code);
                     }
 
                     write_entire_file(".build/assembly.asm", result_assembly_code);
@@ -328,6 +430,64 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     return success;
 }
 
+compile_userspace :: () -> bool {
+    log("Compiling userspace");
+
+    make_directory_if_it_does_not_exist("userspace/artifacts");
+
+    compile_one_program :: (file_name: string, name: string) -> bool {
+        workspace := compiler_create_workspace("Userspace");
+
+        {
+            options := get_build_options(workspace);
+
+            options.output_executable_name = name;
+            options.output_path = "userspace/artifacts";
+            options.text_output_flags = 0;
+            options.entry_point_name = "user_entry";
+            options.os_target = .LINUX;
+            options.additional_linker_arguments = .["-euser_entry"];
+
+            options.arithmetic_overflow_check = .FATAL;
+
+            new_path: [..] string;
+            array_add(*new_path, "userspace/modules/");
+            array_add(*new_path, .. options.import_path);
+            options.import_path = new_path;
+
+            set_build_options(options, workspace);
+        }
+
+        compiler_begin_intercept(workspace);
+
+        add_build_file(tprint("userspace/%", file_name), workspace);
+
+        success: bool;
+
+        while true {
+            message := compiler_wait_for_message();
+
+            if message.kind == .COMPLETE {
+                complete := cast(*Message_Complete) message;
+                success = complete.error_code == .NONE;
+                break;
+            }
+        }
+
+        compiler_end_intercept(workspace);
+
+        if success {
+            command := break_command_into_strings(tprint("objdump -x userspace/artifacts/% -d -M intel --source", name));
+            result, stdout := run_command(.. command, capture_and_return_output=true);
+            write_entire_file(tprint(".build/%.objdump.txt", name), stdout);
+        }
+
+        return success;
+    }
+
+    return compile_one_program("test.jai", "Test");
+}
+
 format_disk :: () -> bool {
     log("Formatting disk image");
 
@@ -351,6 +511,17 @@ format_disk :: () -> bool {
     fat16_write_file(root, "EFI/BOOT/BOOTX64.EFI", bootloader);
     fat16_write_file(root, "kernel", kernel);
     fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
+
+    userspace_programs := file_list("userspace/artifacts");
+    if userspace_programs {
+        theos_dir    := fat16_create_directory(root,      "THEOS");
+        programs_dir := fat16_create_directory(theos_dir, "PROGRAMS");
+
+        for userspace_programs {
+            file_content := read_entire_file(it);
+            fat16_write_file(programs_dir, basename(it), file_content);
+        }
+    }
 
     fat16_report_space(fat16);
     fat16_print_directory_tree(root);
@@ -423,6 +594,19 @@ isr__%1:
 
 END;
 
+SYSCALL_DISPATCHER :: #string END
+do_auto_generated_syscall_dispatch :: (data: *Syscall_Stack_Frame) {
+    if data.rax == {
+      // Auto generated syscalls follow.
+%
+      case;
+        write_string("Invalid syscall parameter.\n");
+        write_nonnegative_number(data.rax);
+        write_string("\n");
+        bluescreen();
+    }
+}
+END;
 
 
 
