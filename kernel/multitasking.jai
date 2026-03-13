@@ -194,7 +194,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     release(*scheduler.spinlock);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size := 0, name: string, user_data: *void = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, name: string, user_data: *void = null) -> *Task_Info {
 
     new_task := allocate_task_info();
     new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
@@ -202,21 +202,6 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, user_stack_size 
     new_task.kernel_stack = allocate_guarded_memory(kernel_stack_size, 0x1_0000);
     new_task.kernel_stack += kernel_stack_size;
     new_task.kernel_stack &= ~0xf;
-
-    if user_stack_size != 0 {
-        new_task.user_stack = allocate_guarded_memory(user_stack_size, 0x1_0000);
-        new_task.user_stack += user_stack_size;
-        new_task.user_stack &= ~0xf;
-
-        // SYSRETQ does not push a return address to the stack, but the user mode entry point will push
-        // the stack frame pointer, which will be seen by the stack tracing code. The stack tracing code
-        // will read past the bottom of the stack trying to record the return address. We therefore need
-        // to pad the stack and put a valid-looking return address there to make stack tracing succeed
-        // when it meets an 'initial' sysret, that switches a thread to user mode the first time.
-
-        new_task.user_stack -= 8;
-        (.*) cast(*u64) new_task.user_stack = DIRECT_MAPPING_BASE;
-    }
 
     Context_Switch_Stack :: struct {
         // This makes it so the stack doesn't become misaligned by the pointer arithmetic below.
@@ -822,7 +807,7 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     data := alloc(size_of(T));
     memcpy(data, *user_data, size_of(T));
 
-    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data, user_stack_size = 0x1_0000);
+    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data);
 
     core := *global.processor_cores[core_id];
     assert(core.online);
@@ -845,6 +830,8 @@ load_and_run_elf_executable :: (elf_data: string) {
     success, elf := parse_elf(elf_data);
     assert(success);
 
+    using Page_Flags;
+
     for elf.program_header_table {
         if it.type != .LOAD {
             continue;
@@ -853,10 +840,10 @@ load_and_run_elf_executable :: (elf_data: string) {
         region_size := align(4096, cast(s64) (it.memsz + it.vaddr & 0xfff));
 
         _, physical := allocate_page_aligned_physical_memory(region_size);
+        virtual     := cast(*void) it.vaddr & ~0xfff;
 
         pages := region_size / 4096;
-
-        map_pages(cast(*void) it.vaddr & ~0xfff, physical, pages);
+        map_pages(virtual, physical, pages);
 
         memcpy(
             cast(*void)     it.vaddr,
@@ -870,13 +857,35 @@ load_and_run_elf_executable :: (elf_data: string) {
 
             memset(start, 0, count);
         }
+
+        flags := PRESENT | USER_SUPERVISOR;
+
+        if it.flags & .WRITE >  0 flags |= READ_WRITE;
+        if it.flags & .EXEC  == 0 flags |= EXECUTE_DISABLE;
+
+        change_page_flags(virtual, pages, flags);
     }
 
-    // Todo: This should be no_context, not c_call
+    // Todo: This should be no_context, not c_call.
     entry_point := (.*) cast(*() #c_call) *(elf.header.entry);
-
     task := get_current_task();
-    assert(task.user_stack != null);
+
+    {
+        // Allocate a user mode stack for the task.
+        task.user_stack = cast(*void) 0x8000_0000_0000;
+
+        stack_size := 0x1_0000;
+
+        _, physical := allocate_page_aligned_physical_memory(stack_size);
+        virtual     := task.user_stack - stack_size;
+
+        flags := PRESENT | READ_WRITE | USER_SUPERVISOR;
+        map_pages(virtual, physical, stack_size / 4096, flags);
+
+        // Todo: Update the stack tracing logic to work better with user mode stacks.
+        task.user_stack -= 8;
+        (.*) cast(*u64) task.user_stack = DIRECT_MAPPING_BASE;
+    }
 
     enter_user_mode(entry_point, task.user_stack);
 }
@@ -914,7 +923,6 @@ stop_executing :: () {
     set_flag(.stopped, task);
     yield_execution();
 } @Syscall(2)
-
 
 
 

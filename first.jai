@@ -8,6 +8,7 @@
 #import "System";
 #import "Metaprogram_Plugins";
 #import "Program_Print";
+#import "Sort";
 
 #if OS == .WINDOWS {
     #import "Windows_Utf8";
@@ -302,6 +303,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                 array_reset(*found_interrupts);
 
                 if !generated_syscall_dispatcher {
+                    quick_sort(found_syscalls, (a, b) => a.number - b.number);
 
                     // The registers used to pass parameters in order to syscalls.
                     input_registers     :: string.["rbx", "rdx", "rsi", "rdi"];
@@ -352,7 +354,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
                         // Todo: If the syscall return value has a name in the kernel, we should automatically use the name here for the return value as well.
 
-                        print(*call_wrappers, "% :: (%)% #no_context {\n", it.header.name, parameters, returns);
+                        print(*call_wrappers, "\n% :: (%)% #no_context {\n", it.header.name, parameters, returns);
                         print(*call_wrappers, "    syscall_number := %;\n\n", it.number);
                         if returns print(*call_wrappers, "    result: u64;\n\n");
                         print(*call_wrappers, "    #asm SYSCALL_SYSRET {\n");
@@ -369,7 +371,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         if returns print(*call_wrappers, "        mov result, rax;\n");
                         print(*call_wrappers, "    }\n");
                         if returns print(*call_wrappers, "\n    return cast(%) result;\n", return_type_expression);
-                        print(*call_wrappers, "}\n\n");
+                        print(*call_wrappers, "}\n");
                     }
 
                     make_directory_if_it_does_not_exist("userspace/modules");

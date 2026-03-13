@@ -246,19 +246,22 @@ initialize_apic :: () {
 
 startup_application_processors :: () {
 
+    // Identity map a page in low memory for the 16-bit code to run in, so it will keep working when it switches the CPU to 64-bit mode.
+    map_pages(cast(*void) 0x8000, 0x8000, 1);
+
     // Load the 16 bit AP initialization routine from static memory
-    memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
+    memcpy(cast(*void) 0x8000, ap_startup_bin.data, 4096);
 
     Ap_Startup_Data :: struct {
         // Layout matches the ap_startup assembly code.
         stack: *void;
         entry_point: *void;
-        pml4: *u64;
+        pml4: u64;
     }
 
-    ap_startup_data := cast(*Ap_Startup_Data) (0x8200 + DIRECT_MAPPING_BASE);
+    ap_startup_data := cast(*Ap_Startup_Data) 0x8200;
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
-    ap_startup_data.pml4 = global.boot_data.page_tables.pml4.data;
+    ap_startup_data.pml4 = get_physical_address(*global.boot_data.page_tables.pml4);
 
     for* global.processor_cores {
         if it_index == 0 {
@@ -319,6 +322,8 @@ ap_entry_point :: () #c_call {
         cpu_idle_loop();
     }
 }
+
+
 
 get_current_core :: inline () -> *X64_Core #no_context {
     core: *X64_Core;

@@ -128,8 +128,9 @@ kernel_entry :: () #no_context {
 
     set_runtime_support_callbacks();
 
-    // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
+    // Clear the UEFI identity map now that booting is complete.
     global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
+    for *global.page_tables.boot_pdpt it.* = 0;
 
     {
         // Initialize cpu-local data really early, because it's useful to have e.g. core ID and interrupt_context_active available.
@@ -290,6 +291,8 @@ kernel_entry :: () #no_context {
             assert(status == .OK);
         }
 
+        assert(global.page_tables.pml4[0xff] == 0);
+
         initialize_apic();
 
         initialize_hpet();
@@ -324,9 +327,6 @@ kernel_entry :: () #no_context {
         for *core: global.processor_cores {
             while !core.online pause();
         }
-
-        // Clear the identity map now that booting is complete.
-        for *global.page_tables.boot_pdpt it.* = 0;
 
         irq_restore();
 
@@ -370,6 +370,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
+        inspect_address(cast(*void) 0xffff_ffff_8000_1000);
         disk_test(nvme_sd);
 
         {
@@ -658,7 +659,7 @@ init_processor_core :: () {
     }
 
     {
-        // Enable syscalls.
+        // Set up syscall entry point.
 
         // According to https://www.felixcloutier.com/x86/sysret, sysret sets the privilege bits in the stack segment selector automatically, but this does not seem to happen in VirtualBox.
         star := (cast(u64) Segment_Selector.RING0_DATA | 3) << 48;
@@ -669,12 +670,6 @@ init_processor_core :: () {
 
         syscall_entry :: () #foreign Assembly;
         write_msr(.LSTAR__syscall_address, bit_cast(syscall_entry, u64));
-
-        EFER_SCE__syscall_enable :: 1;
-
-        efer := read_msr(.EFER__extended_features);
-        efer |= EFER_SCE__syscall_enable;
-        write_msr(.EFER__extended_features, efer);
     }
 
     {
@@ -707,6 +702,8 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
 } @InterruptRoutine
 
 bluescreen :: () #no_context {
+    global.bluescreen_occurred = true;
+
     write_string("Bluescreen!\n");
 
     using global.framebuffer;
@@ -718,7 +715,6 @@ bluescreen :: () #no_context {
     }
 
     flush_screen();
-    global.bluescreen_occurred = true;
 
     while true #asm {
         cli;
@@ -1126,7 +1122,7 @@ allocate_page_aligned_physical_memory :: (size_bytes: s64) -> base: u64, aligned
 
 
 Page_Flags :: enum_flags u64 {
-    PRESENT         :: 1 << 0 | Page_Flags.USER_SUPERVISOR;
+    PRESENT         :: 1 << 0;
     READ_WRITE      :: 1 << 1;
     USER_SUPERVISOR :: 1 << 2;
     WRITE_THROUGH   :: 1 << 3;
@@ -1135,7 +1131,7 @@ Page_Flags :: enum_flags u64 {
     DIRTY           :: 1 << 6;
     PAGE_SIZE       :: 1 << 7;
 
-    // Todo: We should maybe have separate enums for flags at different page table levels.
+    // Todo: Maybe we should have separate enums for flags at different page table levels.
     PTE_PAGE_ATTRIBUTE_TABLE :: 1 << 7;   // For 4Kb pages.
     PDE_PAGE_ATTRIBUTE_TABLE :: 1 << 12;  // For 2Mb and 1Gb pages.
 
@@ -1188,12 +1184,12 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
             // If we're not in the lowest level, go deeper.
             it.level -= 1;
 
-            next_table_physical_address := it.value & ~0xfff;
+            next_table_physical_address := it.value & ~0x8000_0000_0000_0fff;
             tables[it.level] = cast(*u64) (next_table_physical_address + DIRECT_MAPPING_BASE);
             return;
         }
 
-        // We just visited a page.
+        // We just visited a page, or skipped a region because the user did not mark it PRESENT in the body of the loop.
         small_pages_per_page_at_this_level := 1 << (it.level * 9);
         it_index += small_pages_per_page_at_this_level;
 
@@ -1252,7 +1248,7 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
             virtual  := virtual_start  + cast(u64)it_index * 4096;
             physical := physical_start + cast(u64)it_index * 4096;
 
-            it.value = physical;
+            it.value  = physical;
             it.flags |= page_flags;
 
             pg := *virtual;
@@ -1262,12 +1258,42 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
         }
 
         // It's a page table, create it if it doesn't exist.
+
+        // Note this means that the page flags will not be changed at this level. This whole system probably won't stay around long term.
         if it.flags & .PRESENT > 0 continue;
 
         new_table := get_4k_page();
 
-        it.value = new_table;
-        it.flags |= .PRESENT | .READ_WRITE;
+        it.value  = new_table;
+        it.flags |= page_flags;
+    }
+}
+
+change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Page_Flags) {
+    assert(virtual_start & 0xfff == null);
+
+    for VM_Iterator.{virtual_start, page_count} {
+        assert(it.flags & .PAGE_SIZE == 0);
+
+        if it.level == 0 {
+            assert(it.flags & .PRESENT > 0);
+
+            virtual := virtual_start + cast(u64)it_index * 4096;
+
+            it.flags &= ~0xfff;
+            it.flags |=  new_page_flags;
+
+            pg := *virtual;
+            #asm { invlpg [pg]; }
+
+            continue;
+        }
+
+        // Any page tables should be present for this to work.
+        assert(it.flags & .PRESENT > 0);
+
+        it.flags &= ~0xfff;
+        it.flags |=  new_page_flags & ~.EXECUTE_DISABLE; // NX gets ORed rather than ANDed between page table levels, so we only want to set it at the lowest level.
     }
 }
 
@@ -1313,6 +1339,15 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
     }
 
     return 0, false;
+}
+
+inspect_address :: (virtual_address: *void) {
+    for VM_Iterator.{virtual_address, 1} {
+        address := it.value & ~0x8000_0000_0000_0fff;
+        flags   := it.flags &  0x8000_0000_0000_0fff;
+
+        log("Level %: Physical address = %, flags = %", it.level, hex(address), flags);
+    }
 }
 
 tlb_shootdown_test :: () {
@@ -2012,7 +2047,7 @@ Guarded_Allocation :: struct {
     created_at: Source_Code_Location; // So the page fault handler can report who created the guard region when it's accessed.
 }
 
-allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location := #caller_location) -> *void {
+allocate_guarded_memory :: (size: int, guard_region_size: int, flags := Page_Flags.PRESENT | .READ_WRITE, caller_location := #caller_location) -> *void {
     using global.guarded_memory;
 
     assert(size              % 4096 == 0, "Guarded allocation size must be a multiple of 4KB.");
@@ -2026,7 +2061,7 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, caller_location :
     physical_pages    := size / 4096;
     client_address    := cast(*void) virtual + guard_region_size;
 
-    map_pages(client_address, physical_aligned, physical_pages);
+    map_pages(client_address, physical_aligned, physical_pages, flags);
 
     {
         ensure_initialized(*allocations_list);

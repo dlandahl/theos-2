@@ -209,8 +209,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             using boot_data.page_tables;
 
-            PAGE_USER       : u64 : 0x4;
-            PAGE_PRESENT    : u64 : 0x1 | PAGE_USER; // Adding the USER/SUPERVISOR bit to all pages so we can do stuff in ring 3 and not think about this yet.
+            PAGE_PRESENT    : u64 : 0x1;
             PAGE_READ_WRITE : u64 : 0x2;
             PAGE_2MB_PAT    : u64 : 0x1000; // This value is correct for 2Mb pages only, not 4kb.
             PAGE_SIZE       : u64 : 0x80;
@@ -282,7 +281,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             load_buffer += DIRECT_MAPPING_BASE;
 
             // Translate page frame descriptor array address to virtual.
-            boot_data.large_pages.data = cast(*void)boot_data.large_pages.data + DIRECT_MAPPING_BASE;
+            boot_data.large_pages.data = cast(*void) boot_data.large_pages.data + DIRECT_MAPPING_BASE;
         }
 
         mmap_key = 0;

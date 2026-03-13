@@ -170,6 +170,15 @@ set_page_attribute_table :: (pat: Page_Attribute_Table) {
 
 
 
+EFER__Extended_Features :: enum_flags u64 {
+    SCE__syscall              :: 0x1;
+    LME__long_mode            :: 0x100;
+    LMA__32e_mode             :: 0x400;
+    NXE__execute_disable_bit  :: 0x800;
+}
+
+
+
 Ia32_Model_Specific_Register :: enum {
     APIC_BASE                 :: 0x0000_001b;
     PAT__page_attribute_table :: 0x0000_0277;
@@ -214,6 +223,12 @@ read_msr :: (msr: Ia32_Model_Specific_Register) -> u64 #no_context {
 enable_cpu_features :: () {
     cpu_features := get_cpu_info().feature_leaves;
 
+    assert(check_feature(cpu_features, .SSE));
+    // assert(check_feature(cpu_features, .PCID));
+    assert(check_feature(cpu_features, .FSGSBASE));
+    assert(check_feature(cpu_features, .XSAVE));
+    assert(check_feature(cpu_features, .PAT), "Page Attribute Table is not supported.\n");
+
     CR0_MP         :=   1 << 1;
     CR0_EM_CLEAR   := ~(1 << 2);
 
@@ -223,48 +238,27 @@ enable_cpu_features :: () {
     CR4_PCIDE      :=   1 << 17;
     CR4_OSXSAVE    :=   1 << 18;
 
-    if check_feature(cpu_features, .SSE) {
-        #asm {
-            get_cr0 cr0:;
-            and cr0, CR0_EM_CLEAR;
-            or  cr0, CR0_MP;
-            set_cr0 cr0;
+    #asm {
+        get_cr0 cr0:;
+        and cr0, CR0_EM_CLEAR;
+        or  cr0, CR0_MP;
+        set_cr0 cr0;
 
-            get_cr4 cr4:;
-            or  cr4, CR4_OSFXSR;
-            or  cr4, CR4_OSXMMEXCPT;
-            set_cr4 cr4;
-        }
+        get_cr4 cr4:;
+        or  cr4, CR4_OSFXSR;
+        or  cr4, CR4_OSXMMEXCPT;
+        // or  cr4, CR4_PCIDE;
+        or  cr4, CR4_FSGSBASE;
+        or  cr4, CR4_OSXSAVE;
+        set_cr4 cr4;
     }
 
-    if check_feature(cpu_features, .PCID) {
-        #asm {
-            get_cr4 cr4:;
-            or  cr4, CR4_PCIDE;
-            set_cr4 cr4;
-        }
-    }
 
-    if check_feature(cpu_features, .FSGSBASE) {
-        #asm {
-            get_cr4 cr4:;
-            or  cr4, CR4_FSGSBASE;
-            set_cr4 cr4;
-        }
-    } else {
-        write_string("Error: FSGSBASE is not supported.\n");
-        bluescreen();
-    }
+    efer := cast(EFER__Extended_Features) read_msr(.EFER__extended_features);
+    efer |= .SCE__syscall;
+    efer |= .NXE__execute_disable_bit;
+    write_msr(.EFER__extended_features, cast(u64) efer);
 
-    if check_feature(cpu_features, .XSAVE) {
-        #asm {
-            get_cr4 cr4:;
-            or  cr4, CR4_OSXSAVE;
-            set_cr4 cr4;
-        }
-    }
-
-    assert(check_feature(cpu_features, .PAT), "Page Attribute Table is not supported.\n");
 
     // Mask out all the FP exceptions for now
     mxcsr := Mxcsr.MASK_ALL;
