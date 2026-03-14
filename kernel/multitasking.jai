@@ -1,7 +1,8 @@
 
 Task_Info :: struct {
 
-    // These fields must match the task switch assembly routine
+    // CPU context. General registers and RFLAGS+RIP are stored on the stack.
+    // Layout must match the one used by context_switch in assembly.asm
     rsp: *void;
     cr3: u64;
     xsave: Xsave_Area #align 16;
@@ -29,6 +30,21 @@ Task_Info :: struct {
     #as using queue_node: List_Node(#this);
 
     on_core: *X64_Core;
+    execution_context: *Execution_Context;
+}
+
+Execution_Context :: struct {
+    tasks: [..] *Task_Info;
+
+    root_page_table: u64;
+
+    virtual_memory_regions: [..] struct {
+        base: *void;
+        size_pages: int;
+    };
+
+    name: string;
+    trace_name: Trace_String;
 }
 
 Task_Priority :: enum s8 {
@@ -194,10 +210,18 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     release(*scheduler.spinlock);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, name: string, user_data: *void = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, name: string, user_data := null, execution_context: *Execution_Context = null) -> *Task_Info {
 
     new_task := allocate_task_info();
-    new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
+
+    if execution_context {
+        new_task.execution_context = execution_context;
+        new_task.cr3 = execution_context.root_page_table;
+
+        array_add(*execution_context.tasks, new_task);
+    } else {
+        new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    }
 
     new_task.kernel_stack = allocate_guarded_memory(kernel_stack_size, 0x1_0000);
     new_task.kernel_stack += kernel_stack_size;
@@ -231,6 +255,19 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, name: string, us
     trace(.create_task, new_task.id, new_task.trace_name);
 
     return new_task;
+}
+
+create_execution_context :: (name: string) -> *Execution_Context {
+    ec := New(Execution_Context,, global.small_objects);
+    ec.name = name;
+    ec.trace_name = add_trace_string(name);
+
+    ec.root_page_table = get_4k_page();
+
+    page_table := cast(*u64) (ec.root_page_table + DIRECT_MAPPING_BASE);
+    memcpy(*page_table[256], *global.page_tables.pml4[256], 256*8);
+
+    return ec;
 }
 
 yield_execution :: schedule_tasks;
@@ -288,6 +325,8 @@ schedule_tasks :: () {
 
     previous  := get_current_task();
     scheduler := lock_scheduler_for_task(previous);
+
+    unset_flag(.preempt, previous);
 
     // This all uses apollo time but should probably use native clock counter values for performance.
     time_now  := get_monotonic_system_time();
@@ -434,7 +473,7 @@ maybe_reschedule :: () #c_call {
         return; // It's early during boot.
     }
 
-    if task.flags & .preempt == 0 {
+    if task.flags & (.preempt | .stopped) == 0 {
         return;
     }
 
@@ -447,7 +486,6 @@ maybe_reschedule :: () #c_call {
     }
 
     push_context {
-        unset_flag(.preempt, task);
         schedule_tasks();
     }
 }
@@ -796,7 +834,7 @@ fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Cod
 
 
 
-simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2) {
+simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2, execution_context: *Execution_Context = null) {
     simple_thread_entry :: () {
         task := get_current_task();
         user_data: T = (.*) cast(*T) task.user_data;
@@ -807,7 +845,7 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     data := alloc(size_of(T));
     memcpy(data, *user_data, size_of(T));
 
-    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data);
+    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data, execution_context = execution_context);
 
     core := *global.processor_cores[core_id];
     assert(core.online);
@@ -815,13 +853,13 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     put_task_on_core(task, core);
 }
 
-simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2) {
+simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2, execution_context: *Execution_Context = null) {
     wrapper :: (param: void) {
         inline proc();
     }
 
     x: void;
-    simple_create_thread(wrapper, x, name, format, core_id);
+    simple_create_thread(wrapper, x, name, format, core_id, execution_context);
 }
 
 
@@ -831,6 +869,8 @@ load_and_run_elf_executable :: (elf_data: string) {
     assert(success);
 
     using Page_Flags;
+
+    task := get_current_task();
 
     for elf.program_header_table {
         if it.type != .LOAD {
@@ -864,11 +904,11 @@ load_and_run_elf_executable :: (elf_data: string) {
         if it.flags & .EXEC  == 0 flags |= EXECUTE_DISABLE;
 
         change_page_flags(virtual, pages, flags);
+
+        array_add(*task.execution_context.virtual_memory_regions, {virtual, pages});
     }
 
-    // Todo: This should be no_context, not c_call.
-    entry_point := (.*) cast(*() #c_call) *(elf.header.entry);
-    task := get_current_task();
+    entry_point := (.*) cast(*() #no_context) *(elf.header.entry);
 
     {
         // Allocate a user mode stack for the task.
@@ -885,6 +925,8 @@ load_and_run_elf_executable :: (elf_data: string) {
         // Todo: Update the stack tracing logic to work better with user mode stacks.
         task.user_stack -= 8;
         (.*) cast(*u64) task.user_stack = DIRECT_MAPPING_BASE;
+
+        array_add(*task.execution_context.virtual_memory_regions, {virtual, stack_size / 4096});
     }
 
     enter_user_mode(entry_point, task.user_stack);
@@ -901,9 +943,6 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     task := get_current_task();
     context.temporary_storage = task.temporary_storage;
 
-    // I would prefer to generate syscalls based on an array, using #run.
-    // But for know it's done in first.jai using @notes.
-
     inline do_auto_generated_syscall_dispatch(data);
 
     reset_temporary_storage();
@@ -919,9 +958,7 @@ display_string :: (data: *u8, count: s64) {
 
 stop_executing :: () {
     task := get_current_task();
-
     set_flag(.stopped, task);
-    yield_execution();
 } @Syscall(2)
 
 
@@ -933,7 +970,7 @@ get_kernel_stack :: () -> *void #c_call {
     return task.kernel_stack;
 }
 
-enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
+enter_user_mode :: (entry_point: () #no_context, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
 
 
 

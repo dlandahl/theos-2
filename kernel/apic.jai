@@ -292,6 +292,9 @@ startup_application_processors :: () {
         set(*ipi, .destination, it.local_apic_id);
         apic_execute_ipi(ipi);
     }
+
+    unmap_pages(cast(*void) 0x8000, 1);
+
 }
 
 ap_startup_bin :: #run,host -> [] u8 {
@@ -617,35 +620,54 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     core := get_current_core();
     task := core.scheduler.current_task;
 
-    b: String_Builder;
-
-    print(*b, "\nPage Fault (On core %, running thread \"%\")\n", core.id, task.name);
-
-    _cr2: u64;
+    _cr2: *void;
     #asm { get_cr2 _cr2; }
     cr2 := _cr2;
+
+    Flags :: enum_flags u32 {
+        PRESENT;
+        WRITE;
+        USER;
+        RESERVED_WRITE;
+        INSTRUCTION_FETCH;
+        PROTECTION_KEY;
+        SHADOW_STACK;
+    }
+
+    flags := cast(Flags)stack.error_code;
+    was_fetch := flags & .INSTRUCTION_FETCH > 0;
+    was_write := flags & .WRITE             > 0;
+
+    settings := get_page_settings(cr2);
+
+    if stack.cs == .RING3_CODE {
+        b: String_Builder;
+        print(*b, "Task \"%\": memory access violation at %. ", task.name, cr2);
+
+        if      !settings.usermode_accessible     print(*b, "This was a privilege violation.\n");
+        else if !settings.present                 print(*b, "The page is not mapped.\n");
+        else if !settings.writeable  && was_write print(*b, "This was a write to a read-only page.\n");
+        else if !settings.executable && was_fetch print(*b, "Tried to execute code from memory not marked executable.\n");
+
+        write_builder(*b);
+
+        set_flag(.stopped, task);
+        return;
+    }
+
+    b: String_Builder;
+    print(*b, "\nPage Fault (On core %, running thread \"%\")\n", core.id, task.name);
 
     {
         push_print_style().base = 16;
 
-        print(*b, "Virtual Address: 0x%\n", cr2);
+        print(*b, "Virtual Address: %\n", cr2);
+        print(*b, "Error flags: %\n\n",     flags);
 
-        Flags :: enum_flags u32 {
-            PRESENT;
-            WRITE;
-            USER;
-            RESERVED_WRITE;
-            INSTRUCTION_FETCH;
-            PROTECTION_KEY;
-            SHADOW_STACK;
-        }
-        flags := cast(Flags)stack.error_code;
-        print(*b, "Error flags: %\n\n", flags);
-
-        print(*b, "RIP: 0x%\n", stack.ip);
-        print(*b, "RSP: 0x%\n", stack.sp);
-        print(*b, "SS: %\n", stack.ss);
-        print(*b, "CS: %\n", stack.cs);
+        print(*b, "RIP: 0x%\n",  stack.ip);
+        print(*b, "RSP: 0x%\n",  stack.sp);
+        print(*b, "SS: %\n",     stack.ss);
+        print(*b, "CS: %\n",     stack.cs);
 
         print(*b, "\n");
     }

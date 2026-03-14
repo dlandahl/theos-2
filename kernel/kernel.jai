@@ -130,7 +130,7 @@ kernel_entry :: () #no_context {
 
     // Clear the UEFI identity map now that booting is complete.
     global.boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
-    for *global.page_tables.boot_pdpt it.* = 0;
+    global.page_tables.pml4[0] = 0;
 
     {
         // Initialize cpu-local data really early, because it's useful to have e.g. core ID and interrupt_context_active available.
@@ -370,8 +370,16 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        inspect_address(cast(*void) 0xffff_ffff_8000_1000);
-        disk_test(nvme_sd);
+        file_system := disk_test(nvme_sd);
+        root        := fat16_get_root_directory(*file_system);
+
+        success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
+        assert(success);
+
+        for 1..5 {
+            ec := create_execution_context("Test");
+            simple_create_thread(load_and_run_elf_executable, elf, name="Userspace Test", execution_context = ec);
+        }
 
         {
             set_flag(.stopped, get_current_task());
@@ -380,7 +388,7 @@ kernel_entry :: () #no_context {
     }
 }
 
-disk_test :: (sd: Storage_Device) {
+disk_test :: (sd: Storage_Device) -> Fat16_File_System {
 
     buffer_base, physical := allocate_page_aligned_physical_memory(0xa0_0000);
 
@@ -390,6 +398,8 @@ disk_test :: (sd: Storage_Device) {
 
     transfer: Transfer_Request;
     transfer_done: Semaphore;
+
+    file_system: Fat16_File_System;
 
     start := get_monotonic_time();
 
@@ -406,18 +416,13 @@ disk_test :: (sd: Storage_Device) {
 
     {
         // Do some stuff with the loaded file system.
-        file_system := fat16_parse_file_system(buffer);
+        file_system  = fat16_parse_file_system(buffer);
         root        := fat16_get_root_directory(*file_system);
 
         fat16_create_directory(root, "THEOS");
 
         text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
         fat16_write_file(root, "THEOS/TEST", text);
-
-        success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
-        assert(success);
-
-        simple_create_thread(load_and_run_elf_executable, elf);
 
         trace := serialize_trace_buffers();
         fat16_write_file(root, "THEOS/TRACE", trace);
@@ -438,7 +443,7 @@ disk_test :: (sd: Storage_Device) {
     end   := get_monotonic_time();
     log("Elapsed: %ms", to_milliseconds(end - start));
 
-    free_block(*global.physical_block_allocator, buffer_base);
+    return file_system;
 }
 
 
@@ -1136,6 +1141,8 @@ Page_Flags :: enum_flags u64 {
     PDE_PAGE_ATTRIBUTE_TABLE :: 1 << 12;  // For 2Mb and 1Gb pages.
 
     EXECUTE_DISABLE :: 1 << 63;
+
+    MASK            :: 0xfff | EXECUTE_DISABLE; // Todo: Incomplete.
 }
 
 decode_virtual_address :: (address: u64) -> [4]u64 {
@@ -1173,9 +1180,18 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
 
     `it_index: int;
 
+    current_root_page_table: *u64;
+
+    task := get_current_task();
+    if task {
+        current_root_page_table = cast(*u64) (get_current_task().cr3 + DIRECT_MAPPING_BASE);
+    } else {
+        current_root_page_table = global.page_tables.pml4.data;
+    }
+
     // Cache the addresses of tables above us, so we don't have to walk from the root when going up the tree. Maybe not worth it? It would make the code much simpler if we didn't do this.
     tables: [4] *u64;
-    tables[3] = global.page_tables.pml4.data;
+    tables[3] = current_root_page_table;
 
     it.level = 3;
 
@@ -1184,7 +1200,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
             // If we're not in the lowest level, go deeper.
             it.level -= 1;
 
-            next_table_physical_address := it.value & ~0x8000_0000_0000_0fff;
+            next_table_physical_address := it.value & cast(u64) ~Page_Flags.MASK;
             tables[it.level] = cast(*u64) (next_table_physical_address + DIRECT_MAPPING_BASE);
             return;
         }
@@ -1245,8 +1261,8 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
         if it.level == 0 {
             assert(it.flags & .PRESENT == 0);
 
-            virtual  := virtual_start  + cast(u64)it_index * 4096;
-            physical := physical_start + cast(u64)it_index * 4096;
+            virtual  := virtual_start  + cast(u64) it_index * 4096;
+            physical := physical_start + cast(u64) it_index * 4096;
 
             it.value  = physical;
             it.flags |= page_flags;
@@ -1275,12 +1291,13 @@ change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Pag
     for VM_Iterator.{virtual_start, page_count} {
         assert(it.flags & .PAGE_SIZE == 0);
 
+        // Todo: All these routines should be set up to work with large pages too, since those shouldbe used in the future whenever possible.
         if it.level == 0 {
             assert(it.flags & .PRESENT > 0);
 
-            virtual := virtual_start + cast(u64)it_index * 4096;
+            virtual := virtual_start + cast(u64) it_index * 4096;
 
-            it.flags &= ~0xfff;
+            it.flags &= ~Page_Flags.MASK;
             it.flags |=  new_page_flags;
 
             pg := *virtual;
@@ -1292,7 +1309,7 @@ change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Pag
         // Any page tables should be present for this to work.
         assert(it.flags & .PRESENT > 0);
 
-        it.flags &= ~0xfff;
+        it.flags &= ~Page_Flags.MASK;
         it.flags |=  new_page_flags & ~.EXECUTE_DISABLE; // NX gets ORed rather than ANDed between page table levels, so we only want to set it at the lowest level.
     }
 }
@@ -1317,7 +1334,7 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
 
     {
         // Fast path if the address is in the direct mapping.
-        u64_address := cast(u64)virtual_address;
+        u64_address := cast(u64) virtual_address;
 
         if u64_address >= DIRECT_MAPPING_BASE && u64_address < DIRECT_MAPPING_END {
             return u64_address - DIRECT_MAPPING_BASE, true;
@@ -1330,10 +1347,10 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
         if !is_present return 0, false;
         if it.level != 0 && (it.flags & .PAGE_SIZE == 0) continue;
 
-        mask := u64.[0xfff, 0x1f_ffff, 0x3fff_ffff][it.level];
+        offset_in_page_mask := (1 << (it.level * 9)) - 1;
 
-        address        := it.value & ~0xfff;
-        offset_in_page := cast(u64)virtual_address & mask;
+        address        := it.value & cast(u64) ~Page_Flags.MASK;
+        offset_in_page := cast(u64) virtual_address & offset_in_page_mask;
 
         return address + offset_in_page, is_present;
     }
@@ -1341,14 +1358,57 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
     return 0, false;
 }
 
+// For error reporting:
+Page_Settings :: struct {
+    present:             bool;
+    writeable:           bool;
+    executable:          bool;
+    large_page:          bool;
+    very_large_page:     bool;
+    usermode_accessible: bool;
+}
+
+get_page_settings :: (virtual_address: *void) -> Page_Settings {
+
+    page_base := virtual_address & ~0xfff;
+
+    settings: Page_Settings;
+    settings.present    = true;
+    settings.writeable  = true;
+    settings.executable = true;
+    settings.usermode_accessible = true;
+
+    for VM_Iterator.{page_base, 1} {
+
+        if it.flags & .PRESENT == 0 {
+            return {};
+        }
+
+        settings.writeable           &&= it.flags & .READ_WRITE      >  0;
+        settings.executable          &&= it.flags & .EXECUTE_DISABLE == 0;
+        settings.usermode_accessible &&= it.flags & .USER_SUPERVISOR >  0;
+
+        if it.level > 0 && it.level < 3 && it.flags & .PAGE_SIZE > 0 {
+            settings.very_large_page = it.level == 2;
+            settings.large_page      = it.level == 1;
+
+            break;
+        }
+    }
+
+    return settings;
+}
+
 inspect_address :: (virtual_address: *void) {
     for VM_Iterator.{virtual_address, 1} {
-        address := it.value & ~0x8000_0000_0000_0fff;
-        flags   := it.flags &  0x8000_0000_0000_0fff;
+        address := it.value & cast(u64) ~Page_Flags.MASK;
+        flags   := it.flags &            Page_Flags.MASK;
 
         log("Level %: Physical address = %, flags = %", it.level, hex(address), flags);
     }
 }
+
+
 
 tlb_shootdown_test :: () {
 
