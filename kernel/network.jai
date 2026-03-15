@@ -2320,7 +2320,7 @@ allocate_ring_buffer :: (ring: *Ring_Buffer, size: int) {
     page_count := size / 4096;
 
     physical_base, physical := allocate_page_aligned_physical_memory(size);
-    virtual := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) size * 2);
+    virtual := cast(*void) alloc_block(*global.virtual_block_allocator, size * 2);
 
     map_pages(virtual,        physical, page_count);
     map_pages(virtual + size, physical, page_count);

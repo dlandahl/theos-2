@@ -212,7 +212,7 @@ initialize_apic :: () {
             ioapic_ics := cast(*Ics_Io_Apic) ics;
 
             if ioapic_ics.global_system_interrupt_base != 0 {
-                // Todo: For now we ignore additional IO APICS that are there to support larger numbers of GSIs.
+                // Todo: For now we ignore additional IO APICs that are there to support larger numbers of GSIs.
                 continue;
             }
 
@@ -654,7 +654,6 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         write_builder(*b);
 
         set_flag(.stopped, task);
-        return;
     }
 
     b: String_Builder;
@@ -671,6 +670,7 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         print(*b, "SS: %\n",     stack.ss);
         print(*b, "CS: %\n",     stack.cs);
 
+        print(*b, "%", stack.registers);
         print(*b, "\n");
     }
 
@@ -917,11 +917,11 @@ uacpi_kernel_map :: (address: uacpi_phys_addr, length: uacpi_size) -> *void #c_c
         assert(length != 0);
 
         offset_in_page := address & 0xfff;
-        pages_needed   := (length + offset_in_page + 4095) / 4096;
+        pages_needed   := cast(s64) (length + offset_in_page + 4095) / 4096;
 
         virtual := cast(*void) alloc_block(*global.virtual_block_allocator, pages_needed * 4096);
 
-        map_pages(virtual, address - offset_in_page, cast(s64) pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        map_pages(virtual, address - offset_in_page, pages_needed, .READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
         return virtual + offset_in_page;
     }

@@ -36,9 +36,12 @@ Task_Info :: struct {
 Execution_Context :: struct {
     root_page_table: u64;
 
-    virtual_memory_regions: [..] struct {
-        base: *void;
-        size_pages: int;
+    heap: Block_Allocator;
+
+    memory_allocations: [..] struct {
+        virtual: *void;
+        physical: [..] u64;
+        pages: int;
     };
 
     name: string;
@@ -208,7 +211,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     release(*scheduler.spinlock);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, name: string, user_data := null, execution_context: *Execution_Context = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, user_data := null, execution_context: *Execution_Context = null) -> *Task_Info {
 
     new_task := allocate_task_info();
 
@@ -264,6 +267,8 @@ create_execution_context :: (name: string) -> *Execution_Context {
     memcpy(*page_table[256], *global.page_tables.pml4[256], 256*8);
 
     trace(.create_ec, ec.trace_name);
+
+    init_block_allocator(*ec.heap, 0x4000_0000, 0x4000_0000, 4096);
 
     return ec;
 }
@@ -902,8 +907,6 @@ load_and_run_elf_executable :: (elf_data: string) {
         if it.flags & .EXEC  == 0 flags |= EXECUTE_DISABLE;
 
         change_page_flags(virtual, pages, flags);
-
-        array_add(*task.execution_context.virtual_memory_regions, {virtual, pages});
     }
 
     entry_point := (.*) cast(*() #no_context) *(elf.header.entry);
@@ -923,8 +926,6 @@ load_and_run_elf_executable :: (elf_data: string) {
         // Todo: Update the stack tracing logic to work better with user mode stacks.
         task.user_stack -= 8;
         (.*) cast(*u64) task.user_stack = DIRECT_MAPPING_BASE;
-
-        array_add(*task.execution_context.virtual_memory_regions, {virtual, stack_size / 4096});
     }
 
     enter_user_mode(entry_point, task.user_stack);
@@ -937,6 +938,8 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
 
     trace(.syscall, data.rax);
+
+    push_print_style().use_newlines_if_long_form = true;
 
     task := get_current_task();
     context.temporary_storage = task.temporary_storage;
@@ -959,14 +962,76 @@ stop_executing :: () {
     set_flag(.stopped, task);
 } @Syscall(2)
 
-
-
-// This is needed by the syscall handler implemented in assembly.
-#program_export
-get_kernel_stack :: () -> *void #c_call {
+allocate_memory :: (size: int) -> *void {
     task := get_current_task();
-    return task.kernel_stack;
-}
+
+    allocation := array_add(*task.execution_context.memory_allocations);
+
+    pages       := (size + 4095) / 4096;
+    virtual     := cast(*void) alloc_block(*task.execution_context.heap, pages * 4096);
+
+    array_resize(*allocation.physical, pages);
+
+    for 0..pages-1 {
+        allocation.physical[it] = get_4k_page();
+
+        map_pages(virtual + it * 4096, allocation.physical[it], 1, .PRESENT | .READ_WRITE | .USER_SUPERVISOR);
+    }
+
+    allocation.pages = pages;
+    allocation.virtual = virtual;
+
+    return virtual;
+} @Syscall(3)
+
+free_memory :: (address: *void) {
+    task := get_current_task();
+
+    for task.execution_context.memory_allocations {
+        if it.virtual != address continue;
+
+        for page_index: 0..it.pages-1 {
+            virtual := it.virtual + page_index * 4096;
+
+            unmap_pages(virtual, 1);
+
+            free_4k_page(it.physical[page_index]);
+        }
+
+        free_block(*task.execution_context.heap, cast(u64) address);
+
+        return;
+    }
+
+    assert(false);
+} @Syscall(4)
+
+create_thread :: (entry_point: () #no_context) {
+    old_task := get_current_task();
+
+    forward_to_usermode :: () {
+        task := get_current_task();
+        entry_point := cast(() #no_context) task.user_data;
+        enter_user_mode(entry_point, task.user_stack);
+    }
+
+    new_task := create_task(
+        entry_point       = forward_to_usermode,
+        name              = "Secondary",
+        user_data         = cast(*void) entry_point,
+        execution_context = old_task.execution_context
+    );
+
+    new_task.user_stack = allocate_memory(0x1_0000) + 0x1_0000;
+
+    r := cast(s64) random_get() % global.processor_cores.count;
+    put_task_on_core(new_task, *global.processor_cores[r]);
+} @Syscall(5)
+
+sleep_for_milliseconds :: (ms: int) {
+    sleep(ms, .milliseconds);
+} @Syscall(6)
+
 
 enter_user_mode :: (entry_point: () #no_context, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
 
@@ -1072,7 +1137,6 @@ memory_test :: () {
         for 1..threads_per_core {
             task := create_task(proc, kernel_stack_size = 0x4_0000, name = "Memory Tester");
             put_task_on_core(task, core);
-
         }
     }
 }

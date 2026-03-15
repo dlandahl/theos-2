@@ -372,10 +372,8 @@ kernel_entry :: () #no_context {
         success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
         assert(success);
 
-        for 1..5 {
-            ec := create_execution_context("Test");
-            simple_create_thread(load_and_run_elf_executable, elf, name=tprint("Userspace %", it), execution_context = ec);
-        }
+        ec := create_execution_context("Test");
+        simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", execution_context = ec);
 
         {
             set_flag(.stopped, get_current_task());
@@ -510,7 +508,7 @@ set_runtime_support_callbacks :: () #no_context {
                 }
             }
 
-            physical := alloc_block(*global.physical_block_allocator, cast(u64) size);
+            physical := alloc_block(*global.physical_block_allocator, size);
             virtual := cast(*void) physical + DIRECT_MAPPING_BASE;
 
             if is_resize {
@@ -1114,7 +1112,7 @@ allocate_page_aligned_physical_memory :: (size_bytes: s64) -> base: u64, aligned
     guaranteed_alignment := global.physical_block_allocator.alignment;
     padded_size          := size_bytes + 4096 - guaranteed_alignment;
 
-    allocated_base := alloc_block(*global.physical_block_allocator, cast(u64)padded_size);
+    allocated_base := alloc_block(*global.physical_block_allocator, padded_size);
     aligned := align(4096, allocated_base);
 
     // When freeing this memory, call free_block on allocated_base.
@@ -1265,6 +1263,7 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
             it.value  = physical;
             it.flags |= page_flags;
 
+            flush_address_translation(it.virtual);
             continue;
         }
 
@@ -1277,6 +1276,8 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
 
         it.value  = new_table;
         it.flags |= page_flags;
+
+        flush_address_translation(it.virtual);
     }
 }
 
@@ -1287,24 +1288,18 @@ change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Pag
         assert(it.flags & .PAGE_SIZE == 0);
 
         // Todo: All these routines should be set up to work with large pages too, since those should be used in the future whenever possible.
-        if it.level == 0 {
-            assert(it.flags & .PRESENT > 0);
-
-            it.flags &= ~Page_Flags.MASK;
-            it.flags |=  new_page_flags;
-
-            flush_address_translation(it.virtual);
-
-            continue;
-        }
 
         // Any page tables should be present for this to work.
         assert(it.flags & .PRESENT > 0);
 
-        it.flags &= ~Page_Flags.MASK; // Todo: We can't just get rid of all flags at all levels, since it will remove flags for mappings we don't want to touch.
-        it.flags |=  new_page_flags & ~.EXECUTE_DISABLE; // NX gets ORed rather than ANDed between page table levels, so we only want to set it at the lowest level.
+        it.flags &= ~Page_Flags.MASK;
 
-        // I don't fully understand why this is needed, because we always call it for level 0 of the same virtual address. But it is needed.
+        if it.level == 0 {
+            it.flags |= new_page_flags;
+        } else {
+            it.flags |= new_page_flags & ~.EXECUTE_DISABLE; // NX gets ORed rather than ANDed between page table levels, so we only want to set it at the lowest level.
+        }
+
         flush_address_translation(it.virtual);
     }
 }
@@ -1531,15 +1526,9 @@ find_block :: (using allocator: *Block_Allocator, address: u64) -> *Block_Desc, 
     return null, m;
 }
 
-alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64) -> address: u64 {
+alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: int) -> address: u64 {
 
-    bytes_wanted: u64;
-
-    if alignment {
-        bytes_wanted = align(alignment, unaligned_bytes_wanted);
-    } else {
-        bytes_wanted = unaligned_bytes_wanted;
-    }
+    bytes_wanted := cast(u64) align(alignment, unaligned_bytes_wanted);
 
     Scoped_Acquire(*spinlock);
 
@@ -2113,7 +2102,7 @@ allocate_guarded_memory :: (size: int, guard_region_size: int, flags := Page_Fla
     physical_base, physical_aligned := allocate_page_aligned_physical_memory(size);
 
     virtual_size := size + 2 * guard_region_size;
-    virtual      := alloc_block(*global.virtual_block_allocator,  cast(u64) virtual_size);
+    virtual      := alloc_block(*global.virtual_block_allocator,  virtual_size);
 
     physical_pages    := size / 4096;
     client_address    := cast(*void) virtual + guard_region_size;

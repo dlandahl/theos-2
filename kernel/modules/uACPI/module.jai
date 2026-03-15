@@ -2393,7 +2393,7 @@ acpi_madt :: struct {
     hdr:                                acpi_sdt_hdr;
     local_interrupt_controller_address: uacpi_u32 #align 1;
     flags:                              uacpi_u32 #align 1;
-//     entries:                            *acpi_entry_hdr;// Incomplete array in C (zero-sized)
+    entries:                            void;
 }
 
 acpi_madt_lapic :: struct {

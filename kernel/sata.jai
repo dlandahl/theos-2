@@ -105,7 +105,7 @@ init_sata_controller :: (device: *Pci_Device) -> c: *Sata_Controller = null, suc
         // Todo: Make this easier to understand.
         memory_needed := list_size + fis_size + command_slot_count * 4096 + 4096;
 
-        virtual  := cast(*void) alloc_block(*global.virtual_block_allocator, cast(u64) memory_needed);
+        virtual  := cast(*void) alloc_block(*global.virtual_block_allocator, memory_needed);
         _, physical := allocate_page_aligned_physical_memory(memory_needed);
 
         pages_needed := cast(int) memory_needed / 4096;

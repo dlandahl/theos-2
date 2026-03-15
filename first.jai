@@ -388,11 +388,13 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     result_assembly_code := builder_to_string(*interrupt_assembly);
 
                     {
-                        // We save these on the stack during context switch, so assembly needs to know their offset within CPU-local data.
+                        // We save these on the stack during context switch, so assembly needs to know their offset within CPU-local data. Todo: Clean this up.
                         offset_ica := get_struct_field_offset_from_another_workspace("X64_Core", "interrupt_context_active", workspace);
                         offset_idq := get_struct_field_offset_from_another_workspace("X64_Core", "irq_disable_count", workspace);
+                        offset_tss := get_struct_field_offset_from_another_workspace("X64_Core", "task_state_segment", workspace);
+                        offset_rsp := get_struct_field_offset_from_another_workspace("Task_State_Segment", "rsp", workspace);
 
-                        offset_string := tprint("\ninterrupt_context_active equ %\nirq_disable_count equ %\n\n", offset_ica, offset_idq);
+                        offset_string := tprint("\ninterrupt_context_active equ %\nirq_disable_count equ %\ntss_ring0_stack equ %\n\n", offset_ica, offset_idq, offset_tss + offset_rsp);
                         result_assembly_code = join(offset_string, result_assembly_code);
                     }
 
@@ -446,10 +448,10 @@ compile_userspace :: () -> bool {
             options.output_executable_name = name;
             options.output_path = "userspace/artifacts";
             options.text_output_flags = 0;
-            options.entry_point_name = "user_entry";
+            options.entry_point_name = "main";
             options.os_target = .LINUX;
-            options.additional_linker_arguments = .["-euser_entry"];
-
+            options.additional_linker_arguments = .["-emain"];
+            
             options.arithmetic_overflow_check = .FATAL;
 
             new_path: [..] string;

@@ -96,19 +96,19 @@ global syscall_entry
 
 align 16
 syscall_entry:
+    mov [gs:tss_ring0_stack + 8], rsp ; Todo: Not the right place to store the user stack pointer.
+    mov rsp, [gs:tss_ring0_stack]
+
     pushfq
     push_all
-    mov r12, rsp
 
-    call get_kernel_stack
-    mov rsp, rax
-
-    mov rdi, r12
+    mov rdi, rsp
     call syscall_handler
 
-    mov rsp, r12
     pop_all
     popfq
+
+    mov rsp, [gs:tss_ring0_stack + 8]
 
     o64 sysret
 
