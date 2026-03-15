@@ -324,10 +324,6 @@ kernel_entry :: () #no_context {
 
         startup_application_processors();
 
-        for *core: global.processor_cores {
-            while !core.online pause();
-        }
-
         irq_restore();
 
         // Todo: Clean this up.

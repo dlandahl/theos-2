@@ -256,24 +256,19 @@ startup_application_processors :: () {
     Ap_Startup_Data :: struct {
         // Layout matches the ap_startup assembly code.
         stack: *void;
-        entry_point: *void;
+        entry_point: () #c_call;
         pml4: u64;
     }
 
     ap_startup_data := cast(*Ap_Startup_Data) (bootstrap_page + 0x200);
-    ap_startup_data.entry_point = cast(*void) ap_entry_point;
-    ap_startup_data.pml4 = get_physical_address(*global.boot_data.page_tables.pml4);
+    ap_startup_data.entry_point = ap_entry_point;
+    ap_startup_data.pml4 = get_physical_address(global.page_tables.pml4.data);
 
     for* global.processor_cores {
         if it_index == 0 {
             // This is the bootstrap processor.
             continue;
         }
-
-        // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
-        // Maybe if processors could use their APIC ID to find their stack memory it would be faster.
-        // Todo: Maybe this needs a timeout in case a core fails to start.
-        acquire(*ap_startup_spinlock);
 
         stack_size :: 0x1_0000;
         guard_size :: 0x1_0000;
@@ -292,6 +287,12 @@ startup_application_processors :: () {
         set(*ipi, .vector, bootstrap_page / 4096);
         set(*ipi, .destination, it.local_apic_id);
         apic_execute_ipi(ipi);
+
+        // This is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
+        // It also protects the bootstrap page mapping. Maybe if processors could use their APIC ID to find their stack memory it would be faster.
+        // Todo: This actually waits until the scheduler is fully initialized on that core, which is longer than necessary. We only need to wait
+        // until the stack is loaded and the entry point is called. Todo: Maybe this needs a timeout in case a core fails to start.
+        while !it.online pause();
     }
 
     unmap_pages(cast(*void) bootstrap_page, 1);
@@ -305,12 +306,8 @@ ap_startup_bin :: #run,host -> [] u8 {
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
-ap_startup_spinlock: Spinlock(lock_type = .RAW);
-
 ap_entry_point :: () #c_call {
     set_stack_trace_sentinel();
-
-    release(*ap_startup_spinlock);
 
     push_context {
         // This thread doesn't have temporary storage, but it barely needs it so we let it go to the default allocator (physical_block_allocator).
