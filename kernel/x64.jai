@@ -71,7 +71,7 @@ Interrupt_Gate_Descriptor :: struct {
 
 register_interrupt_gate :: (handler: () #c_call, index: $T/.[int, Interrupt_Gate], trap := false, ist: u8 = 0) {
     desc := *global.interrupt_descriptor_table[index];
-    desc.* = .{};
+    desc.* = {};
 
     address := cast(u64) cast(*void) handler;
     desc.offset_1 = xx  address        & 0xffff;

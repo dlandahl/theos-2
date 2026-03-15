@@ -5,6 +5,7 @@ Trace_Tag :: enum u16 {
     context_switch;
     start_task;
     create_task;
+    create_ec;
     scheduling_timer;
     syscall;
     small_object_alloc;

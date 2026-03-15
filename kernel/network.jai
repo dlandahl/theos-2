@@ -424,11 +424,11 @@ blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIME
         if cursor == bytes break;
 
         if !wait_for(*tcp.in_data, timeout) {
-            return .{};
+            return {};
         }
     }
 
-    return .{bytes, buffer};
+    return {bytes, buffer};
 }
 
 blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool, written: int {
@@ -915,7 +915,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
     if tcp.handshake_state != .ESTABLISHED {
         log_error("Trying to create a TLS connection without an established TCP connection.");
-        return .{};
+        return {};
     }
 
 
@@ -1874,7 +1874,7 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
 
     time := get_monotonic_time();
 
-    array_add(*net.pings_in_flight, .{
+    array_add(*net.pings_in_flight, {
         id = icmp.data,
         destination_ip = destination_ip,
         sent_at = time,

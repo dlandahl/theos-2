@@ -34,8 +34,6 @@ Task_Info :: struct {
 }
 
 Execution_Context :: struct {
-    tasks: [..] *Task_Info;
-
     root_page_table: u64;
 
     virtual_memory_regions: [..] struct {
@@ -134,7 +132,7 @@ allocate_task_info :: () -> *Task_Info {
 
     acquire(*task_info_storage_spinlock);
 
-    locator, task := bucket_array_add(*tasks, .{});
+    locator, task := bucket_array_add(*tasks, {});
     task.id = next_task_id;
     next_task_id += 1;
 
@@ -217,8 +215,6 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4_0000, name: string, us
     if execution_context {
         new_task.execution_context = execution_context;
         new_task.cr3 = execution_context.root_page_table;
-
-        array_add(*execution_context.tasks, new_task);
     } else {
         new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
     }
@@ -266,6 +262,8 @@ create_execution_context :: (name: string) -> *Execution_Context {
 
     page_table := cast(*u64) (ec.root_page_table + DIRECT_MAPPING_BASE);
     memcpy(*page_table[256], *global.page_tables.pml4[256], 256*8);
+
+    trace(.create_ec, ec.trace_name);
 
     return ec;
 }

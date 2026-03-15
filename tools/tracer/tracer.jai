@@ -53,7 +53,7 @@ get_string :: (id: Trace_String) -> string {
 
 parse_trace_data :: (_trace_file: string) {
     trace_file := _trace_file;
-    trace_data = .{};
+    trace_data = {};
 
     start := find_index_from_left(trace_file, KERNEL_TRACE_MAGIC_STRING);
     if start == -1 {
@@ -332,7 +332,7 @@ draw_one_frame :: (dt: float) {
         {
             label(left_label, "Trace File:", *tl);
 
-            ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
+            ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else {1, 0, 0, 1};
             ti.text_color_pressed = ti.text_color;
 
             action, new_text, state := text_input(left_box, trace_file_name, *ti);
@@ -351,7 +351,7 @@ draw_one_frame :: (dt: float) {
         {
             label(right_label, "Debug Info:", *tl);
 
-            ti.text_color = ifx kernel_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
+            ti.text_color = ifx kernel_file_exists then my_theme.text_input_theme.text_color else {1, 0, 0, 1};
             ti.text_color_pressed = ti.text_color;
 
             action, new_text, state := text_input(right_box, kernel_file_name, *ti);
@@ -381,15 +381,15 @@ draw_one_frame :: (dt: float) {
         ct := my_theme.checkbox_theme;
         ct.font = bigger_mono_font;
         // ct.button_theme.label_theme = t;
-        // ct.text_color_selected = .{1, 0.9, 0.8, 1};
-        // ct.text_color          = .{.55, .55, .55, 1.0};
-        // ct.text_color_pressed  = .{1, 0.9, 0.8, 1};
-        // ct.surface_color_flash = .{1, 0.9, 0.8, 1};
-        // ct.surface_color_down  = .{1, 0.9, 0.8, 1};
-        // ct.button_color_selected   = .{1, 0.9, 0.8, 1};
+        // ct.text_color_selected = {1, 0.9, 0.8, 1};
+        // ct.text_color          = {.55, .55, .55, 1.0};
+        // ct.text_color_pressed  = {1, 0.9, 0.8, 1};
+        // ct.surface_color_flash = {1, 0.9, 0.8, 1};
+        // ct.surface_color_down  = {1, 0.9, 0.8, 1};
+        // ct.button_color_selected   = {1, 0.9, 0.8, 1};
 
         b := my_theme.text_input_theme.button_theme;
-        // b.surface_color = .{.08*.7, .208*.7, .236*.7, 1.0};
+        // b.surface_color = {.08*.7, .208*.7, .236*.7, 1.0};
         b.label_theme.alignment = .Center;
 
         row_rect := visibility_options_rect;
@@ -528,13 +528,13 @@ draw_one_frame :: (dt: float) {
             row_theme.font = mono_font;
 
             if selected_entry != it_index {
-                row_theme.surface_color = .{};
-                row_theme.frame_color = .{};
+                row_theme.surface_color = {};
+                row_theme.frame_color = {};
             }
 
             if array_find(highlighted_trace_entries, it_index) {
-                row_theme.surface_color = .{0.5, 0.3, 0.3, 0.6};
-                row_theme.frame_color = .{0.24, 0.12, 0.12, 0.8};
+                row_theme.surface_color = {0.5, 0.3, 0.3, 0.6};
+                row_theme.frame_color = {0.24, 0.12, 0.12, 0.8};
             }
 
             label_rect := row_rect;
@@ -650,17 +650,17 @@ draw_one_frame :: (dt: float) {
 
             row_label_theme := my_theme.label_theme;
             row_label_theme.alignment = .Left;
-            // row_label_theme.text_color = .{.75, .75, .75, 1};
+            // row_label_theme.text_color = {.75, .75, .75, 1};
             row_label_theme.font = mono_font;
 
             row_button_theme := my_theme.button_theme;
             row_button_theme.alignment = .Left;
             row_button_theme.text_color = row_label_theme.text_color;
             row_button_theme.font = mono_font;
-            row_button_theme.surface_color = .{};
-            row_button_theme.surface_color_over = .{};
-            row_button_theme.frame_color = .{};
-            row_button_theme.frame_color_over = .{};
+            row_button_theme.surface_color = {};
+            row_button_theme.surface_color_over = {};
+            row_button_theme.frame_color = {};
+            row_button_theme.frame_color_over = {};
 
             row_rect := stack_trace_rect;
             row_rect.h = row_height;
@@ -1014,8 +1014,8 @@ theme_proc_mash :: () -> Overall_Theme {
         scrollbar_background.color       = Vector4.{0.09, 0.12, 0.06, 1.0};
         scrollbar_background.frame_color = Vector4.{0.18, 0.24, 0.11, 1.0};
 
-        scrollbar_nib_theme.surface_color      = .{0.361, 0.263, 0.216, 1};
-        scrollbar_nib_theme.frame_color        = .{0.263, 0.149, 0.137, 1};
+        scrollbar_nib_theme.surface_color      = {0.361, 0.263, 0.216, 1};
+        scrollbar_nib_theme.frame_color        = {0.263, 0.149, 0.137, 1};
         scrollbar_nib_theme.surface_color_over = scrollbar_nib_theme.surface_color;
         scrollbar_nib_theme.surface_color_down = scrollbar_nib_theme.surface_color;
         scrollbar_nib_theme.frame_color_over = scrollbar_nib_theme.frame_color;
@@ -1037,9 +1037,9 @@ theme_proc_mash :: () -> Overall_Theme {
         divider_thickness_type = .ABSOLUTE_FROM_THEME_FIELD;
         divider_thickness = 20;
 
-        divider_theme.surface_color      = .{1, 0.9, 0.8, 1};;
+        divider_theme.surface_color      = {1, 0.9, 0.8, 1};;
         divider_theme.frame_color        = highlight;
-        divider_theme.frame_color_over   = .{0.263, 0.149, 0.137, 1};
+        divider_theme.frame_color_over   = {0.263, 0.149, 0.137, 1};
         divider_theme.rectangle_shape.frame_thickness = 2;
         divider_theme.rectangle_shape.roundedness = 5;
         divider_theme.rectangle_shape.roundedness_type = .ABSOLUTE_FROM_THEME_FIELD;
@@ -1054,13 +1054,13 @@ theme_proc_mash :: () -> Overall_Theme {
         using result.checkbox_theme;
         label_theme = result.label_theme;
         alignment = .Left;
-        text_color_selected = .{1, 0.9, 0.8, 1};
-        text_color          = .{.55, .55, .55, 1.0};
-        text_color_pressed  = .{1, 0.9, 0.8, 1};
-        surface_color_flash = .{1, 0.9, 0.8, 1};
-        surface_color_down  = .{1, 0.9, 0.8, 1};
-        surface_color       = .{.55, .55, .55, 1.0};
-        button_color_selected = .{1, 0.9, 0.8, 1};
+        text_color_selected = {1, 0.9, 0.8, 1};
+        text_color          = {.55, .55, .55, 1.0};
+        text_color_pressed  = {1, 0.9, 0.8, 1};
+        surface_color_flash = {1, 0.9, 0.8, 1};
+        surface_color_down  = {1, 0.9, 0.8, 1};
+        surface_color       = {.55, .55, .55, 1.0};
+        button_color_selected = {1, 0.9, 0.8, 1};
     }
 
     

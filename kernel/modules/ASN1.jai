@@ -93,7 +93,7 @@ read_length :: (parser: *Asn1_Parser) -> int {
 }
 
 read_value :: (parser: *Asn1_Parser, expected_tag: Asn1_Tag) -> [] u8 {
-    if parser.error return .{};
+    if parser.error return {};
 
     using get_current_construction(parser);
 
@@ -104,7 +104,7 @@ read_value :: (parser: *Asn1_Parser, expected_tag: Asn1_Tag) -> [] u8 {
 
     if tag != expected_tag {
         parser.error = true;
-        return .{};
+        return {};
     }
 
     length := read_length(parser);
@@ -326,7 +326,7 @@ asn1_construction :: (parser: *Asn1_Parser, body: Code, flags: For_Flags, loc :=
     if parser.error return;
 
     container := read_value(parser, tag);
-    array_add(*parser.construction_stack, .{data = container});
+    array_add(*parser.construction_stack, {data = container});
 
     if parser.debug_mode {
         log("Entering. Stack = % %", parser.construction_stack.count, loc);
@@ -470,7 +470,7 @@ parse_x509_certificate :: (certificate: []u8) -> bool, X509_Certificate {
 
             for :asn1_context parser {
                 version_value := read_value(*parser, .INTEGER);
-                if version_value.count > 1 return false, .{};
+                if version_value.count > 1 return false, {};
 
                 cert.version = version_value.data.* + 1;
             }

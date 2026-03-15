@@ -246,11 +246,12 @@ initialize_apic :: () {
 
 startup_application_processors :: () {
 
-    // Identity map a page in low memory for the 16-bit code to run in, so it will keep working when it switches the CPU to 64-bit mode.
-    map_pages(cast(*void) 0x8000, 0x8000, 1);
+    // Identity map a page in low memory for the 16-bit code to run in.
+    bootstrap_page :: 0x8000;
+    map_pages(cast(*void) bootstrap_page, bootstrap_page, 1);
 
     // Load the 16 bit AP initialization routine from static memory
-    memcpy(cast(*void) 0x8000, ap_startup_bin.data, 4096);
+    memcpy(cast(*void) bootstrap_page, ap_startup_bin.data, 4096);
 
     Ap_Startup_Data :: struct {
         // Layout matches the ap_startup assembly code.
@@ -259,7 +260,7 @@ startup_application_processors :: () {
         pml4: u64;
     }
 
-    ap_startup_data := cast(*Ap_Startup_Data) 0x8200;
+    ap_startup_data := cast(*Ap_Startup_Data) (bootstrap_page + 0x200);
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
     ap_startup_data.pml4 = get_physical_address(*global.boot_data.page_tables.pml4);
 
@@ -288,13 +289,12 @@ startup_application_processors :: () {
 
         ipi: Apic_Interrupt_Command;
         set(*ipi, .delivery_mode, 0b110);
-        set(*ipi, .vector, 8);
+        set(*ipi, .vector, bootstrap_page / 4096);
         set(*ipi, .destination, it.local_apic_id);
         apic_execute_ipi(ipi);
     }
 
-    unmap_pages(cast(*void) 0x8000, 1);
-
+    unmap_pages(cast(*void) bootstrap_page, 1);
 }
 
 ap_startup_bin :: #run,host -> [] u8 {

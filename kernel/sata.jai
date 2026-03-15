@@ -331,7 +331,7 @@ Fis_Type :: enum u8 {
 Sata_Received_Fis :: struct {
     DSFIS__dma_setup: [32] u8;
     PSFIS__pio_setup: [32] u8;
-    RFIS__d2h_register: Sata_Command_Fis = .{ fis_type = .REGISTER_D2H };
+    RFIS__d2h_register: Sata_Command_Fis = { fis_type = .REGISTER_D2H };
     SDBFIS__set_device_bits: u64;
     UFIS__unknown: [64] u8;
 

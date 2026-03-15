@@ -60,9 +60,9 @@ idt:
   .base         dd 0
 
 times 512-($-start) db 0
-stack: dq 0
-jai:   dq 0
-pml4:  dq 0
+stack:     dq 0
+jai:       dq 0
+pml4:      dq 0
 
 serial:
     mov ax, 66

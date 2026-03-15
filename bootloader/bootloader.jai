@@ -25,7 +25,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
 
         boot_data := cast(*Boot_Data) boot_data_address;
-        boot_data.* = .{};
+        boot_data.* = {};
 
 
         TOP_2_GB : u64 : 0xffff_ffff_8000_0000;
@@ -47,8 +47,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             EFI_CHECK(boot_services.LocateProtocol(*EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, null, cast(**void) *gop));
 
             // It will try to get as close as possible to this resolution, without exceeding it.
-            preferred_horizontal_resolution :: 1920;
-            preferred_vertical\ _resolution :: 1080;
+            preferred_horizontal_resolution :: 640;
+            preferred_vertical\ _resolution :: 480;
 
             best_horizontal_resolution: u32;
             best_vertical\ _resolution: u32;
@@ -99,7 +99,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             acpi_table_guid_high : u64 : 0x81883cc7800022bc;
 
             if low == acpi_table_guid_low && high == acpi_table_guid_high {
-                magic: string = .{ 8, table.VendorTable };
+                magic: string = { 8, table.VendorTable };
                 boot_data.acpi_rsdp = table.VendorTable + DIRECT_MAPPING_BASE;
                 break;
             }

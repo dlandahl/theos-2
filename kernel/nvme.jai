@@ -504,7 +504,7 @@ reset_controller :: (nvme: *Nvme_Controller) {
 
         assert(depth == 64);
 
-        nvme.AQA__admin_queue_attributes = .{
+        nvme.AQA__admin_queue_attributes = {
             // Subtract one, because the field is zero based.
             depth-1, depth-1 // Todo: Hardcoded.
         };

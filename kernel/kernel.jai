@@ -135,7 +135,7 @@ kernel_entry :: () #no_context {
     {
         // Initialize cpu-local data really early, because it's useful to have e.g. core ID and interrupt_context_active available.
         core := space_for_processor_cores.data;
-        core.* = .{};
+        core.* = {};
         CR4_FSGSBASE := 1 << 16;
 
         #asm FSGSBASE {
@@ -1503,7 +1503,7 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
     allocator.alignment = alignment;
 
     allocator.blocks.count = 1;
-    allocator.blocks[0] = .{
+    allocator.blocks[0] = {
         base = 0,
         size = max_size,
         used = false,
@@ -2876,7 +2876,7 @@ using,except(byte_swap_in_place) _ :: #import "Bit_Operations"; // We have our o
 
 array_add :: bucket_array_add;
 array_add :: (array: *Bucket_Array) -> *array.type {
-    loc, item := bucket_array_add(array, .{});
+    loc, item := bucket_array_add(array, {});
     return item;
 }
 

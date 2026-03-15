@@ -261,12 +261,12 @@ fat16_change_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> bool
 
         if !short_entry {
             log_error("Directory entry \"%\" not found while evaluating path %.", left, path);
-            return false, .{};
+            return false, {};
         }
 
         if short_entry.attributes & .DIRECTORY == 0 {
             log_error("Directory entry \"%\", found while evaluating path %, is not a directory.", left, path);
-            return false, .{};
+            return false, {};
         }
 
         current_directory.cluster = short_entry.cluster;
@@ -279,13 +279,13 @@ fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat1
 
     if relative_to.file_system.free_clusters <= 2 {
         // There's no guarantee we can create the directory entries.
-        return .{}; // Todo: Error codes.
+        return {}; // Todo: Error codes.
     }
 
     entry, existed, parent := fat16_find_or_create_directory_entry(relative_to, path);
 
     if existed {
-        return .{relative_to.file_system, entry.cluster}; // Todo, we could warn if it's not a directory, etc.
+        return {relative_to.file_system, entry.cluster}; // Todo, we could warn if it's not a directory, etc.
     }
 
     new_cluster := fat16_allocate_fat_entry(relative_to.file_system);
@@ -303,7 +303,7 @@ fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat1
             memset(it.first_long_entry, 0, long_entry_bytes);
         }
 
-        it.short_entry.* = .{};
+        it.short_entry.* = {};
     }
 
     self_link := fat16_find_or_create_directory_entry(new_directory, ".");
@@ -317,7 +317,7 @@ fat16_create_directory :: (relative_to: Fat16_Tree_Cursor, path: string) -> Fat1
     self_link.attributes = .DIRECTORY;
     back_link.attributes = .DIRECTORY;
 
-    return .{relative_to.file_system, entry.cluster};
+    return {relative_to.file_system, entry.cluster};
 }
 
 fat16_write_file :: (relative_to: Fat16_Tree_Cursor, path: string, content: string) -> bool {
@@ -459,7 +459,7 @@ parse_path :: (relative_to: Fat16_Tree_Cursor, path: string) -> parent_folder: F
 
     if found {
         success:, parent = fat16_change_directory(relative_to, left);
-        if !success return .{}, "";
+        if !success return {}, "";
     } else {
         file_name = left;
     }
@@ -637,7 +637,7 @@ Fat16_Directory_Iterator :: struct {
 }
 
 each_entry :: (directory: Fat16_Tree_Cursor, skip_unused := true) -> Fat16_Directory_Iterator {
-    return .{directory, skip_unused};
+    return {directory, skip_unused};
 }
 
 for_expansion :: (using iterator: *Fat16_Directory_Iterator, body: Code, flags: For_Flags) #expand {

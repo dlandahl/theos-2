@@ -46,7 +46,7 @@ find_all_pci_devices :: () {
 
                 new_device := array_add(*global.pci_devices);
                 new_device.configuration_space = header;
-                new_device.bus_address = .{bus, device.(u8), 0};
+                new_device.bus_address = {bus, device.(u8), 0};
 
                 if header.header_type & 0x80 == 0 {
                     // Device is not multi-function.
@@ -59,7 +59,7 @@ find_all_pci_devices :: () {
 
                     new_device := array_add(*global.pci_devices);
                     new_device.configuration_space = header;
-                    new_device.bus_address = .{bus, device.(u8), function.(u8)};
+                    new_device.bus_address = {bus, device.(u8), function.(u8)};
                 }
             }
         }
@@ -330,7 +330,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
 
     limit = cast,trunc(u32) ~(limit & mask) + 1;
 
-    return .{base, limit};
+    return {base, limit};
 }
 
 map_base_address_register :: (bar: Pci_Bar) -> *void {
