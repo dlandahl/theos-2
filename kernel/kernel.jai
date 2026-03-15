@@ -374,7 +374,7 @@ kernel_entry :: () #no_context {
 
         for 1..5 {
             ec := create_execution_context("Test");
-            simple_create_thread(load_and_run_elf_executable, elf, name="Userspace Test", execution_context = ec);
+            simple_create_thread(load_and_run_elf_executable, elf, name=tprint("Userspace %", it), execution_context = ec);
         }
 
         {
@@ -1122,6 +1122,7 @@ allocate_page_aligned_physical_memory :: (size_bytes: s64) -> base: u64, aligned
 }
 
 
+
 Page_Flags :: enum_flags u64 {
     PRESENT         :: 1 << 0;
     READ_WRITE      :: 1 << 1;
@@ -1172,22 +1173,23 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
             value: u64;
             flags: Page_Flags;
         };
+
+        virtual: *void; // The current virtual address for convenience, calculated as start_address + it_index * page size.
     }
 
     `it_index: int;
 
-    current_root_page_table: *u64;
-
-    task := get_current_task();
-    if task {
-        current_root_page_table = cast(*u64) (get_current_task().cr3 + DIRECT_MAPPING_BASE);
-    } else {
-        current_root_page_table = global.page_tables.pml4.data;
-    }
-
-    // Cache the addresses of tables above us, so we don't have to walk from the root when going up the tree. Maybe not worth it? It would make the code much simpler if we didn't do this.
+    // Cache the addresses of tables above us, so we don't have to walk from the root when going up the tree. Maybe not worth it? It would make the code simpler if we didn't do this.
     tables: [4] *u64;
-    tables[3] = current_root_page_table;
+
+    // Get the current root page table from which to start iterating.
+    task := get_current_task();
+
+    if task {
+        tables[3] = cast(*u64) (task.cr3 + DIRECT_MAPPING_BASE);
+    } else {
+        tables[3] = global.page_tables.pml4.data;
+    }
 
     it.level = 3;
 
@@ -1241,7 +1243,8 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
         table := tables  [it.level];
         index := pt_index[it.level];
 
-        it.entry = xx *table[index];
+        it.entry   = xx *table[index];
+        it.virtual = vm_it.start_address + it_index * 4096;
 
         #insert body;
     }
@@ -1257,14 +1260,10 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
         if it.level == 0 {
             assert(it.flags & .PRESENT == 0);
 
-            virtual  := virtual_start  + cast(u64) it_index * 4096;
             physical := physical_start + cast(u64) it_index * 4096;
 
             it.value  = physical;
             it.flags |= page_flags;
-
-            pg := *virtual;
-            #asm { invlpg [pg]; }
 
             continue;
         }
@@ -1287,17 +1286,14 @@ change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Pag
     for VM_Iterator.{virtual_start, page_count} {
         assert(it.flags & .PAGE_SIZE == 0);
 
-        // Todo: All these routines should be set up to work with large pages too, since those shouldbe used in the future whenever possible.
+        // Todo: All these routines should be set up to work with large pages too, since those should be used in the future whenever possible.
         if it.level == 0 {
             assert(it.flags & .PRESENT > 0);
-
-            virtual := virtual_start + cast(u64) it_index * 4096;
 
             it.flags &= ~Page_Flags.MASK;
             it.flags |=  new_page_flags;
 
-            pg := *virtual;
-            #asm { invlpg [pg]; }
+            flush_address_translation(it.virtual);
 
             continue;
         }
@@ -1305,8 +1301,11 @@ change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Pag
         // Any page tables should be present for this to work.
         assert(it.flags & .PRESENT > 0);
 
-        it.flags &= ~Page_Flags.MASK;
+        it.flags &= ~Page_Flags.MASK; // Todo: We can't just get rid of all flags at all levels, since it will remove flags for mappings we don't want to touch.
         it.flags |=  new_page_flags & ~.EXECUTE_DISABLE; // NX gets ORed rather than ANDed between page table levels, so we only want to set it at the lowest level.
+
+        // I don't fully understand why this is needed, because we always call it for level 0 of the same virtual address. But it is needed.
+        flush_address_translation(it.virtual);
     }
 }
 
@@ -1318,11 +1317,7 @@ unmap_pages :: (virtual_address: *void, count: int) {
         if it.level != 0 continue;
 
         it.flags &= ~.PRESENT;
-
-        virtual := virtual_address + it_index * 4096;
-
-        pg := *virtual;
-        #asm { invlpg [pg]; }
+        flush_address_translation(it.virtual);
     }
 }
 
@@ -1343,7 +1338,7 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
         if !is_present return 0, false;
         if it.level != 0 && (it.flags & .PAGE_SIZE == 0) continue;
 
-        offset_in_page_mask := (1 << (it.level * 9)) - 1;
+        offset_in_page_mask := 1 << (it.level * 9) - 1;
 
         address        := it.value & cast(u64) ~Page_Flags.MASK;
         offset_in_page := cast(u64) virtual_address & offset_in_page_mask;
@@ -1353,6 +1348,12 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
 
     return 0, false;
 }
+
+flush_address_translation :: (address: *void) {
+    #asm { invlpg [address]; }
+}
+
+
 
 // For error reporting:
 Page_Settings :: struct {
@@ -1396,11 +1397,11 @@ get_page_settings :: (virtual_address: *void) -> Page_Settings {
 }
 
 inspect_address :: (virtual_address: *void) {
-    for VM_Iterator.{virtual_address, 1} {
+    for VM_Iterator.{virtual_address & ~0xfff, 1} {
         address := it.value & cast(u64) ~Page_Flags.MASK;
         flags   := it.flags &            Page_Flags.MASK;
 
-        log("Level %: Physical address = %, flags = %", it.level, hex(address), flags);
+        log("Level %: Physical address = %, flags = %, full value = %", it.level, hex(address), flags, hex(it.value));
     }
 }
 

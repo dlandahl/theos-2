@@ -621,6 +621,8 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
     #asm { get_cr2 _cr2; }
     cr2 := _cr2;
 
+    trace(.page_fault, cr2);
+
     Flags :: enum_flags u32 {
         PRESENT;
         WRITE;
@@ -645,6 +647,9 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         else if !settings.present                 print(*b, "The page is not mapped.\n");
         else if !settings.writeable  && was_write print(*b, "This was a write to a read-only page.\n");
         else if !settings.executable && was_fetch print(*b, "Tried to execute code from memory not marked executable.\n");
+        else {
+            print(*b, "... couldn't determine the reason.\nSettings: %\nFlags:     %\n", settings, flags);
+        }
 
         write_builder(*b);
 

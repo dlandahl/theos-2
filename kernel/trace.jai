@@ -8,6 +8,7 @@ Trace_Tag :: enum u16 {
     create_ec;
     scheduling_timer;
     syscall;
+    page_fault;
     small_object_alloc;
     small_object_free;
     block_alloc;
@@ -90,7 +91,7 @@ Trace_String :: #type,distinct s32;
         string_table.data  = cast(*u8) allocate_large_page() + DIRECT_MAPPING_BASE;
         string_table.count = 0x20_0000;
 
-        add_trace_string(""); // Make it so that trace string 0 is the always an empty string.
+        add_trace_string(""); // Make it so that trace string 0 is always an empty string.
 
         tracing_enabled = true;
 
@@ -214,6 +215,7 @@ Trace_String :: #type,distinct s32;
 
         serialize_trace_buffers(xx callback, *trace);
 
+        // Todo: If we return the string builder, the caller may be able to use it to elide a copy.
         return builder_to_string(*trace);
     }
 

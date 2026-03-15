@@ -332,7 +332,7 @@ draw_one_frame :: (dt: float) {
         {
             label(left_label, "Trace File:", *tl);
 
-            ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else {1, 0, 0, 1};
+            ti.text_color = ifx trace_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
             ti.text_color_pressed = ti.text_color;
 
             action, new_text, state := text_input(left_box, trace_file_name, *ti);
@@ -351,7 +351,7 @@ draw_one_frame :: (dt: float) {
         {
             label(right_label, "Debug Info:", *tl);
 
-            ti.text_color = ifx kernel_file_exists then my_theme.text_input_theme.text_color else {1, 0, 0, 1};
+            ti.text_color = ifx kernel_file_exists then my_theme.text_input_theme.text_color else .{1, 0, 0, 1};
             ti.text_color_pressed = ti.text_color;
 
             action, new_text, state := text_input(right_box, kernel_file_name, *ti);
@@ -594,8 +594,7 @@ draw_one_frame :: (dt: float) {
                 text = tprint("Queue index: %", it.user[0]);
 
               case .syscall;
-                syscall_names := string.["Zero (Invalid)", "Yield", "CPU Local Data", "Sleep", "Print", "Allocate", "Trylock Mutex", "Unlock Mutex", "Free Memory"];
-                text = tprint("Syscall '%'", syscall_names[it.user[0]]);
+                text = tprint("Syscall '%'", it.user[0]);
 
               case .context_switch;
                 if it.user[1] > cast(u64)trace_data.threads.count-1 {
@@ -604,12 +603,15 @@ draw_one_frame :: (dt: float) {
                     text = tprint("Switch to %", trace_data.threads[it.user[1]]);
                 }
 
+              case .page_fault;
+                text = tprint("Address %", cast(*void) it.user[0]);
+
               case .small_object_alloc;  #through;
               case .small_object_free;   #through;
               case .block_alloc;         #through;
               case .block_resize;        #through;
               case .block_free;
-                text = tprint("% bytes at 0x%", it.user[1], cast(*void)it.user[0]);
+                text = tprint("% bytes at 0x%", it.user[1], cast(*void) it.user[0]);
 
               case .contended_spinlock;
                 time_ns := cast(float)it.user[1] / cast(float)trace_data.tsc_frequency;
