@@ -44,6 +44,8 @@ Execution_Context :: struct {
         pages: int;
     };
 
+    spinlock: Spinlock;
+
     name: string;
     trace_name: Trace_String;
 }
@@ -937,7 +939,7 @@ load_and_run_elf_executable :: (elf_data: string) {
 syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     push_context,defer_pop;
 
-    trace(.syscall, data.rax);
+    trace(.syscall, data.rax, data.r12);
 
     push_print_style().use_newlines_if_long_form = true;
 
@@ -949,6 +951,8 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
     reset_temporary_storage();
 
     maybe_reschedule();
+
+    trace(.sysret, data.r12);
 }
 
 
@@ -964,6 +968,8 @@ stop_executing :: () {
 
 allocate_memory :: (size: int) -> *void {
     task := get_current_task();
+
+    acquire(*task.execution_context.spinlock);
 
     allocation := array_add(*task.execution_context.memory_allocations);
 
@@ -981,11 +987,15 @@ allocate_memory :: (size: int) -> *void {
     allocation.pages = pages;
     allocation.virtual = virtual;
 
+    release(*task.execution_context.spinlock);
+
     return virtual;
 } @Syscall(3)
 
 free_memory :: (address: *void) {
     task := get_current_task();
+
+    acquire(*task.execution_context.spinlock);
 
     for task.execution_context.memory_allocations {
         if it.virtual != address continue;
@@ -1000,9 +1010,11 @@ free_memory :: (address: *void) {
 
         free_block(*task.execution_context.heap, cast(u64) address);
 
+        release(*task.execution_context.spinlock);
         return;
     }
 
+    release(*task.execution_context.spinlock);
     assert(false);
 } @Syscall(4)
 
@@ -1024,8 +1036,7 @@ create_thread :: (entry_point: () #no_context) {
 
     new_task.user_stack = allocate_memory(0x1_0000) + 0x1_0000;
 
-    r := cast(s64) random_get() % global.processor_cores.count;
-    put_task_on_core(new_task, *global.processor_cores[r]);
+    put_task_on_core(new_task, old_task.on_core);
 } @Syscall(5)
 
 sleep_for_milliseconds :: (ms: int) {

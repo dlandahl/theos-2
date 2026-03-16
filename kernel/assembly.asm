@@ -63,6 +63,9 @@ context_switch:
 
     ; Save task-specific state, that's stored in CPU local data, onto the stack.
     push qword [gs:interrupt_context_active]
+
+    ; I would like to get rid of this counter entirely if possible. We can probably get away
+    ; with not allowing nested IRQ disable.
     push qword [gs:irq_disable_count]
 
     ; Store current stack on the old task
@@ -90,14 +93,18 @@ context_switch:
 
     ret
 
-extern get_kernel_stack
 extern syscall_handler
 global syscall_entry
 
 align 16
 syscall_entry:
-    mov [gs:tss_ring0_stack + 8], rsp ; Todo: Not the right place to store the user stack pointer.
+
+    mov r12, rsp
     mov rsp, [gs:tss_ring0_stack]
+
+    ; SYSCALL disables IRQs (using SFMASK) to prevent them from running on the user stack.
+    ; We can reenable them now that the kernel stack is loaded.
+    sti
 
     pushfq
     push_all
@@ -108,7 +115,11 @@ syscall_entry:
     pop_all
     popfq
 
-    mov rsp, [gs:tss_ring0_stack + 8]
+    ; SYSRET will restore interrupt requests since the flag is still set in R11
+    ; from when the matching SYSCALL executed.
+    cli
+
+    mov rsp, r12
 
     o64 sysret
 

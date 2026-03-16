@@ -196,9 +196,9 @@ compile_bootloader :: (to_create: [..] Plugin_To_Create) -> success: bool {
 }
 
 compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
-    if !kernel_only {
-        log("Assembling AP Startup Code");
 
+    {
+        log("Assembling AP Startup Code");
         command := break_command_into_strings(
             "nasm kernel/ap_startup.asm -o .build/ap_startup.bin -f bin"
         );
@@ -383,30 +383,28 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
             }
 
             if phase.phase == .ALL_TARGET_CODE_BUILT {
-                if !kernel_only {
-                    log("Assembling interrupt routines");
-                    result_assembly_code := builder_to_string(*interrupt_assembly);
+                log("Assembling interrupt routines");
+                result_assembly_code := builder_to_string(*interrupt_assembly);
 
-                    {
-                        // We save these on the stack during context switch, so assembly needs to know their offset within CPU-local data. Todo: Clean this up.
-                        offset_ica := get_struct_field_offset_from_another_workspace("X64_Core", "interrupt_context_active", workspace);
-                        offset_idq := get_struct_field_offset_from_another_workspace("X64_Core", "irq_disable_count", workspace);
-                        offset_tss := get_struct_field_offset_from_another_workspace("X64_Core", "task_state_segment", workspace);
-                        offset_rsp := get_struct_field_offset_from_another_workspace("Task_State_Segment", "rsp", workspace);
+                {
+                    // We save these on the stack during context switch, so assembly needs to know their offset within CPU-local data. Todo: Clean this up.
+                    offset_ica := get_struct_field_offset_from_another_workspace("X64_Core", "interrupt_context_active", workspace);
+                    offset_idq := get_struct_field_offset_from_another_workspace("X64_Core", "irq_disable_count", workspace);
+                    offset_tss := get_struct_field_offset_from_another_workspace("X64_Core", "task_state_segment", workspace);
+                    offset_rsp := get_struct_field_offset_from_another_workspace("Task_State_Segment", "rsp", workspace);
 
-                        offset_string := tprint("\ninterrupt_context_active equ %\nirq_disable_count equ %\ntss_ring0_stack equ %\n\n", offset_ica, offset_idq, offset_tss + offset_rsp);
-                        result_assembly_code = join(offset_string, result_assembly_code);
-                    }
+                    offset_string := tprint("\ninterrupt_context_active equ %\nirq_disable_count equ %\ntss_ring0_stack equ %\n\n", offset_ica, offset_idq, offset_tss + offset_rsp);
+                    result_assembly_code = join(offset_string, result_assembly_code);
+                }
 
-                    write_entire_file(".build/assembly.asm", result_assembly_code);
-                    command := break_command_into_strings("nasm -s .build/assembly.asm -o .build/assembly.so -f elf64 -g -F dwarf");
+                write_entire_file(".build/assembly.asm", result_assembly_code);
+                command := break_command_into_strings("nasm -s .build/assembly.asm -o .build/assembly.so -f elf64 -g -F dwarf");
 
-                    result := run_command(.. command);
-                    if result.exit_code != 0 {
-                        log_error("Failed to assemble interrupt routines.");
-                        compiler_set_workspace_status(.FAILED, workspace);
-                        success = false;
-                    }
+                result := run_command(.. command);
+                if result.exit_code != 0 {
+                    log_error("Failed to assemble interrupt routines.");
+                    compiler_set_workspace_status(.FAILED, workspace);
+                    success = false;
                 }
             }
         }

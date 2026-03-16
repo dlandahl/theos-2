@@ -594,7 +594,10 @@ draw_one_frame :: (dt: float) {
                 text = tprint("Queue index: %", it.user[0]);
 
               case .syscall;
-                text = tprint("Syscall '%'", it.user[0]);
+                text = tprint("Syscall '%' from %", it.user[0], cast(*void) it.user[1]);
+
+              case .sysret;
+                text = tprint("Sysret to %", cast(*void) it.user[0]);
 
               case .context_switch;
                 if it.user[1] > cast(u64)trace_data.threads.count-1 {
@@ -845,6 +848,11 @@ update_highlighted_trace_entries :: () {
                 array_add(*highlighted_trace_entries, it);
                 break;
             }
+          case .syscall;
+            if (other.tag == .sysret) && (sel.user[1] == other.user[0]) {
+                array_add(*highlighted_trace_entries, it);
+                break;
+            }
         }
     }
 
@@ -879,6 +887,12 @@ update_highlighted_trace_entries :: () {
 
           case .context_switch;
             if other.tag == .context_switch && other.user[1] == sel.task_id {
+                array_add(*highlighted_trace_entries, it);
+                break;
+            }
+
+          case .sysret;
+            if (other.tag == .syscall) && (sel.user[0] == other.user[1]) {
                 array_add(*highlighted_trace_entries, it);
                 break;
             }

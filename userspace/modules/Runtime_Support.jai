@@ -398,6 +398,24 @@ __instrumentation_second :: () {
 }
 
 runtime_support_default_allocator_proc ::  (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    if mode == {
+      case .ALLOCATE;
+        return Syscall.allocate_memory(size);
+
+      case .FREE;
+        Syscall.free_memory(old_memory);
+
+      case .RESIZE;
+        new_memory := Syscall.allocate_memory(size);
+
+        if old_memory {
+            memcpy(new_memory, old_memory, old_size);
+            Syscall.free_memory(old_memory);
+        }
+
+        return new_memory;
+    }
+
     return null;
 }
 

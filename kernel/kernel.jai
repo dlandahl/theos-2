@@ -665,7 +665,12 @@ init_processor_core :: () {
         star |= (cast(u64) Segment_Selector.RING0_CODE)     << 32;
 
         write_msr(.STAR__syscall_segment, star);
-        write_msr(.SFMASK__syscall_flags, 0);
+
+        // Make it so interrupt requests get disabled when syscall is executed.
+        // This is important since we only switch to the kernel stack once already in
+        // the syscall handler. Doing this prevents interrupt requests from running
+        // on the user stack.
+        write_msr(.SFMASK__syscall_flags, cast(u64) X64_Flags.IF__interrupt);
 
         syscall_entry :: () #foreign Assembly;
         write_msr(.LSTAR__syscall_address, bit_cast(syscall_entry, u64));
@@ -1263,21 +1268,18 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
             it.value  = physical;
             it.flags |= page_flags;
 
-            flush_address_translation(it.virtual);
             continue;
         }
 
         // It's a page table, create it if it doesn't exist.
 
-        // Note this means that the page flags will not be changed at this level. This whole system probably won't stay around long term.
+        // Note this means that the page flags will not be changed at this level.
         if it.flags & .PRESENT > 0 continue;
 
         new_table := get_4k_page();
 
         it.value  = new_table;
         it.flags |= page_flags;
-
-        flush_address_translation(it.virtual);
     }
 }
 

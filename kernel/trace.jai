@@ -8,6 +8,7 @@ Trace_Tag :: enum u16 {
     create_ec;
     scheduling_timer;
     syscall;
+    sysret;
     page_fault;
     small_object_alloc;
     small_object_free;
