@@ -230,12 +230,13 @@ kernel_entry :: () #no_context {
             init_block_allocator(*global.virtual_block_allocator, heap_base, heap_size, alignment=4096);
         }
 
-        {
+        if false {
             // Ensure all the highest-level page tables for the kernel address space are allocated. We'll likely never need them all, since they each
             // cover half a terabyte. But this way, when we copy the kernel address space into a new process address space, and subsequently allocate
             // virtual memory in the kernel region, the new kernel mappings will be guaranteed to be visible from all process address spaces.
             //
             // Todo: This wastes nearly 2MB of RAM. It might be worth it to create a more complex solution.
+            // Todo: This triple faults on my physical PC.
 
             vm_it: VM_Iterator;
             vm_it.start_address = cast(*void) 0xffff_8000_0000_0000;
@@ -290,8 +291,6 @@ kernel_entry :: () #no_context {
             status := uacpi_table_fadt(*global.fadt);
             assert(status == .OK);
         }
-
-        assert(global.page_tables.pml4[0xff] == 0);
 
         initialize_apic();
 

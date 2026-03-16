@@ -44,6 +44,8 @@ Execution_Context :: struct {
         pages: int;
     };
 
+    page_frames: [..] s32;
+
     spinlock: Spinlock;
 
     name: string;
@@ -941,8 +943,6 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
     trace(.syscall, data.rax, data.r12);
 
-    push_print_style().use_newlines_if_long_form = true;
-
     task := get_current_task();
     context.temporary_storage = task.temporary_storage;
 
@@ -1042,6 +1042,35 @@ create_thread :: (entry_point: () #no_context) {
 sleep_for_milliseconds :: (ms: int) {
     sleep(ms, .milliseconds);
 } @Syscall(6)
+
+get_new_page_frame :: () -> int {
+    task := get_current_task();
+    acquire(*task.execution_context.spinlock);
+
+    new_page := allocate_large_page();
+
+    array_add(*task.execution_context.page_frames, cast(s32) (new_page / 0x20_0000));
+    id := task.execution_context.page_frames.count-1;
+
+    release(*task.execution_context.spinlock);
+
+    return id;
+} @Syscall(7)
+
+reserve_virtual_memory :: (size: int) -> *void {
+    task := get_current_task();
+    acquire(*task.execution_context.spinlock);
+
+    pages   := (size + 4095) / 4096;
+    virtual := cast(*void) alloc_block(*task.execution_context.heap, pages * 4096);
+
+    release(*task.execution_context.spinlock);
+
+    return virtual;
+} @Syscall(8)
+
+
+
 
 
 enter_user_mode :: (entry_point: () #no_context, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;

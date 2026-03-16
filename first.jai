@@ -317,7 +317,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         parameters: string;
 
                         for it.header.arguments {
-                            parameters = join(parameters, "xx data.", input_registers[it_index], ",");
+                            parameters = join(parameters, "xx data.", input_registers[it_index], ", ");
                         }
 
                         assert(it.header.returns.count <= 1);
@@ -329,6 +329,22 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     add_build_string(tprint(SYSCALL_DISPATCHER, builder_to_string(*dispatcher_body)), workspace);
 
                     call_wrappers: String_Builder;
+
+                    // Write the names of the syscalls into an array, indexable by syscall number.
+                    print(*call_wrappers, "\nsyscall_names :: string.[\n");
+                    names_written: int;
+
+                    for found_syscalls {
+                        while names_written != it.number {
+                            print(*call_wrappers, "    \"\",\n");
+                            names_written += 1;
+                        }
+
+                        print(*call_wrappers, "    \"%\",\n", it.header.name);
+                        names_written += 1;
+                    }
+
+                    print(*call_wrappers, "];\n");
 
                     for found_syscalls {
                         parameters: string;
@@ -353,6 +369,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         }
 
                         // Todo: If the syscall return value has a name in the kernel, we should automatically use the name here for the return value as well.
+                        // Todo: No need to reuse the RAX register for return values, the inline assembly syntax is simpler if you pin a separate register instead.
 
                         print(*call_wrappers, "\n% :: (%)% #no_context {\n", it.header.name, parameters, returns);
                         print(*call_wrappers, "    syscall_number := %;\n\n", it.number);

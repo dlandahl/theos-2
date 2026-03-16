@@ -14,7 +14,9 @@ Input :: #import "Input";
 #import "String";
 #import "Bucket_Array";
 
-#import,dir "../../kernel/modules/debug_info";
+#import,dir  "../../kernel/modules/debug_info";
+#import,file "../../userspace/modules/Syscall.jai";
+
 #import "executable_formats";
 
 TRACE_INCLUDE_RUNTIME_CODE :: false;
@@ -594,7 +596,7 @@ draw_one_frame :: (dt: float) {
                 text = tprint("Queue index: %", it.user[0]);
 
               case .syscall;
-                text = tprint("Syscall '%' from %", it.user[0], cast(*void) it.user[1]);
+                text = tprint("Syscall '%' from %", syscall_names[it.user[0]], cast(*void) it.user[1]);
 
               case .sysret;
                 text = tprint("Sysret to %", cast(*void) it.user[0]);
@@ -634,6 +636,9 @@ draw_one_frame :: (dt: float) {
 
               case .create_task;
                 text = get_string(cast(Trace_String) it.user[1]);
+
+              case .create_ec;
+                text = get_string(cast(Trace_String) it.user[0]);
             }
 
             if text label(label_rect, text, lt);
