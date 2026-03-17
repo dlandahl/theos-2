@@ -106,14 +106,12 @@ syscall_entry:
     ; We can reenable them now that the kernel stack is loaded.
     sti
 
-    pushfq
     push_all
 
     mov rdi, rsp
     call syscall_handler
 
     pop_all
-    popfq
 
     ; SYSRET will restore interrupt requests since the flag is still set in R11
     ; from when the matching SYSCALL executed.

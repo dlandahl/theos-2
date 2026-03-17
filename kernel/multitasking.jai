@@ -36,20 +36,14 @@ Task_Info :: struct {
 Execution_Context :: struct {
     root_page_table: u64;
 
-    heap: Block_Allocator;
-
-    memory_allocations: [..] struct {
-        virtual: *void;
-        physical: [..] u64;
-        pages: int;
-    };
-
     page_frames: [..] s32;
 
     spinlock: Spinlock;
 
     name: string;
     trace_name: Trace_String;
+
+    stopped: bool;
 }
 
 Task_Priority :: enum s8 {
@@ -272,8 +266,6 @@ create_execution_context :: (name: string) -> *Execution_Context {
 
     trace(.create_ec, ec.trace_name);
 
-    init_block_allocator(*ec.heap, 0x4000_0000, 0x4000_0000, 4096);
-
     return ec;
 }
 
@@ -369,6 +361,7 @@ schedule_tasks :: () {
 
     previous_task_still_wants_to_run  := previous != scheduler.idle_task;
     previous_task_still_wants_to_run &&= previous.flags & (.sleeping | .blocked | .stopped) == 0;
+    previous_task_still_wants_to_run &&= !previous.execution_context || !previous.execution_context.stopped;
 
     // Pick next task to run.
     next: *Task_Info;
@@ -394,7 +387,14 @@ schedule_tasks :: () {
         }
 
         next = list_pop(run_queue);
-        if next break;
+
+        if next {
+            if next.execution_context && next.execution_context.stopped {
+                continue;
+            }
+
+            break;
+        }
     }
 
     if !next {
@@ -932,6 +932,7 @@ load_and_run_elf_executable :: (elf_data: string) {
         (.*) cast(*u64) task.user_stack = DIRECT_MAPPING_BASE;
     }
 
+    assert(get_rflags() & .IF__interrupt > 0);
     enter_user_mode(entry_point, task.user_stack);
 }
 
@@ -966,64 +967,14 @@ stop_executing :: () {
     set_flag(.stopped, task);
 } @Syscall(2)
 
-allocate_memory :: (size: int) -> *void {
-    task := get_current_task();
-
-    acquire(*task.execution_context.spinlock);
-
-    allocation := array_add(*task.execution_context.memory_allocations);
-
-    pages       := (size + 4095) / 4096;
-    virtual     := cast(*void) alloc_block(*task.execution_context.heap, pages * 4096);
-
-    array_resize(*allocation.physical, pages);
-
-    for 0..pages-1 {
-        allocation.physical[it] = get_4k_page();
-
-        map_pages(virtual + it * 4096, allocation.physical[it], 1, .PRESENT | .READ_WRITE | .USER_SUPERVISOR);
-    }
-
-    allocation.pages = pages;
-    allocation.virtual = virtual;
-
-    release(*task.execution_context.spinlock);
-
-    return virtual;
-} @Syscall(3)
-
-free_memory :: (address: *void) {
-    task := get_current_task();
-
-    acquire(*task.execution_context.spinlock);
-
-    for task.execution_context.memory_allocations {
-        if it.virtual != address continue;
-
-        for page_index: 0..it.pages-1 {
-            virtual := it.virtual + page_index * 4096;
-
-            unmap_pages(virtual, 1);
-
-            free_4k_page(it.physical[page_index]);
-        }
-
-        free_block(*task.execution_context.heap, cast(u64) address);
-
-        release(*task.execution_context.spinlock);
-        return;
-    }
-
-    release(*task.execution_context.spinlock);
-    assert(false);
-} @Syscall(4)
-
-create_thread :: (entry_point: () #no_context) {
+create_thread :: (entry_point: () #no_context, stack: *void, stack_size: int) {
     old_task := get_current_task();
 
     forward_to_usermode :: () {
         task := get_current_task();
         entry_point := cast(() #no_context) task.user_data;
+
+        assert(get_rflags() & .IF__interrupt > 0);
         enter_user_mode(entry_point, task.user_stack);
     }
 
@@ -1034,9 +985,15 @@ create_thread :: (entry_point: () #no_context) {
         execution_context = old_task.execution_context
     );
 
-    new_task.user_stack = allocate_memory(0x1_0000) + 0x1_0000;
+    // Todo: These asserts should be errors returned to the user space.
+    assert(cast(u64) stack < 0x7fff_ffff_ffff);
+    assert(cast(u64) stack & 0xf == 0);
 
-    put_task_on_core(new_task, old_task.on_core);
+    new_task.user_stack = stack + stack_size;
+
+    // Put each new thread on a random core for now.
+    r := random_get() % cast(u64) global.processor_cores.count;
+    put_task_on_core(new_task, *global.processor_cores[r]);
 } @Syscall(5)
 
 sleep_for_milliseconds :: (ms: int) {
@@ -1050,26 +1007,69 @@ get_new_page_frame :: () -> int {
     new_page := allocate_large_page();
 
     array_add(*task.execution_context.page_frames, cast(s32) (new_page / 0x20_0000));
-    id := task.execution_context.page_frames.count-1;
+
+    id := task.execution_context.page_frames.count; // 0 means invalid.
 
     release(*task.execution_context.spinlock);
 
+    // Maybe should have permissions associated with it, if the caller wants to use it for shared memory.
     return id;
 } @Syscall(7)
 
-reserve_virtual_memory :: (size: int) -> *void {
+map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
+    task := get_current_task();
+
+    acquire(*task.execution_context.spinlock);
+
+    page_array: []s32 = task.execution_context.page_frames;
+
+    // Todo: These asserts should be errors returned to the user space.
+    assert(page_id > 0 && page_id <= page_array.count);
+    assert(cast(u64) virtual_address & 0x1f_ffff == 0);
+    assert(cast(u64) virtual_address <= 0x7fff_ffff_ffff);
+
+    page_frame := cast(u64) page_array[page_id - 1] * 0x20_0000;
+
+    for VM_Iterator.{virtual_address, 512} {
+        if it.level == 1 {
+            assert(it.flags & .PRESENT == 0);
+
+            it.value  = page_frame;
+            it.flags |= .PRESENT | .READ_WRITE | .USER_SUPERVISOR | .PAGE_SIZE;
+
+            break;
+        }
+
+        if it.flags & .PRESENT > 0 {
+            assert(it.flags & .USER_SUPERVISOR > 0);
+            assert(it.flags & .READ_WRITE      > 0);
+
+            continue;
+        }
+
+        new_page_table := get_4k_page();
+
+        it.value  = new_page_table;
+        it.flags |= .PRESENT | .READ_WRITE | .USER_SUPERVISOR;
+    }
+
+    release(*task.execution_context.spinlock);
+} @Syscall(8)
+
+quit_execution_context :: () {
     task := get_current_task();
     acquire(*task.execution_context.spinlock);
 
-    pages   := (size + 4095) / 4096;
-    virtual := cast(*void) alloc_block(*task.execution_context.heap, pages * 4096);
+    if !task.execution_context.stopped { // Prevent unecessary IPIs in case of a race.
+        task.execution_context.stopped = true;
+        execute_ipi(.RESCHEDULE_IPI, null);
+    }
 
     release(*task.execution_context.spinlock);
 
-    return virtual;
-} @Syscall(8)
-
-
+    // Todo: Here we need to figure out when other threads of the same EC have stopped running so we can free resources.
+    // Probably just put a counter on the EC struct and spin. Or have a separate thread check the counter.
+} @Syscall(9)
 
 
 

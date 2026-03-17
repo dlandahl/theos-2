@@ -397,21 +397,33 @@ __instrumentation_second :: () {
     }
 }
 
+allocator_base := cast(*void) 0x4000_0000;
+allocator_current_size: s64;
+
 runtime_support_default_allocator_proc ::  (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    // In the future we can properly port the Default_Allocator module to our syscall set, but for now just use a linear bump allocator.
+
     if mode == {
       case .ALLOCATE;
-        return Syscall.allocate_memory(size);
+        aligned_size := (size + 15) & -16;
 
-      case .FREE;
-        Syscall.free_memory(old_memory);
+        result_address     := allocator_base + allocator_current_size;
+        allocator_new_size := allocator_current_size + aligned_size;
+
+        pages_used   := (allocator_current_size + 0x1f_ffff) / 0x20_0000;
+        pages_needed := (allocator_new_size     + 0x1f_ffff) / 0x20_0000;
+
+        for pages_used .. pages_needed-1 {
+            page_frame := Syscall.get_new_page_frame();
+            Syscall.map_page(page_frame, allocator_base + it * 0x20_0000);
+        }
+
+        allocator_current_size = allocator_new_size;
+        return result_address;
 
       case .RESIZE;
-        new_memory := Syscall.allocate_memory(size);
-
-        if old_memory {
-            memcpy(new_memory, old_memory, old_size);
-            Syscall.free_memory(old_memory);
-        }
+        new_memory := runtime_support_default_allocator_proc(.ALLOCATE, size, 0, null, null);
+        memcpy(new_memory, old_memory, old_size);
 
         return new_memory;
     }

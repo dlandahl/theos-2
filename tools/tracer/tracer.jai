@@ -572,7 +572,7 @@ draw_one_frame :: (dt: float) {
 
             {
                 // Say what the thread name was.
-                if it.task_id > cast(u64)trace_data.threads.count-1 {
+                if it.task_id > cast(u64) trace_data.threads.count-1 {
                     text = "(Error in data)";
                 } else {
                     text = tprint("%", trace_data.threads[it.task_id]);
@@ -619,8 +619,8 @@ draw_one_frame :: (dt: float) {
                 text = tprint("% bytes at 0x%", it.user[1], cast(*void) it.user[0]);
 
               case .contended_spinlock;
-                time_ns := cast(float)it.user[1] / cast(float)trace_data.tsc_frequency;
-                text = tprint("Contention level: %, blocked for %us", it.user[0], cast(int)(time_ns * 1_000_000));
+                time_ns := cast(float) it.user[1] / cast(float) trace_data.tsc_frequency;
+                text = tprint("Contention level: %, blocked for %us", it.user[0], cast(int) (time_ns * 1_000_000));
 
               case .irq_disable; #through;
               case .irq_restore;
@@ -748,8 +748,8 @@ draw_one_frame :: (dt: float) {
         selected := *trace_data.entries[selected_entry];
         hovered  := *trace_data.entries[hovered_entry];
 
-        delta := abs(cast(s64)selected.tsc - cast(s64)hovered.tsc);
-        delta_seconds := cast(float)delta / cast(float)trace_data.tsc_frequency;
+        delta := abs(cast(s64) selected.tsc - cast(s64) hovered.tsc);
+        delta_seconds := cast(float) delta / cast(float) trace_data.tsc_frequency;
 
         text := tprint("% | Delta: %s", formatInt(hovered_entry, minimum_digits=4), formatFloat(delta_seconds, trailing_width=3, zero_removal=.NO));
         label(info_bar_rect, text, *t);

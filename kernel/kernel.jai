@@ -1273,7 +1273,7 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
         // It's a page table, create it if it doesn't exist.
 
         // Note this means that the page flags will not be changed at this level.
-        if it.flags & .PRESENT > 0 continue;
+        if it.flags & .PRESENT continue;
 
         new_table := get_4k_page();
 

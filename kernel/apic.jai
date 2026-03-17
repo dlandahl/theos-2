@@ -397,10 +397,17 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, entry: 
 execute_ipi :: (gate: Interrupt_Gate, destination: *X64_Core) {
     // Slightly higher level version of "apic_execute_ipi" for callers that
     // don't want to be concerned with the interrupt command bitfield.
+    // destination = null means "all cores except myself".
 
     ipi: Apic_Interrupt_Command;
     set(*ipi, .vector,      xx gate);
-    set(*ipi, .destination, destination.local_apic_id);
+
+    if !destination {
+        set(*ipi, .destination_shorthand, 3);
+    } else {
+        set(*ipi, .destination, destination.local_apic_id);
+    }
+
     apic_execute_ipi(ipi);
 }
 
@@ -670,7 +677,6 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         print(*b, "SS: %\n",     stack.ss);
         print(*b, "CS: %\n",     stack.cs);
 
-        print(*b, "%", stack.registers);
         print(*b, "\n");
     }
 
