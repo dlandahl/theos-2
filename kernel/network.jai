@@ -2316,7 +2316,7 @@ Ring_Buffer :: struct {
 allocate_ring_buffer :: (ring: *Ring_Buffer, size: int) {
     // Todo: Think about implications (TLB shootdowns) of creating arbitrary custom memory mappings in the kernel. Because this data structure explicitly has two users (reader and writer) it's hopefully easy to track/clean up TLB.
 
-    assert(size % 4096 == 0);
+    assert(size & 4095 == 0);
     page_count := size / 4096;
 
     physical_base, physical := allocate_page_aligned_physical_memory(size);

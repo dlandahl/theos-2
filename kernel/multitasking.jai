@@ -1012,8 +1012,7 @@ get_new_page_frame :: () -> int {
 
     release(*task.execution_context.spinlock);
 
-    // Maybe should have permissions associated with it, if the caller wants to use it for shared memory.
-    return id;
+    return id; // Todo: Would like to have discriminated integers for kernel object handles.
 } @Syscall(7)
 
 map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
@@ -1066,6 +1065,10 @@ quit_execution_context :: () {
     }
 
     release(*task.execution_context.spinlock);
+
+    // Todo: Maybe we should set this flag on all threads of this process. But we don't track that currently, and I want to minimize duplicated
+    // state tracking in the scheduler, so we signal to the scheduler that the thread is done by setting a flag on the process / execution context.
+    set_flag(.stopped, task);
 
     // Todo: Here we need to figure out when other threads of the same EC have stopped running so we can free resources.
     // Probably just put a counter on the EC struct and spin. Or have a separate thread check the counter.

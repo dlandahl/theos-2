@@ -152,8 +152,6 @@ initialize_apic :: () {
 
     init_processor_core();
 
-    global.multiprocessing_initialized = true;
-
     #insert #run,host -> string {
         builder: String_Builder;
         for 0..31 {

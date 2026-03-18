@@ -2,9 +2,10 @@
 Syscall :: #import "Syscall";
 
 #import "Basic";
+#import "Atomics";
 
 main :: () {
-    log("Hello world, from user space.\n");
+    log("Hello world, from user space.");
 
     for 1..5 {
         stack_size   := 0x1_0000; // 64 Kilobytes.
@@ -14,7 +15,7 @@ main :: () {
     }
 
     for 1..5 {
-        log("Main thread sleeping...\n");
+        log("Main thread sleeping...");
         Syscall.sleep_for_milliseconds(200);
     }
 
@@ -27,17 +28,10 @@ count: int;
 other_thread :: () #no_context {
     push_context,defer_pop;
 
-    my_name := fetch_add(*count, 1);
+    my_name := atomic_add(*count, 1);
 
     while true {
         log("Thread % sleeping...", my_name);
         Syscall.sleep_for_milliseconds(200);
     }
-}
-
-fetch_add :: (value: *$T, add: T) -> T #no_context {
-    #asm {
-        lock_xadd?T [value], add;
-    }
-    return add;
 }

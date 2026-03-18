@@ -62,15 +62,16 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
 
-    tasks: Bucket_Array(Task_Info, 128, always_iterate_by_pointer=true);
+    // Todo: Once the size of the struct is more stable, we can adjust items-per-bucket to be able to efficiently allocate the buckets using small_objects
+    tasks: Bucket_Array(Task_Info, 128, true);
     next_task_id: int;
     task_info_storage_spinlock: Spinlock;
 
-    processor_cores: [] X64_Core;
+    execution_contexts: Bucket_Array(Execution_Context, 128, true);
+    next_ec_id: int;
+    ec_storage_spinlock: Spinlock;
 
-    // This flag means that we can call "get_current_core" and that we can access the processor_cores array.
-    // It does not mean that any cores besides the bootstrap processor are ready yet. For that, check the "online" bit in the corresponding X64_Core struct.
-    multiprocessing_initialized: bool;
+    processor_cores: [] X64_Core;
 
     apic: *void;
     io_apic: *u32;
@@ -182,6 +183,7 @@ kernel_entry :: () #no_context {
     }
 
     push_context {
+        // Reserve a large contiguous region of physical memory for the physical block allocator. In the future we should probably make it grow dynamically using virtual memory.
         physical_heap_size: u64 = 0x2000_0000;
 
         for region: global.memory_map {
@@ -260,7 +262,7 @@ kernel_entry :: () #no_context {
             using global.framebuffer;
 
             size_bytes := y_resolution * stride * size_of(u32);
-            size_bytes += 0x10_0000; // Todo: We copy black pixels from outside the framebuffer for convenience when doing text line-scrolling. Bit messy.
+            size_bytes += 0x10_0000; // We copy black pixels from outside the framebuffer for convenience when doing text line-scrolling.
 
             software_buffer = alloc(size_bytes);
             memset(software_buffer, 0, size_bytes);

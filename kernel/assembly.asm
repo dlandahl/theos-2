@@ -98,7 +98,6 @@ global syscall_entry
 
 align 16
 syscall_entry:
-
     mov r12, rsp
     mov rsp, [gs:tss_ring0_stack]
 
