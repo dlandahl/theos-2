@@ -62,14 +62,8 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
 
-    // Todo: Once the size of the struct is more stable, we can adjust items-per-bucket to be able to efficiently allocate the buckets using small_objects
-    tasks: Bucket_Array(Task_Info, 128, true);
-    next_task_id: int;
-    task_info_storage_spinlock: Spinlock;
-
-    execution_contexts: Bucket_Array(Execution_Context, 128, true);
-    next_ec_id: int;
-    ec_storage_spinlock: Spinlock;
+    task_storage: Id_Based_Storage(Task_Info);
+    ec_storage:   Id_Based_Storage(Execution_Context);
 
     processor_cores: [] X64_Core;
 
@@ -501,6 +495,7 @@ set_runtime_support_callbacks :: () #no_context {
             is_resize := mode == .RESIZE && old_memory != null;
 
             if is_resize {
+                // Todo: Check if resize is actually needed based on new_size.
                 physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
                 success := resize_block(*global.physical_block_allocator, physical, cast(u64) size);
 
@@ -1812,274 +1807,63 @@ free_small_object :: (address: *void) {
 
 
 
-Maple_Tree_Node :: struct {
-    Meta :: enum s64 {
-        entry_count    :: 4; // Counts both free and used slots, so all trees always have at least an entry_count of 1. Todo: If we make this a 0s based value (where 0 means 1 entry), then we only need three bits for the current 8 entry version.
-        unused         :: 3;
-        parent_address :: 57;
+Id_Based_Storage :: struct (T: Type) { // The type is only used for pointers that don't get dereferenced, so the generated code is always the same. Maybe we could de duplicate it using #modify, assuming the compiler doesn't already detect this.
+    // A simple structure to look up pointers by a sparse ID, with built-in locking.
+    // Todo: For expansion. It should automatically do a binary search if the number of objects is very large.
+
+    spinlock: Spinlock; // Could be made a RW lock once we have them.
+    next_id:  int;
+
+    lookup_table: [..] struct {
+        // Values are kept contiguous and sorted by ID for fast lookup.
+        id: int;
+        pointer: *T;
+    };
+}
+
+add_object :: (storage: *Id_Based_Storage, pointer: *$T) -> id: int {
+    acquire(*storage.spinlock);
+
+    storage.next_id += 1; // 0 means invalid.
+    array_add(*storage.lookup_table, {storage.next_id, pointer});
+
+    new_id := storage.next_id;
+    release(*storage.spinlock);
+
+    return new_id;
+}
+
+lookup_object :: (storage: *Id_Based_Storage, id: int) -> *storage.T {
+    acquire(*storage.spinlock);
+
+    for storage.lookup_table {
+        if it.id == id {
+            result := it.pointer;
+
+            release(*storage.spinlock);
+            return result;
+        }
     }
 
-    meta: Meta;
-
-    pivots:  [7] s64;
-    entries: [8] Maple_Entry;
+    release(*storage.spinlock);
+    return null;
 }
 
-#assert size_of(Maple_Tree_Node) == 128; // Two cache lines for now.
+remove_object :: (storage: *Id_Based_Storage, id: int) {
+    acquire(*storage.spinlock);
 
-Maple_Entry_Content :: enum {
-    FREE       :: 0;
-    CHILD_NODE :: 1;
-    USER_VALUE :: 2;
-}
+    for storage.lookup_table {
+        if it.id == id {
+            array_ordered_remove_by_index(*storage.lookup_table, it_index);
 
-Maple_Entry :: enum s64 {
-    content :: 2;
-    unused  :: 5; // Could put search marks here.
-
-    address :: 57;
-}
-
-Maple_Tree_Node_Expanded :: struct {
-    #as using node: *Maple_Tree_Node;
-
-    // This struct keeps track of this information which comes from the parent node, as you walk the tree.
-    implicit_min: s64;
-    implicit_max: s64;
-}
-
-each_range :: (node: *Maple_Tree_Node_Expanded, body: Code, flags: For_Flags) #expand {
-    #assert !(flags & .REVERSE);
-    #assert !(flags & .POINTER);
-
-    `it_index := -1;
-
-    `it_min: s64;
-    `it_max: s64;
-
-    `it: *Maple_Entry;
-
-    entry_count := get(node.meta, .entry_count);
-
-    while true {
-        if it_index == entry_count-1 {
-            break;
-        }
-
-        it_index += 1;
-        it = *node.entries[it_index];
-
-        if it_index == 0 {
-            it_min = node.implicit_min;
-        } else {
-            it_min = node.pivots[it_index-1];
-        }
-
-        if it_index == entry_count-1 {
-            it_max = node.implicit_max;
-        } else {
-            it_max = node.pivots[it_index] - 1;
-        }
-
-        #insert body;
-    }
-}
-
-maple_add :: (node: *Maple_Tree_Node_Expanded, range_min: s64, range_max: s64, value: *void) {
-    assert(range_min <= range_max);
-
-    visualize_maple_tree_node(node);
-
-    for :each_range node {
-        // Find the child node or entry that currently contains this range.
-
-        if it_max < range_min {
-            // The wanted range is entirely to the right of this entry.
-            continue;
-        }
-
-        log("\nAdding %-%, looking at %-%", range_min, range_max, it_min, it_max);
-
-        // If we get here we know that at least the left half of the range we want overlaps with this entry.
-        // But it might overlap multiple entries, which in my version of the tree is not allowed. e.g.
-        //
-        // Wanted:  |        |xxx|           |
-        // Entries: |  |  | it |   |     |   |
-        // it_max:             ^
-        //
-        assert(it_max > range_max-1, "Cannot add range %-% to the tree. It overlaps with range %-%.", range_min, range_max, it_min, it_max);
-
-        // This entry should be free or a child node.
-        content := cast(Maple_Entry_Content) get(it.*, .content);
-        assert(content != .USER_VALUE, "Cannot add range %-% to the tree, it is already allocated (%-%).", range_min, range_max, it_min, it_max);
-
-        if content == .CHILD_NODE {
-            assert(false);
-            // If it's a child node, recurse into it.
-            child_address := get_in_place(it.*, .address);
-
-            child: Maple_Tree_Node_Expanded;
-            child.node = cast(*Maple_Tree_Node) child_address;
-            child.implicit_min = it_min;
-            child.implicit_max = it_max;
-
-            maple_add(*child, range_min, range_max, value);
+            release(*storage.spinlock);
             return;
         }
-
-        if it_min == range_min && it_max == range_max {
-            // If it matches exactly, we can just use this range without splitting it.
-
-            set_in_place(it, .address, cast(s64)value);
-            set(it, .content, cast(s64)Maple_Entry_Content.USER_VALUE);
-
-            return;
-        }
-
-        // If we get here we need to move the entries and pivots, to make room for either one or two new entries, depending on whether the existing range gets split by the new range.
-        new_free_entries_needed: int;
-
-        if it_min != range_min new_free_entries_needed += 1;
-        if it_max != range_max new_free_entries_needed += 1;
-
-        entry_count := get(node.meta, .entry_count);
-        new_entry_count := entry_count + new_free_entries_needed;
-
-        assert(new_entry_count <= 8, "Todo: Maple Tree node must be split.");
-
-        new_node := New(Maple_Tree_Node,, global.small_objects);
-
-        // Copy the entries before the new ones.
-        for 0..it_index-1 {
-            new_node.entries[it] = node.entries[it];
-            new_node.pivots[it]  = node.pivots[it];
-        }
-
-        new_entry_index := it_index;
-
-        if it_min != range_min {
-            // We need a free entry before the one we want to add.
-
-            new_node.entries[it_index] = 0;
-            new_node.pivots[it_index]  = range_min;
-
-            new_entry_index += 1;
-        }
-
-        // Add the new entry.
-        new_entry := *new_node.entries[new_entry_index];
-        set(new_entry, .content, cast(s64)Maple_Entry_Content.USER_VALUE);
-        set(new_entry, .address, cast(s64)value);
-
-        if it_max != range_max {
-            // We need a free entry after the one we've added.
-
-            new_node.entries[it_index + new_free_entries_needed] = 0;
-            new_node.pivots [it_index + new_free_entries_needed - 1] = range_max + 1;
-        }
-
-        // Copy the entries after the new ones from the old node.
-        for it_index..entry_count-1 {
-            index_in_new_node := it + new_free_entries_needed;
-            new_node.entries[index_in_new_node] = node.entries[it];
-
-            if index_in_new_node < 7 {
-                new_node.pivots[index_in_new_node] = node.pivots[it];
-            }
-        }
-
-        set(*new_node.meta, .entry_count, new_entry_count);
-        node.node = new_node;
-        return;
     }
 
-    assert(false, "The requested range (%-%) is not represented in the maple tree.", range_min, range_max);
+    assert(false);
+    release(*storage.spinlock);
 }
-
-maple_remove :: (node: *Maple_Tree_Node_Expanded, range_min: s64) {
-    visualize_maple_tree_node(node);
-
-    for :each_range node {
-        if it_max < range_min {
-            // The wanted range is entirely to the right of this entry.
-            continue;
-        }
-
-        log("\nRemoving %, looking at %-%", range_min, it_min, it_max);
-
-        assert(it_min == range_min, "The value % is not the start of a range stored in the tree. It overlaps %-%.", range_min, it_min, it_max);
-
-        content := cast(Maple_Entry_Content) get(it.*, .content);
-        assert(content != .FREE, "Trying to remove an unallocated range (%-%) from the tree.", it_min, it_max);
-
-        if content == .CHILD_NODE {
-            assert(false);
-            // Recurse into child node.
-            child_address := get_in_place(it.*, .address);
-
-            child: Maple_Tree_Node_Expanded;
-            child.node = cast(*Maple_Tree_Node) child_address;
-            child.implicit_min = it_min;
-            child.implicit_max = it_max;
-
-            maple_remove(*child, range_min);
-            return;
-        }
-
-        // We found a value we want to remove. We may need to coalesce adjacent free ranges.
-        // Todo: Think about how to coalesce ranges across multiple nodes in the tree.
-
-    }
-}
-
-visualize_maple_tree_node :: (node: *Maple_Tree_Node_Expanded) {
-    b: String_Builder;
-
-    print(*b, "[%] ", node.implicit_min);
-
-    entry_count := get(node.meta, .entry_count);
-    assert(entry_count >= 1);
-
-    for 0..entry_count-1 {
-
-        entry := node.entries[it];
-        used := cast(Maple_Entry_Content) get(entry, .content) == .USER_VALUE;
-
-        pivot := ifx it == entry_count-1 then node.implicit_max else node.pivots[it];
-
-        print(*b, "(%) [%] ", ifx used then "X" else " ", pivot);
-    }
-
-    log(builder_to_string(*b));
-}
-
-create_maple_tree :: (min: s64, max: s64) -> Maple_Tree_Node_Expanded {
-    root := New(Maple_Tree_Node,, global.small_objects);
-    set(*root.meta, .entry_count, 1);
-
-    expanded: Maple_Tree_Node_Expanded;
-    expanded.node = root;
-    expanded.implicit_min = min;
-    expanded.implicit_max = max;
-
-    return expanded;
-}
-
-maple_tree_test :: () {
-    tree := create_maple_tree(0, 100);
-
-    maple_add(*tree, 12, 18,  null);
-    maple_add(*tree, 5,  6,   null);
-    maple_add(*tree, 8,  9,   null);
-    maple_add(*tree, 7,  7,   null);
-    maple_add(*tree, 19, 100, null);
-
-    entry_count := get(tree.meta, .entry_count);
-    assert(entry_count >= 1);
-
-    visualize_maple_tree_node(*tree);
-}
-
 
 
 // A temporary system to help detect memory bugs.

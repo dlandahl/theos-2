@@ -34,6 +34,7 @@ Task_Info :: struct {
 }
 
 Execution_Context :: struct {
+    id: int;
     root_page_table: u64;
 
     page_frames: [..] s32;
@@ -128,26 +129,14 @@ unset_flag :: (flag: Task_Flags, task: *Task_Info) {
     }
 }
 
-allocate_task_info :: () -> *Task_Info {
-    using global;
-
-    acquire(*task_info_storage_spinlock);
-
-    locator, task := bucket_array_add(*tasks, {});
-    task.id = next_task_id;
-    next_task_id += 1;
-
-    release(*task_info_storage_spinlock);
-
-    return task;
-}
-
 core_begin_multitasking :: () {
 
     core := get_current_core();
     using core.scheduler;
 
-    current_task = allocate_task_info();
+    current_task    = New(Task_Info,, global.small_objects);
+    current_task.id = add_object(*global.task_storage, current_task);
+
     current_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
     current_task.name = sprint("Idle (Core %)", core.id);
     current_task.on_core = core;
@@ -211,7 +200,9 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
 
 create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, user_data := null, execution_context: *Execution_Context = null) -> *Task_Info {
 
-    new_task := allocate_task_info();
+    // We could allocate task infos out of a bucket array in case we ever want to iterate them directly rather than indirectly.
+    new_task := New(Task_Info,, global.small_objects);
+    new_task.id = add_object(*global.task_storage, new_task);
 
     if execution_context {
         new_task.execution_context = execution_context;
@@ -256,7 +247,9 @@ create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, us
 
 create_execution_context :: (name: string) -> *Execution_Context {
     ec := New(Execution_Context,, global.small_objects);
-    ec.name = name;
+
+    ec.id         = add_object(*global.ec_storage, ec);
+    ec.name       = name;
     ec.trace_name = add_trace_string(name);
 
     ec.root_page_table = get_4k_page();

@@ -237,9 +237,6 @@ initialize_apic :: () {
 
     // Store this, to be able to configure the APIC timer (or TSC deadline) of all cores to use the same interrupt handler, which is done in core_begin_multitasking.
     global.scheduling_interrupt_gate = timer_gate;
-
-    global.tasks.allocator = context.allocator;
-    global.next_task_id = 1;
 }
 
 startup_application_processors :: () {
