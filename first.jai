@@ -513,8 +513,10 @@ format_disk :: () -> bool {
     bootloader := read_entire_file(".build/bootx64.efi");
     kernel     := read_entire_file(".build/kernel");
 
-    filesystem_size :: 0xa0_0000; // 10 Meg
-    disk_image_size :: filesystem_size + 0x20_0000; // Add two megabytes for alignment and partition table.
+    filesystem_size := 0xa0_0000; // 10 Meg
+    disk_image_size := filesystem_size;
+    disk_image_size += 0x20_0000; // Add two megabytes for alignment and partition table.
+    disk_image_size += 0x1000_0000; // Add space for our custom file system.
 
     memory_buffer := NewArray(disk_image_size, u8);
 

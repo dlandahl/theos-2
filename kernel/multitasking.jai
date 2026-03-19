@@ -76,9 +76,10 @@ Scheduler :: struct {
 }
 
 lock_scheduler_for_task :: (task: *Task_Info) -> *Scheduler {
+    assert(task.on_core != null);
+
     // We need to dereference on_core to lock a task, but it can be stale by the time we
     // get the lock. In practice it should almost always work the first time.
-    assert(task.on_core != null);
 
     while true {
         core := task.on_core;
@@ -383,6 +384,7 @@ schedule_tasks :: () {
 
         if next {
             if next.execution_context && next.execution_context.stopped {
+                // This will probably be removed when in the future execution contexts track the threads they own.
                 continue;
             }
 

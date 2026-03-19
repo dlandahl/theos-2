@@ -11,8 +11,10 @@ Info_Node :: struct {
     created:  Apollo_Time;
     modified: Apollo_Time;
 
-    data_blocks:         [8] s32;
-    indirect_data_block:     s32;
+    links: int; // How many directory entries reference me.
+
+    data_blocks:         [8] u32;
+    indirect_data_block:     u32;
 }
 
 Directory_Entry :: struct {
@@ -75,38 +77,44 @@ format_file_system :: (sd: Storage_Device, offset: u64) -> Mounted_File_System {
     return fs;
 }
 
-allocate_inode :: (fs: Mounted_File_System) -> int {
+allocate_inode :: (fs: Mounted_File_System) -> s64 {
     // Lets say inode identifier = 0 means invalid/unitialized.
     identifier := allocate_bit_tree_slot(*fs.super_block.free_inodes);
     return identifier + 1;
 }
 
-lookup_inode :: (fs: Mounted_File_System, identifier: int) -> *Info_Node {
+lookup_inode :: (fs: Mounted_File_System, identifier: s64) -> *Info_Node {
+    assert(identifier != -1, "Tried to lookup invalid inode.");
     return *fs.inodes_block[identifier - 1];
 }
 
-allocate_block :: (fs: Mounted_File_System) -> s32 {
+allocate_block :: (fs: Mounted_File_System) -> u32 {
     index := allocate_bit_tree_slot(*fs.super_block.free_blocks);
-    return cast(s32) index;
+    return cast(u32) index;
 }
 
-create_child_inode :: (fs: Mounted_File_System, parent_id: int, child_name: string) -> *Info_Node {
+dirent_name :: (dirent: *Directory_Entry) -> string {
+    return {cast(s64) dirent.name_length, *dirent.name_bytes};
+}
+
+create_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_id: s64, child_name: string) {
     time_now := get_system_time();
 
     parent := lookup_inode(fs, parent_id);
-    new_inode_id := allocate_inode(fs);
 
-    // Todo: Check if an entry with this name already exists.
+    found_slot: *Directory_Entry;
 
-    for *parent.data_blocks {
-        if it.* == 0 {
+    for *parent.data_blocks { // Todo: Doesn't do indirect blocks. Not sure how we'll do directory blocks anyway.
+        if it.* == 0 && !found_slot {
             // The block has not been allocated, but we haven't found a free space yet. Allocate a new disk block.
             it.* = allocate_block(fs);
+            // Todo: Handle running out of disk blocks.
         }
 
-        block  := pin_disk_block(fs, it.*);
+        block := pin_disk_block(fs, it.*);
+        defer  unpin_disk_block(block);
+
         offset := 0;
-        defer unpin_disk_block(block);
 
         // Look for a free space in the current block.
         while true {
@@ -117,41 +125,271 @@ create_child_inode :: (fs: Mounted_File_System, parent_id: int, child_name: stri
 
             entry := cast(*Directory_Entry) (block + offset);
 
+            log("Got entry % block % offset %", entry, block, offset);
+
             if entry.inode_id != 0 {
+                assert(entry.name_length != 0);
+
+                // Found a non-free entry. Make sure it's not a duplicate.
+                name := dirent_name(entry);
+
+                if equal_nocase(name, child_name) {
+                    assert(false);
+                    return; // Todo: Error code.
+                }
+
                 offset += entry.name_length + size_of(Directory_Entry);
                 continue;
             }
 
-            // Found a free entry. Is there enough space?
+            // Found a free entry. Is there enough space? (Empty length means the rest of the block is free.)
             space_available := ifx cast(s64) entry.name_length else 0x20_0000 - offset - size_of(Directory_Entry);
 
             if space_available >= child_name.count {
-                // Found a suitable directory entry.
-
-                entry.inode_id    = new_inode_id;
-                entry.name_length = cast(s32) child_name.count;
-                memcpy(*entry.name_bytes, child_name.data, child_name.count);
-
-                parent.modified = time_now;
-                parent.directory_entries += 1;
-
-                return lookup_inode(fs, new_inode_id);
+                // Found a suitable directory entry. Double-pin the block and remember this slot, but keep scanning to make sure there's no duplicate.
+                found_slot = entry;
+                pin_disk_block(fs, it.*);
             }
+
+            // Go to the next slot.
+            offset += space_available + size_of(Directory_Entry);
+        }
+    }
+
+    if !found_slot {
+        // Improbable, but may need to be handled in the future, depending on how the rest of the system works.
+        assert(false);
+        return;
+    }
+
+    found_slot.inode_id    = child_id;
+    found_slot.name_length = cast(s32) child_name.count;
+    memcpy(*found_slot.name_bytes, child_name.data, child_name.count);
+
+    parent.modified = time_now;
+    parent.directory_entries += 1;
+
+    unpin_disk_block(found_slot); // Any direct-mapped virtual address in the block can be used to unpin the block.
+}
+
+remove_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_name: string) {
+    // Todo: This code is very similar to get_directory_entry, deduplicate that.
+
+    parent := lookup_inode(fs, parent_id);
+    assert(parent.type == .DIRECTORY);
+
+    for parent.data_blocks {
+        if it == 0 {
+            // The block has not been allocated and we haven't found the child entry.
+            assert(false);
+            break;
+        }
+
+        block := pin_disk_block(fs, it);
+        defer unpin_disk_block(block);
+
+        previous: *Directory_Entry;
+        offset := 0;
+
+        while true {
+            if offset + size_of(Directory_Entry) + 1 >= 0x20_0000 {
+                // End of the disk block.
+                break;
+            }
+
+            entry := cast(*Directory_Entry) (block + offset);
+
+            if entry.name_length == 0 {
+                // Rest of the block is ununsed.
+                break;
+            }
+
+            if entry.inode_id != 0 {
+                name := dirent_name(entry);
+
+                if equal_nocase(name, child_name) {
+                    // Remove the entry and merge unused entries in both directions.
+                    // Todo: This code is hard to read.
+
+                    if previous && previous.inode_id == 0 {
+                        previous.name_length += size_of(Directory_Entry) + entry.name_length;
+                        entry = previous;
+                    }
+
+                    // Is there a next entry? Is it empty? If so, merge.
+                    next_offset := cast(s64) entry - cast(s64) block + entry.name_length + size_of(Directory_Entry);
+
+                    if next_offset < 0x20_0000 {
+                        assert(next_offset < 0x20_0000 - size_of(Directory_Entry));
+
+                        next := cast(*Directory_Entry) (block + next_offset);
+                        assert(next.name_length != 0);
+
+                        if next.inode_id == 0 {
+                            entry.name_length += size_of(Directory_Entry) + next.name_length;
+                        }
+                    }
+
+                    if previous unpin_disk_block(previous);
+                    return;
+                }
+            }
+
+            previous = entry;
+            offset += entry.name_length + size_of(Directory_Entry);
         }
     }
 
     assert(false);
-    return null;
+    return; // Failed to find it.
 }
 
-get_child_inode :: (fs: Mounted_File_System, parent_id: int, child_name: string) {
+get_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_name: string) -> result_id: s64 {
+    parent := lookup_inode(fs, parent_id);
+    assert(parent.type == .DIRECTORY);
 
+    for parent.data_blocks {
+        if it == 0 {
+            // The block has not been allocated and we haven't found the child entry.
+            break;
+        }
+
+        block := pin_disk_block(fs, it);
+        defer unpin_disk_block(block);
+
+        offset := 0;
+
+        while true {
+            if offset + size_of(Directory_Entry) + 1 >= 0x20_0000 {
+                // End of the disk block.
+                break;
+            }
+
+            entry := cast(*Directory_Entry) (block + offset);
+
+            if entry.name_length == 0 {
+                // Rest of the block is ununsed.
+                break;
+            }
+
+            name := dirent_name(entry);
+
+            if equal_nocase(name, child_name) {
+                return entry.inode_id;
+            }
+
+            offset += entry.name_length + size_of(Directory_Entry);
+        }
+    }
+
+    return 0; // Failed to find it, return invalid inode id.
+}
+
+create_directory :: (fs: Mounted_File_System, parent_id: s64, name: string) -> id: s64 {
+    time_now := get_system_time();
+
+    child_id := allocate_inode(fs);
+    create_directory_entry(fs, parent_id, child_id, name);
+
+    inode := lookup_inode(fs, child_id);
+    inode.type     = .DIRECTORY;
+    inode.created  = time_now;
+    inode.modified = time_now;
+
+    create_directory_entry(fs, child_id, child_id,  ".");
+    create_directory_entry(fs, child_id, parent_id, "..");
+
+    inode.directory_entries = 2;
+
+    return child_id;
+}
+
+create_file :: (fs: Mounted_File_System, parent_id: s64, name: string) -> id: s64 {
+    time_now := get_system_time();
+
+    child_id := allocate_inode(fs);
+    create_directory_entry(fs, parent_id, child_id, name);
+
+    inode := lookup_inode(fs, child_id);
+    inode.type      = .FILE;
+    inode.file_size = 0;
+    inode.created   = time_now;
+    inode.modified  = time_now;
+
+    return child_id;
+}
+
+delete_file :: (fs: Mounted_File_System, parent_id: s64, name: string) {
+
+}
+
+write_file :: (fs: Mounted_File_System, id: s64, data: $T/.[string, []u8]) {
+    inode := lookup_inode(fs, id);
+    assert(inode.type == .FILE);
+
+    inode.file_size = 0;
+    append_to_file(fs, id, data);
+}
+
+append_to_file :: (fs: Mounted_File_System, id: s64, data: $T/.[string, []u8]) {
+    inode := lookup_inode(fs, id);
+    assert(inode && inode.type == .FILE); // Todo: Handle errors.
+
+    current_block   := inode.file_size / 0x20_0000;
+    offset_in_block := inode.file_size % 0x20_0000;
+
+    written: int;
+
+    while written < data.count {
+        block_index: *u32;
+
+        if current_block < Info_Node.data_blocks.count {
+            block_index = *inode.data_blocks[current_block];
+
+            // Todo: If this condition fails we need to use indirect blocks. Or something.
+            assert(false);
+        }
+
+        if block_index.* == 0 block_index.* = allocate_block(fs);
+
+        block := pin_disk_block(fs, block_index.*);
+
+        bytes_to_write := min(data.count - written, 0x20_0000 - offset_in_block);
+        memcpy(block + offset_in_block, data.data + written, bytes_to_write);
+
+        written += bytes_to_write;
+
+        current_block   += 1;
+        offset_in_block  = 0;
+
+        unpin_disk_block(block);
+    }
+
+    assert(written == data.count);
+    inode.file_size += data.count;
+    inode.modified = get_system_time();
+}
+
+resolve_path :: (fs: Mounted_File_System, path: string, root_id: s64) -> id: s64 {
+    // This is a low level routine (like all the routines currently in this file) so this is not where user facing paths come into the system.
+
+    segments := split(path, #char "/",, temp);
+
+    current := root_id;
+    for segments {
+        assert(!!it); // Don't give us trailing, leading or double slashes.
+
+        current = get_directory_entry(fs, current, it);
+        if !current return 0;
+    }
+
+    return current;
 }
 
 
 
-pin_disk_block :: (fs: Mounted_File_System, block_index: s32, overwrite := false) -> *void {
-    disk_byte_address := fs.disk_offset_in_bytes + cast(u64) block_index * 0x20_0000;
+pin_disk_block :: (fs: Mounted_File_System, block_index: u32, overwrite := false) -> *void {
+    disk_byte_address := fs.disk_offset_in_bytes + block_index * 0x20_0000;
 
     page_base, was_present := find_or_add_disk_cache_entry(disk_byte_address);
 

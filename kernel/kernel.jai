@@ -361,6 +361,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
+        file_system_test(nvme_sd);
         file_system := disk_test(nvme_sd);
         root        := fat16_get_root_directory(*file_system);
 
@@ -375,6 +376,12 @@ kernel_entry :: () #no_context {
             yield_execution();
         }
     }
+}
+
+file_system_test :: (sd: Storage_Device) {
+    mounted := format_file_system(sd, 0xb0_0000);
+
+    create_directory(mounted, 1, "Hello world");
 }
 
 disk_test :: (sd: Storage_Device) -> Fat16_File_System {
@@ -1000,7 +1007,8 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64, was_present: bool {
     lru_entry        := *large_pages[hash_table_entry.lru_entry];
 
     Cache_Page :: (page_base: u64) #expand {
-        // Todo: Cached entry needs to identify the disk from which the block is cached.
+        // Updare disk caching metadata for a memory page, and move it to the top of the LRU.
+        // Todo: Cached entry needs to identify the disk from which the block is cached. This currently assumes there's only one storage device.
         page_index := cast(s32, page_base / 0x20_0000);
 
         lru_entry := *large_pages[page_index];
