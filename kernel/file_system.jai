@@ -11,8 +11,6 @@ Info_Node :: struct {
     created:  Apollo_Time;
     modified: Apollo_Time;
 
-    links: int; // How many directory entries reference me.
-
     data_blocks:         [8] u32;
     indirect_data_block:     u32;
 }
@@ -40,8 +38,11 @@ Super_Block :: struct {
     mount_count: int;
     last_mounted_timestamp: Apollo_Time;
 
-    free_blocks: Bit_Tree;
-    free_inodes: Bit_Tree;
+    free_blocks:       Bit_Tree;
+    free_inodes:       Bit_Tree;
+
+    free_small_blocks: Bit_Tree;
+    small_block_table: [0x1_0000] u32;
 }
 
 format_file_system :: (sd: Storage_Device, offset: u64) -> Mounted_File_System {
@@ -74,6 +75,9 @@ format_file_system :: (sd: Storage_Device, offset: u64) -> Mounted_File_System {
     root.created           = time_now;
     root.modified          = time_now;
 
+    create_directory_entry(fs, root_id, root_id, ".");
+    create_directory_entry(fs, root_id, root_id, ".."); // It's common that root/.. gives you the root directory. Not sure how useful that is.
+
     return fs;
 }
 
@@ -84,7 +88,7 @@ allocate_inode :: (fs: Mounted_File_System) -> s64 {
 }
 
 lookup_inode :: (fs: Mounted_File_System, identifier: s64) -> *Info_Node {
-    assert(identifier != -1, "Tried to lookup invalid inode.");
+    assert(identifier > 0, "Tried to lookup invalid inode.");
     return *fs.inodes_block[identifier - 1];
 }
 
@@ -93,8 +97,8 @@ allocate_block :: (fs: Mounted_File_System) -> u32 {
     return cast(u32) index;
 }
 
-dirent_name :: (dirent: *Directory_Entry) -> string {
-    return {cast(s64) dirent.name_length, *dirent.name_bytes};
+get_name :: (entry: *Directory_Entry) -> string {
+    return {cast(s64) entry.name_length, *entry.name_bytes};
 }
 
 create_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_id: s64, child_name: string) {
@@ -105,7 +109,9 @@ create_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_id: s6
     found_slot: *Directory_Entry;
 
     for *parent.data_blocks { // Todo: Doesn't do indirect blocks. Not sure how we'll do directory blocks anyway.
-        if it.* == 0 && !found_slot {
+        if it.* == 0 {
+            if found_slot break;
+
             // The block has not been allocated, but we haven't found a free space yet. Allocate a new disk block.
             it.* = allocate_block(fs);
             // Todo: Handle running out of disk blocks.
@@ -125,13 +131,11 @@ create_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_id: s6
 
             entry := cast(*Directory_Entry) (block + offset);
 
-            log("Got entry % block % offset %", entry, block, offset);
-
             if entry.inode_id != 0 {
                 assert(entry.name_length != 0);
 
                 // Found a non-free entry. Make sure it's not a duplicate.
-                name := dirent_name(entry);
+                name := get_name(entry);
 
                 if equal_nocase(name, child_name) {
                     assert(false);
@@ -205,7 +209,8 @@ remove_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_name: 
             }
 
             if entry.inode_id != 0 {
-                name := dirent_name(entry);
+                name := get_name(entry);
+                assert(!!name);
 
                 if equal_nocase(name, child_name) {
                     // Remove the entry and merge unused entries in both directions.
@@ -230,7 +235,6 @@ remove_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_name: 
                         }
                     }
 
-                    if previous unpin_disk_block(previous);
                     return;
                 }
             }
@@ -272,7 +276,7 @@ get_directory_entry :: (fs: Mounted_File_System, parent_id: s64, child_name: str
                 break;
             }
 
-            name := dirent_name(entry);
+            name := get_name(entry);
 
             if equal_nocase(name, child_name) {
                 return entry.inode_id;
@@ -298,8 +302,6 @@ create_directory :: (fs: Mounted_File_System, parent_id: s64, name: string) -> i
 
     create_directory_entry(fs, child_id, child_id,  ".");
     create_directory_entry(fs, child_id, parent_id, "..");
-
-    inode.directory_entries = 2;
 
     return child_id;
 }
@@ -345,7 +347,7 @@ append_to_file :: (fs: Mounted_File_System, id: s64, data: $T/.[string, []u8]) {
 
         if current_block < Info_Node.data_blocks.count {
             block_index = *inode.data_blocks[current_block];
-
+        } else {
             // Todo: If this condition fails we need to use indirect blocks. Or something.
             assert(false);
         }
@@ -370,7 +372,71 @@ append_to_file :: (fs: Mounted_File_System, id: s64, data: $T/.[string, []u8]) {
     inode.modified = get_system_time();
 }
 
-resolve_path :: (fs: Mounted_File_System, path: string, root_id: s64) -> id: s64 {
+map_file :: (fs: Mounted_File_System, id: s64) -> *void {
+    // We don't do lazy loading yet. This will read the whole file into RAM and keep it there.
+
+    inode := lookup_inode(fs, id);
+    assert(inode && inode.type == .FILE);
+
+    num_blocks := (inode.file_size + 0x1f_ffff) / 0x20_0000;
+
+    vm_it: VM_Iterator;
+    vm_it.start_address = cast(*void) alloc_block(*global.virtual_large_page_allocator, num_blocks * 0x20_0000);
+    vm_it.page_count    = num_blocks * 512; // VM Iterator works using 4k pages, disk cache works using 2MB pages.
+
+    for vm_it {
+        if it.level == 1 {
+            assert(it.flags & .PRESENT == 0);
+
+            current_page := it_index / 512;
+
+            block_index := inode.data_blocks[current_page];
+            assert(block_index != 0);
+
+            block := pin_disk_block(fs, block_index);
+
+            it.value  = get_physical_address(block);
+            it.flags |= .PRESENT | .READ_WRITE | .PAGE_SIZE;
+
+            continue;
+        }
+
+        if it.flags & .PRESENT continue;
+
+        new_table := get_4k_page();
+
+        it.value  = new_table;
+        it.flags |= .PRESENT | .READ_WRITE;
+    }
+
+    return vm_it.start_address;
+}
+
+unmap_file :: (fs: Mounted_File_System, id: s64, mapping: *void) {
+    inode := lookup_inode(fs, id);
+    assert(inode && inode.type == .FILE);
+
+    num_blocks := (inode.file_size + 0x1f_ffff) / 0x20_0000;
+
+    vm_it: VM_Iterator;
+    vm_it.start_address = mapping;
+    vm_it.page_count    = num_blocks * 512;
+
+    for vm_it {
+        assert(it.flags & .PRESENT > 0);
+
+        if it.level != 1 {
+            continue; // Just leave the higher level mappings where they are for now, we don't track them yet.
+        }
+
+        unpin_disk_block(it.virtual);
+        it.value = 0;
+    }
+
+    free_block(*global.virtual_large_page_allocator, cast(u64) mapping);
+}
+
+resolve_path :: (fs: Mounted_File_System, root_id: s64, path: string) -> id: s64 {
     // This is a low level routine (like all the routines currently in this file) so this is not where user facing paths come into the system.
 
     segments := split(path, #char "/",, temp);
@@ -415,9 +481,7 @@ pin_disk_block :: (fs: Mounted_File_System, block_index: u32, overwrite := false
 }
 
 unpin_disk_block :: (address: *void) {
-    // You just pass in the virtual address you got from pin_disk_block.
-
-    physical  := cast(u64) address - DIRECT_MAPPING_BASE;
+    physical  := get_physical_address(address);
     page_desc := global.large_pages[physical / 0x20_0000];
 
     assert(page_desc.pinned > 0 && page_desc.state == .DISK_CACHE);

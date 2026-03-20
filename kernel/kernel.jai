@@ -41,8 +41,10 @@ Kernel_Globals :: struct {
     large_page_allocator: Large_Page_Allocator;
     disk_cache_lock: Spinlock;
 
-    physical_block_allocator: Block_Allocator;
-    virtual_block_allocator: Block_Allocator;
+    physical_block_allocator:    Block_Allocator;
+    virtual_block_allocator:     Block_Allocator;
+
+    virtual_large_page_allocator: Block_Allocator;
 
     small_objects: Small_Objects_Allocator;
 
@@ -220,10 +222,17 @@ kernel_entry :: () #no_context {
             direct_mapping_size := cast(u64) global.page_tables.direct_pd.count * GB;
 
             heap_base: u64 = DIRECT_MAPPING_BASE + direct_mapping_size;
-            heap_size: u64 = 64 * GB;
+            heap_size: u64 = 1024 * GB;
 
             // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
             init_block_allocator(*global.virtual_block_allocator, heap_base, heap_size, alignment=4096);
+
+
+            // A virtual memory block allocator with 2MB alignment, for mapping large pages.
+            large_heap_base: u64 = heap_base + heap_size;
+            large_heap_size: u64 = 1024 * GB;
+
+            init_block_allocator(*global.virtual_large_page_allocator, large_heap_base, large_heap_size, alignment=0x20_0000);
         }
 
         if false {
@@ -231,7 +240,6 @@ kernel_entry :: () #no_context {
             // cover half a terabyte. But this way, when we copy the kernel address space into a new process address space, and subsequently allocate
             // virtual memory in the kernel region, the new kernel mappings will be guaranteed to be visible from all process address spaces.
             //
-            // Todo: This wastes nearly 2MB of RAM. It might be worth it to create a more complex solution.
             // Todo: This triple faults on my physical PC.
 
             vm_it: VM_Iterator;
@@ -369,7 +377,7 @@ kernel_entry :: () #no_context {
         assert(success);
 
         ec := create_execution_context("Test");
-        simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", execution_context = ec);
+        // simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", execution_context = ec);
 
         {
             set_flag(.stopped, get_current_task());
@@ -379,9 +387,25 @@ kernel_entry :: () #no_context {
 }
 
 file_system_test :: (sd: Storage_Device) {
-    mounted := format_file_system(sd, 0xb0_0000);
+    fs := format_file_system(sd, 0xb0_0000);
 
-    create_directory(mounted, 1, "Hello world");
+    dir1 := create_directory(fs, 1,    "first_dir");
+    dir2 := create_directory(fs, dir1, "second_dir");
+
+    test := resolve_path(fs, 1, "first_dir/./../first_dir/second_dir/.");
+    assert(test == dir2);
+
+    new_file := create_file(fs, dir2, "my_file");
+    append_to_file(fs, new_file, "Hello, world");
+
+    mapping := map_file(fs, new_file);
+    s: string;
+    s.data  = mapping;
+    s.count = 12;
+
+    log("Read file: %", s);
+
+    unmap_file(fs, new_file, mapping);
 }
 
 disk_test :: (sd: Storage_Device) -> Fat16_File_System {
@@ -1818,6 +1842,7 @@ free_small_object :: (address: *void) {
 Id_Based_Storage :: struct (T: Type) { // The type is only used for pointers that don't get dereferenced, so the generated code is always the same. Maybe we could de duplicate it using #modify, assuming the compiler doesn't already detect this.
     // A simple structure to look up pointers by a sparse ID, with built-in locking.
     // Todo: For expansion. It should automatically do a binary search if the number of objects is very large.
+    // Todo: Maybe hash table is better.
 
     spinlock: Spinlock; // Could be made a RW lock once we have them.
     next_id:  int;
@@ -1829,7 +1854,7 @@ Id_Based_Storage :: struct (T: Type) { // The type is only used for pointers tha
     };
 }
 
-add_object :: (storage: *Id_Based_Storage, pointer: *$T) -> id: int {
+add_object :: (storage: *Id_Based_Storage, pointer: *storage.T) -> id: int {
     acquire(*storage.spinlock);
 
     storage.next_id += 1; // 0 means invalid.
@@ -1851,6 +1876,8 @@ lookup_object :: (storage: *Id_Based_Storage, id: int) -> *storage.T {
             release(*storage.spinlock);
             return result;
         }
+
+        if it.id > id break;
     }
 
     release(*storage.spinlock);
@@ -1867,11 +1894,14 @@ remove_object :: (storage: *Id_Based_Storage, id: int) {
             release(*storage.spinlock);
             return;
         }
+
+        if it.id > id break;
     }
 
     assert(false);
     release(*storage.spinlock);
 }
+
 
 
 // A temporary system to help detect memory bugs.
