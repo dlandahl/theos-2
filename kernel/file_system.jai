@@ -9,24 +9,24 @@ Mounted_File_System :: struct {
     #as file_system: File_System;
 }
 
-format_and_mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_System {
+mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_System {
 
-    m := New(Mounted_File_System,, global.small_objects); // The File_System module needs this to be a stable pointer.
-
-    m.storage_device       = sd;
-    m.disk_offset_in_bytes = disk_offset;
-
+    // Must be set before calling format_file_system.
     pin_disk_block         = my_pin_disk_block;
     unpin_disk_block       = my_unpin_disk_block;
 
-    m.file_system          = format_file_system(m);
+    mounted := New(Mounted_File_System,, global.small_objects); // The File_System module needs this to be a stable pointer.
 
-    return m;
+    mounted.storage_device       = sd;
+    mounted.disk_offset_in_bytes = disk_offset;
+    mounted.file_system          = mount_file_system(mounted);
+
+    return mounted;
 }
 
 
 
-map_file :: (fs: File_System, id: s64) -> *void {
+map_file :: (fs: File_System, id: s64) -> string {
     // We don't do lazy loading yet. This will read the whole file into RAM and keep it there.
 
     inode := lookup_inode(fs, id);
@@ -63,7 +63,7 @@ map_file :: (fs: File_System, id: s64) -> *void {
         it.flags |= .PRESENT | .READ_WRITE;
     }
 
-    return vm_it.start_address;
+    return {inode.file_size, vm_it.start_address};
 }
 
 unmap_file :: (fs: File_System, id: s64, mapping: *void) {

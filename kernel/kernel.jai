@@ -373,11 +373,10 @@ kernel_entry :: () #no_context {
         file_system := disk_test(nvme_sd);
         root        := fat16_get_root_directory(*file_system);
 
-        success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
-        assert(success);
+        // success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
+        // assert(success);
 
-        pc := create_process_context("Test");
-        simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
+        // simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
         {
             set_flag(.stopped, get_current_task());
@@ -387,25 +386,17 @@ kernel_entry :: () #no_context {
 }
 
 file_system_test :: (sd: Storage_Device) {
-    fs := format_and_mount_file_system(sd, 0xb0_0000);
+    fs := mount_file_system(sd, 0xb0_0000);
 
-    dir1 := create_directory(fs, 1,    "first_dir");
-    dir2 := create_directory(fs, dir1, "second_dir");
+    dir  := resolve_path(fs, 1, "Software");
+    file := get_directory_entry(fs, dir, "Test");
 
-    test := resolve_path(fs, 1, "first_dir/./../first_dir/second_dir/.");
-    assert(test == dir2);
+    elf  := map_file(fs, file);
 
-    new_file := create_file(fs, dir2, "my_file");
-    append_to_file(fs, new_file, "Hello, world");
+    pc := create_process_context("Test");
+    simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
-    mapping := map_file(fs, new_file);
-    s: string;
-    s.data  = mapping;
-    s.count = 12;
-
-    log("Read file: %", s);
-
-    unmap_file(fs, new_file, mapping);
+    if 0 unmap_file(fs, file, elf.data);
 }
 
 disk_test :: (sd: Storage_Device) -> Fat16_File_System {
@@ -1410,7 +1401,7 @@ get_page_settings :: (virtual_address: *void) -> Page_Settings {
         settings.executable          &&= it.flags & .EXECUTE_DISABLE == 0;
         settings.usermode_accessible &&= it.flags & .USER_SUPERVISOR >  0;
 
-        if it.level > 0 && it.level < 3 && it.flags & .PAGE_SIZE > 0 {
+        if (it.level == 1 || it.level == 2) && it.flags & .PAGE_SIZE > 0 {
             settings.very_large_page = it.level == 2;
             settings.large_page      = it.level == 1;
 

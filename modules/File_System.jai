@@ -71,25 +71,26 @@ Disk_Time :: struct {
     clock_generation: int;
 }
 
-format_file_system :: (user_data: *User_Data_Type) -> File_System {
 
+
+
+format_file_system :: (user_data: *User_Data_Type) -> File_System {
     fs: File_System;
     fs.user_data = user_data;
 
-    sb := cast(*Super_Block) pin_disk_block(fs, 0, overwrite = true);
-    memset(sb, 0, BLOCK_SIZE);
+    super_block := cast(*Super_Block) pin_disk_block(fs, 0, overwrite = true);
+    memset(super_block, 0, BLOCK_SIZE);
 
-    memcpy(*sb.magic, "theosfs\0".data, 8);
+    memcpy(*super_block.magic, "theosfs\0".data, 8);
 
     // Occupy the first two blocks, as they are the super block and the inodes block.
-    sb.free_blocks.level_2[0] = 0b11;
-
-    sb.mount_count = 1;
+    super_block.free_blocks.level_2[0] = 0b11;
 
     time_now := get_disk_time();
-    sb.last_mounted_timestamp = time_now;
+    super_block.last_mounted_timestamp = time_now;
+    super_block.mount_count = 1;
 
-    fs.super_block = sb;
+    fs.super_block = super_block;
 
     fs.inodes_block.data  = pin_disk_block(fs, 1, overwrite = true);
     fs.inodes_block.count = BLOCK_SIZE / size_of(Info_Node);
@@ -107,6 +108,25 @@ format_file_system :: (user_data: *User_Data_Type) -> File_System {
     create_directory_entry(fs, root_id, root_id, ".."); // It's common that root/.. gives you the root directory. Not sure how useful that is.
 
     log("Formatted file system with % info nodes.", fs.inodes_block.count);
+    return fs;
+}
+
+mount_file_system :: (user_data: *User_Data_Type) -> File_System {
+    fs: File_System;
+    fs.user_data = user_data;
+
+    super_block := cast(*Super_Block) pin_disk_block(fs, 0);
+    assert(super_block.magic == (.*) cast(*u64) "theosfs\0".data);
+
+    time_now := get_disk_time();
+    super_block.last_mounted_timestamp = time_now;
+    super_block.mount_count += 1;
+
+    fs.super_block = super_block;
+
+    fs.inodes_block.data  = pin_disk_block(fs, 1);
+    fs.inodes_block.count = BLOCK_SIZE / size_of(Info_Node);
+
     return fs;
 }
 

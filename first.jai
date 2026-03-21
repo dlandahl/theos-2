@@ -18,6 +18,7 @@
 }
 
 #import "FAT16";
+#import "File_System";
 #import "GUID_Partition_Table";
 
 #run main();
@@ -520,33 +521,44 @@ format_disk :: () -> bool {
 
     memory_buffer := NewArray(disk_image_size, u8);
 
-    disk      := format_gpt_disk_image(memory_buffer);
-    partition := create_partition(disk, PARTITION_TYPE_EFI_BASIC_DATA, "UEFI", 2048, filesystem_size / disk.sector_size);
+    disk          := format_gpt_disk_image(memory_buffer);
 
-    fat16     := fat16_create_file_system(partition, set_volume_label="THEOS BOOT");
-    root      := fat16_get_root_directory(*fat16);
+    {
+        // Create the EFI boot partition.
+        partition := create_partition(disk, PARTITION_TYPE_EFI_BASIC_DATA, "UEFI", 2048, filesystem_size / disk.sector_size);
 
-    fat16_create_directory(root, "EFI");
-    fat16_create_directory(root, "EFI/BOOT");
+        fat16     := fat16_create_file_system(partition, set_volume_label="THEOS BOOT");
+        root      := fat16_get_root_directory(*fat16);
 
-    fat16_write_file(root, "EFI/BOOT/BOOTX64.EFI", bootloader);
-    fat16_write_file(root, "kernel", kernel);
-    fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
+        fat16_create_directory(root, "EFI");
+        fat16_create_directory(root, "EFI/BOOT");
 
-    userspace_programs := file_list("userspace/artifacts");
-    if userspace_programs {
-        theos_dir    := fat16_create_directory(root,      "THEOS");
-        programs_dir := fat16_create_directory(theos_dir, "PROGRAMS");
+        fat16_write_file(root, "EFI/BOOT/BOOTX64.EFI", bootloader);
+        fat16_write_file(root, "kernel", kernel);
+        fat16_write_file(root, "startup.nsh", "fs0:\nEFI\\BOOT\\BOOTX64.EFI");
+
+        fat16_report_space(fat16);
+        fat16_print_directory_tree(root);
+        fat16_copy_fat_table(*fat16);
+    }
+
+    {
+        // Create a partition containing our custom file system format.
+        guid: [16] u8;
+        partition := create_partition(disk, guid, "File System", 2048 + filesystem_size / disk.sector_size, 0x1000_0000);
+        fs        := format_file_system(partition.data);
+
+        userspace_programs := file_list("userspace/artifacts");
+        subdir := create_directory(fs, 1, "Software");
 
         for userspace_programs {
             file_content := read_entire_file(it);
-            fat16_write_file(programs_dir, basename(it), file_content);
+            file_name    := basename(it);
+
+            file := create_file(fs, subdir, file_name);
+            write_file(fs, file, file_content);
         }
     }
-
-    fat16_report_space(fat16);
-    fat16_print_directory_tree(root);
-    fat16_copy_fat_table(*fat16);
 
     finalize_gpt_disk_image(disk);
     write_entire_file("disk_image.img", disk.all_file_data);
