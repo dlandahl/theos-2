@@ -65,7 +65,7 @@ Kernel_Globals :: struct {
     next_free_interrupt_gate: int;
 
     task_storage: Id_Based_Storage(Task_Info);
-    ec_storage:   Id_Based_Storage(Execution_Context);
+    pc_storage:   Id_Based_Storage(Process_Context);
 
     processor_cores: [] X64_Core;
 
@@ -309,7 +309,7 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         global.boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        log("The time is %.", calendar_to_string(native_apollo_to_calendar(get_monotonic_time())));
+        log("The time is %.", calendar_to_string(native_apollo_to_calendar(get_system_time())));
 
         initialize_tsc();
 
@@ -318,7 +318,7 @@ kernel_entry :: () #no_context {
         core_begin_multitasking();
 
         // Todo: System time alone is too low entropy for OS random number generation.
-        time := get_monotonic_system_time();
+        time := get_system_time();
         random_seed(cast(S128)time);
 
         find_all_pci_devices();
@@ -376,8 +376,8 @@ kernel_entry :: () #no_context {
         success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
         assert(success);
 
-        ec := create_execution_context("Test");
-        // simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", execution_context = ec);
+        pc := create_process_context("Test");
+        simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
         {
             set_flag(.stopped, get_current_task());
@@ -387,7 +387,7 @@ kernel_entry :: () #no_context {
 }
 
 file_system_test :: (sd: Storage_Device) {
-    fs := format_file_system(sd, 0xb0_0000);
+    fs := format_and_mount_file_system(sd, 0xb0_0000);
 
     dir1 := create_directory(fs, 1,    "first_dir");
     dir2 := create_directory(fs, dir1, "second_dir");
@@ -1216,8 +1216,8 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
     // Get the current root page table from which to start iterating.
     task := get_current_task();
 
-    if task {
-        tables[3] = cast(*u64) (task.cr3 + DIRECT_MAPPING_BASE);
+    if task && task.process_context {
+        tables[3] = cast(*u64) (task.process_context.root_page_table + DIRECT_MAPPING_BASE);
     } else {
         tables[3] = global.page_tables.pml4.data;
     }
@@ -2368,11 +2368,11 @@ allocate_interrupt_gate :: () -> int {
 // These are mainly used by drivers when waiting for a response from the device. Maybe they should yield when the timeout is long.
 
 Timeout_Block :: (code: Code, time_ms := 1000) -> bool #expand {
-    start := get_monotonic_system_time();
+    start := get_monotonic_time();
 
     while true {
         #insert code;
-        elapsed := get_monotonic_system_time() - start;
+        elapsed := get_monotonic_time() - start;
 
         if to_milliseconds(elapsed) > time_ms {
             return true;
@@ -2385,13 +2385,13 @@ Timeout_Block :: (code: Code, time_ms := 1000) -> bool #expand {
 }
 
 Timeout :: (code: Code, time_ms := 1000) -> bool #expand {
-    start := get_monotonic_system_time();
+    start := get_monotonic_time();
 
     while true {
         condition_met := #insert code;
         if condition_met break;
 
-        elapsed := get_monotonic_system_time() - start;
+        elapsed := get_monotonic_time() - start;
 
         if to_milliseconds(elapsed) > time_ms {
             return true;
@@ -2705,13 +2705,11 @@ get_in_place :: bitfield_get_in_place;
 #import "Aes";
 #import "Jai_Crypto";
 
-get_calendar_time :: () -> Calendar_Time {
+#import,file "../modules/FAT16.jai"(() -> Calendar_Time {
     apollo := get_monotonic_time();
     calendar := native_apollo_to_calendar(apollo);
     return calendar;
-}
-
-#import,file "../modules/FAT16.jai"(get_calendar_time);
+});
 
 Curve25519 :: #import "Curve25519";
 

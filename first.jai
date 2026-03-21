@@ -20,7 +20,7 @@
 #import "FAT16";
 #import "GUID_Partition_Table";
 
-#run,stallable main();
+#run main();
 
 kernel_only      := false;
 bootloader_only  := false;
@@ -81,7 +81,7 @@ main :: () {
         case "kernel";     kernel_only     = true;
         case "bootloader"; bootloader_only = true;
         case "userspace";  userspace_only  = true;
-        case "format"; format_disk(); return;
+        case "reformat"; format_disk(); return;
         case; log_error("Command line argument not understood: %", it);
     }
 
@@ -615,15 +615,13 @@ isr__%1:
 
 END;
 
-SYSCALL_DISPATCHER :: #string END
+SYSCALL_DISPATCHER :: #string,\% END
 do_auto_generated_syscall_dispatch :: (data: *Syscall_Stack_Frame) {
     if data.rax == {
       // Auto generated syscalls follow.
 %
       case;
-        write_string("Invalid syscall parameter.\n");
-        write_nonnegative_number(data.rax);
-        write_string("\n");
+        log("Invalid syscall parameter. RAX = \%.\n", data.rax);
         bluescreen();
     }
 }

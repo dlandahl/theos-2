@@ -5,7 +5,7 @@ Trace_Tag :: enum u16 {
     context_switch;
     start_task;
     create_task;
-    create_ec;
+    create_process;
     scheduling_timer;
     syscall;
     sysret;

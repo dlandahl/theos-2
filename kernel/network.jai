@@ -2188,7 +2188,7 @@ allocate_port :: (net: *Network_Connection) -> u16 {
 network_thread :: () {
     log_category("Net");
 
-    time := get_monotonic_system_time();
+    time := get_system_time();
     random_seed(cast(S128)time);
 
     using net := *global.network_connection;

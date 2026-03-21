@@ -30,10 +30,10 @@ Task_Info :: struct {
     #as using queue_node: List_Node(#this);
 
     on_core: *X64_Core;
-    execution_context: *Execution_Context;
+    process_context: *Process_Context;
 }
 
-Execution_Context :: struct {
+Process_Context :: struct {
     id: int;
     root_page_table: u64;
 
@@ -199,18 +199,11 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     release(*scheduler.spinlock);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, user_data := null, execution_context: *Execution_Context = null) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, user_data := null, process_context: *Process_Context = null) -> *Task_Info {
 
     // We could allocate task infos out of a bucket array in case we ever want to iterate them directly rather than indirectly.
     new_task := New(Task_Info,, global.small_objects);
     new_task.id = add_object(*global.task_storage, new_task);
-
-    if execution_context {
-        new_task.execution_context = execution_context;
-        new_task.cr3 = execution_context.root_page_table;
-    } else {
-        new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
-    }
 
     new_task.kernel_stack = allocate_guarded_memory(kernel_stack_size, 0x1_0000);
     new_task.kernel_stack += kernel_stack_size;
@@ -240,27 +233,34 @@ create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, us
     new_task.user_data = user_data;
     new_task.priority = .Normal;
     new_task.trace_name = add_trace_string(name);
+    new_task.process_context = process_context;
+
+    if process_context {
+        new_task.cr3 = process_context.root_page_table;
+    } else {
+        new_task.cr3 = cast(u64) *global.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    }
 
     trace(.create_task, new_task.id, new_task.trace_name);
 
     return new_task;
 }
 
-create_execution_context :: (name: string) -> *Execution_Context {
-    ec := New(Execution_Context,, global.small_objects);
+create_process_context :: (name: string) -> *Process_Context {
+    pc := New(Process_Context,, global.small_objects);
 
-    ec.id         = add_object(*global.ec_storage, ec);
-    ec.name       = name;
-    ec.trace_name = add_trace_string(name);
+    pc.id         = add_object(*global.pc_storage, pc);
+    pc.name       = name;
+    pc.trace_name = add_trace_string(name);
 
-    ec.root_page_table = get_4k_page();
+    pc.root_page_table = get_4k_page();
 
-    page_table := cast(*u64) (ec.root_page_table + DIRECT_MAPPING_BASE);
+    page_table := cast(*u64) (pc.root_page_table + DIRECT_MAPPING_BASE);
     memcpy(*page_table[256], *global.page_tables.pml4[256], 256*8);
 
-    trace(.create_ec, ec.trace_name);
+    trace(.create_process, pc.trace_name);
 
-    return ec;
+    return pc;
 }
 
 yield_execution :: schedule_tasks;
@@ -322,7 +322,7 @@ schedule_tasks :: () {
     unset_flag(.preempt, previous);
 
     // This all uses apollo time but should probably use native clock counter values for performance.
-    time_now  := get_monotonic_system_time();
+    time_now  := get_monotonic_time();
     delta     := time_now - scheduler.last_task_switch_timestamp;
 
     previous.remaining_quantum -= delta;
@@ -355,7 +355,7 @@ schedule_tasks :: () {
 
     previous_task_still_wants_to_run  := previous != scheduler.idle_task;
     previous_task_still_wants_to_run &&= previous.flags & (.sleeping | .blocked | .stopped) == 0;
-    previous_task_still_wants_to_run &&= !previous.execution_context || !previous.execution_context.stopped;
+    previous_task_still_wants_to_run &&= !previous.process_context || !previous.process_context.stopped;
 
     // Pick next task to run.
     next: *Task_Info;
@@ -383,8 +383,8 @@ schedule_tasks :: () {
         next = list_pop(run_queue);
 
         if next {
-            if next.execution_context && next.execution_context.stopped {
-                // This will probably be removed when in the future execution contexts track the threads they own.
+            if next.process_context && next.process_context.stopped {
+                // This will probably be removed when in the future process contexts track the threads they own.
                 continue;
             }
 
@@ -836,7 +836,7 @@ fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Cod
 
 
 
-simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2, execution_context: *Execution_Context = null) {
+simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2, process_context: *Process_Context = null) {
     simple_thread_entry :: () {
         task := get_current_task();
         user_data: T = (.*) cast(*T) task.user_data;
@@ -847,7 +847,7 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     data := alloc(size_of(T));
     memcpy(data, *user_data, size_of(T));
 
-    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data, execution_context = execution_context);
+    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data, process_context = process_context);
 
     core := *global.processor_cores[core_id];
     assert(core.online);
@@ -855,13 +855,13 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     put_task_on_core(task, core);
 }
 
-simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2, execution_context: *Execution_Context = null) {
+simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2, process_context: *Process_Context = null) {
     wrapper :: (param: void) {
         inline proc();
     }
 
     x: void;
-    simple_create_thread(wrapper, x, name, format, core_id, execution_context);
+    simple_create_thread(wrapper, x, name, format, core_id, process_context);
 }
 
 
@@ -977,7 +977,7 @@ create_thread :: (entry_point: () #no_context, stack: *void, stack_size: int) {
         entry_point       = forward_to_usermode,
         name              = "Secondary",
         user_data         = cast(*void) entry_point,
-        execution_context = old_task.execution_context
+        process_context = old_task.process_context
     );
 
     // Todo: These asserts should be errors returned to the user space.
@@ -997,15 +997,15 @@ sleep_for_milliseconds :: (ms: int) {
 
 get_new_page_frame :: () -> int {
     task := get_current_task();
-    acquire(*task.execution_context.spinlock);
+    acquire(*task.process_context.spinlock);
 
     new_page := allocate_large_page();
 
-    array_add(*task.execution_context.page_frames, cast(s32) (new_page / 0x20_0000));
+    array_add(*task.process_context.page_frames, cast(s32) (new_page / 0x20_0000));
 
-    id := task.execution_context.page_frames.count; // 0 means invalid.
+    id := task.process_context.page_frames.count; // 0 means invalid.
 
-    release(*task.execution_context.spinlock);
+    release(*task.process_context.spinlock);
 
     return id; // Todo: Would like to have discriminated integers for kernel object handles.
 } @Syscall(7)
@@ -1013,9 +1013,9 @@ get_new_page_frame :: () -> int {
 map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
     task := get_current_task();
 
-    acquire(*task.execution_context.spinlock);
+    acquire(*task.process_context.spinlock);
 
-    page_array: []s32 = task.execution_context.page_frames;
+    page_array: []s32 = task.process_context.page_frames;
 
     // Todo: These asserts should be errors returned to the user space.
     assert(page_id > 0 && page_id <= page_array.count);
@@ -1047,26 +1047,26 @@ map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
         it.flags |= .PRESENT | .READ_WRITE | .USER_SUPERVISOR;
     }
 
-    release(*task.execution_context.spinlock);
+    release(*task.process_context.spinlock);
 } @Syscall(8)
 
-quit_execution_context :: () {
+quit_process :: () {
     task := get_current_task();
-    acquire(*task.execution_context.spinlock);
+    acquire(*task.process_context.spinlock);
 
-    if !task.execution_context.stopped { // Prevent unecessary IPIs in case of a race.
-        task.execution_context.stopped = true;
+    if !task.process_context.stopped { // Prevent unecessary IPIs in case of a race.
+        task.process_context.stopped = true;
         execute_ipi(.RESCHEDULE_IPI, null);
     }
 
-    release(*task.execution_context.spinlock);
+    release(*task.process_context.spinlock);
 
     // Todo: Maybe we should set this flag on all threads of this process. But we don't track that currently, and I want to minimize duplicated
-    // state tracking in the scheduler, so we signal to the scheduler that the thread is done by setting a flag on the process / execution context.
+    // state tracking in the scheduler, so we signal to the scheduler that the thread is done by setting a flag on the process.
     set_flag(.stopped, task);
 
-    // Todo: Here we need to figure out when other threads of the same EC have stopped running so we can free resources.
-    // Probably just put a counter on the EC struct and spin. Or have a separate thread check the counter.
+    // Todo: Here we need to figure out when other threads of the same process have stopped running so we can free resources.
+    // Probably just put a counter on the process struct and spin. Or have a separate thread check the counter.
 } @Syscall(9)
 
 

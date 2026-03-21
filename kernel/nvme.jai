@@ -27,8 +27,7 @@ nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
     nvme := cast(*Nvme_Controller) device_specific;
 
     lba_to_native :: (lba: s64) -> s64 #expand {
-        ratio := nvme.block_size / 512;
-        return lba / ratio;
+        return (lba * 512) / nvme.block_size;
     }
 
     first_block  := lba_to_native(request.start_lba);

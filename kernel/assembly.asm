@@ -64,8 +64,7 @@ context_switch:
     ; Save task-specific state, that's stored in CPU local data, onto the stack.
     push qword [gs:interrupt_context_active]
 
-    ; I would like to get rid of this counter entirely if possible. We can probably get away
-    ; with not allowing nested IRQ disable.
+    ; I would like to get rid of this counter entirely if possible.
     push qword [gs:irq_disable_count]
 
     ; Store current stack on the old task

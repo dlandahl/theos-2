@@ -20,7 +20,7 @@ main :: () {
     }
 
     log("Exiting...");
-    Syscall.quit_execution_context();
+    Syscall.quit_process();
 }
 
 count: int;
