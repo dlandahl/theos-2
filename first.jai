@@ -82,7 +82,7 @@ main :: () {
         case "kernel";     kernel_only     = true;
         case "bootloader"; bootloader_only = true;
         case "userspace";  userspace_only  = true;
-        case "reformat"; format_disk(); return;
+        case "format"; format_disk(); return;
         case; log_error("Command line argument not understood: %", it);
     }
 
@@ -521,7 +521,7 @@ format_disk :: () -> bool {
 
     memory_buffer := NewArray(disk_image_size, u8);
 
-    disk          := format_gpt_disk_image(memory_buffer);
+    disk := format_gpt_disk_image(memory_buffer);
 
     {
         // Create the EFI boot partition.
@@ -544,12 +544,12 @@ format_disk :: () -> bool {
 
     {
         // Create a partition containing our custom file system format.
-        guid: [16] u8;
-        partition := create_partition(disk, guid, "File System", 2048 + filesystem_size / disk.sector_size, 0x1000_0000);
+        partition := create_partition(disk, PARTITION_TYPE_GUID, "File System", 2048 + filesystem_size / disk.sector_size, 0x1000_0000);
+
         fs        := format_file_system(partition.data);
+        subdir    := create_directory(fs, 1, "Software");
 
         userspace_programs := file_list("userspace/artifacts");
-        subdir := create_directory(fs, 1, "Software");
 
         for userspace_programs {
             file_content := read_entire_file(it);

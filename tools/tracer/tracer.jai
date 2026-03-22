@@ -637,7 +637,7 @@ draw_one_frame :: (dt: float) {
               case .create_task;
                 text = get_string(cast(Trace_String) it.user[1]);
 
-              case .create_ec;
+              case .create_process;
                 text = get_string(cast(Trace_String) it.user[0]);
             }
 
@@ -651,7 +651,7 @@ draw_one_frame :: (dt: float) {
 
     {
         if trace_data.entries.count {
-            // Bottom slide region of the right slide region (stack trace.)
+            // Right slide region (stack trace.)
             entry := trace_data.entries[selected_entry];
 
             row_height := 20*UI_SCALE;
@@ -675,7 +675,7 @@ draw_one_frame :: (dt: float) {
             row_rect := stack_trace_rect;
             row_rect.h = row_height;
             row_rect.y += stack_trace_rect.h;
-            row_rect.y -= row_height + 5*UI_SCALE;
+            row_rect.y -= row_height + 7*UI_SCALE;
 
             for entry.stack_trace {
                 if it == 0xffff_ffff || it == 0xffff_fffe || it == 0 {

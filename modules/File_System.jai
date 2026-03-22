@@ -107,7 +107,6 @@ format_file_system :: (user_data: *User_Data_Type) -> File_System {
     create_directory_entry(fs, root_id, root_id, ".");
     create_directory_entry(fs, root_id, root_id, ".."); // It's common that root/.. gives you the root directory. Not sure how useful that is.
 
-    log("Formatted file system with % info nodes.", fs.inodes_block.count);
     return fs;
 }
 
@@ -478,6 +477,9 @@ free_bit_tree_slot :: (bt: *Bit_Tree, index: int) {
     bt.level_2[index_0 * 64 + index_1] &= ~(1 << index_2);
 }
 
+
+
+PARTITION_TYPE_GUID :: u8.[190, 186, 254, 202, 206, 250, 173, 219, 222, 202, 240, 0, 0, 0, 0, 0];
 
 
 

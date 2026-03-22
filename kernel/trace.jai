@@ -206,7 +206,7 @@ Trace_String :: #type,distinct s32;
         return last_entry_index;
     }
 
-    serialize_trace_buffers :: () -> string {
+    serialize_trace_buffers :: () -> String_Builder {
         trace: String_Builder;
         init_string_builder(*trace, 0x1_0000);
 
@@ -216,8 +216,7 @@ Trace_String :: #type,distinct s32;
 
         serialize_trace_buffers(xx callback, *trace);
 
-        // Todo: If we return the string builder, the caller may be able to use it to elide a copy.
-        return builder_to_string(*trace);
+        return trace;
     }
 
     write_trace_buffers :: () -> int {

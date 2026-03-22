@@ -82,6 +82,29 @@ get_sector_pointer :: (disk: GPT_Disk_Image, sector: int) -> *void {
     return disk.all_file_data.data + sector * disk.sector_size;
 }
 
+parse_gpt_disk_image :: (memory_buffer: string, sector_size := 512) -> bool, GPT_Disk_Image {
+    if memory_buffer.count < 10 * sector_size {
+        return false, {};
+    }
+
+    partition_table_size    := size_of(GPT_Partition) * 128;
+    partition_table_sectors := (partition_table_size + sector_size - 1) / sector_size;
+
+    disk: GPT_Disk_Image;
+    disk.all_file_data = memory_buffer;
+    disk.sector_size   = sector_size;
+
+    disk.header        = get_sector_pointer(disk, 1);
+    disk.header_copy   = get_sector_pointer(disk, cast(int) disk.header.alternate_gpt_lba);
+
+    disk.partition_table.data  = get_sector_pointer(disk, 2);
+    disk.partition_table.count = 128;
+
+    disk.partition_table_copy = get_sector_pointer(disk, cast(int) disk.header.alternate_gpt_lba - partition_table_sectors);
+
+    return true, disk;
+}
+
 format_gpt_disk_image :: (memory_buffer: [] u8, sector_size := 512) -> GPT_Disk_Image {
     assert(memory_buffer.count % sector_size == 0);
 
@@ -331,4 +354,3 @@ CRC32_TABLE :: u32.[
 #import "String";
 #import "Basic";
 #import "Bit_Operations";
-

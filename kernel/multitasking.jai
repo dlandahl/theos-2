@@ -980,8 +980,7 @@ create_thread :: (entry_point: () #no_context, stack: *void, stack_size: int) {
         process_context = old_task.process_context
     );
 
-    // Todo: These asserts should be errors returned to the user space.
-    assert(cast(u64) stack < 0x7fff_ffff_ffff);
+    assert(cast(u64) (stack + stack_size) < 0x7fff_ffff_ffff);
     assert(cast(u64) stack & 0xf == 0);
 
     new_task.user_stack = stack + stack_size;
@@ -1017,7 +1016,6 @@ map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
 
     page_array: []s32 = task.process_context.page_frames;
 
-    // Todo: These asserts should be errors returned to the user space.
     assert(page_id > 0 && page_id <= page_array.count);
     assert(cast(u64) virtual_address & 0x1f_ffff == 0);
     assert(cast(u64) virtual_address <= 0x7fff_ffff_ffff);

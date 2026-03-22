@@ -7,6 +7,8 @@ Mounted_File_System :: struct {
     storage_device: Storage_Device;
 
     #as file_system: File_System;
+
+    maybe_dirty: [..] u32; // Temporary.
 }
 
 mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_System {
@@ -22,6 +24,33 @@ mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_Sys
     mounted.file_system          = mount_file_system(mounted);
 
     return mounted;
+}
+
+flush_file_system :: (fs: *Mounted_File_System) {
+    // Todo: Temporary.
+    transfer_done: Semaphore;
+
+    for fs.maybe_dirty {
+        transfer: Transfer_Request;
+
+        disk_byte_address := fs.disk_offset_in_bytes + it * 0x20_0000;
+        block_index       := fs.disk_offset_in_bytes / 0x20_0000 + it;
+
+        hash_table_entry := global.large_pages[cast(s64) block_index % global.large_pages.count];
+        page_base        := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+
+        transfer.start_lba = cast(s64) disk_byte_address / 512;
+        transfer.count_lba = 0x20_0000                   / 512;
+        transfer.direction = .WRITE;
+        transfer.semaphore = *transfer_done;
+        transfer.physical_memory_address = page_base;
+
+        do_storage_transfer(fs.storage_device, transfer);
+    }
+
+    for fs.maybe_dirty {
+        wait_for(*transfer_done);
+    }
 }
 
 
@@ -94,6 +123,8 @@ unmap_file :: (fs: File_System, id: s64, mapping: *void) {
 
 my_pin_disk_block :: (fs: *Mounted_File_System, block_index: u32, overwrite := false) -> *void {
     disk_byte_address := fs.disk_offset_in_bytes + block_index * 0x20_0000;
+
+    array_add_if_unique(*fs.maybe_dirty, block_index); // Todo: Temporary.
 
     page_base, was_present := find_or_add_disk_cache_entry(disk_byte_address);
 

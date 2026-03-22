@@ -370,13 +370,6 @@ kernel_entry :: () #no_context {
         });
 
         file_system_test(nvme_sd);
-        file_system := disk_test(nvme_sd);
-        root        := fat16_get_root_directory(*file_system);
-
-        // success, elf := fat16_read_file(root, "THEOS/PROGRAMS/TEST");
-        // assert(success);
-
-        // simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
         {
             set_flag(.stopped, get_current_task());
@@ -388,15 +381,32 @@ kernel_entry :: () #no_context {
 file_system_test :: (sd: Storage_Device) {
     fs := mount_file_system(sd, 0xb0_0000);
 
-    dir  := resolve_path(fs, 1, "Software");
-    file := get_directory_entry(fs, dir, "Test");
-
-    elf  := map_file(fs, file);
+    dir := resolve_path(fs, 1, "Software");
+    executable := get_directory_entry(fs, dir, "Test");
+    elf := map_file(fs, executable);
 
     pc := create_process_context("Test");
-    simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
+    // simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
-    if 0 unmap_file(fs, file, elf.data);
+    trace_file := create_file(fs, 1, "trace");
+
+    // sleep(1, .seconds);
+    trace  := serialize_trace_buffers();
+    buffer := get_base_buffer(*trace);
+
+    while buffer {
+        s: string = ---;
+        s.data  = get_buffer_data(buffer);
+        s.count = buffer.count;
+
+        append_to_file(fs, trace_file, s);
+
+        buffer = buffer.next;
+    }
+
+    flush_file_system(fs);
+
+    log("Wrote trace buffers to file.");
 }
 
 disk_test :: (sd: Storage_Device) -> Fat16_File_System {
@@ -435,9 +445,6 @@ disk_test :: (sd: Storage_Device) -> Fat16_File_System {
         text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
         fat16_write_file(root, "THEOS/TEST", text);
 
-        trace := serialize_trace_buffers();
-        fat16_write_file(root, "THEOS/TRACE", trace);
-
         fat16_report_space(file_system);
         fat16_print_directory_tree(root);
         fat16_copy_fat_table(*file_system);
@@ -462,7 +469,6 @@ disk_test :: (sd: Storage_Device) -> Fat16_File_System {
 set_runtime_support_callbacks :: () #no_context {
     write_string_callback = kernel_write_string;
 
-    // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         builder: String_Builder;
 
@@ -1046,7 +1052,7 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64, was_present: bool {
         }
     }
 
-    if lru_entry.state != .DISK_CACHE {
+    if hash_table_entry.lru_entry == 0 || lru_entry.state != .DISK_CACHE {
         // The disk block is not in the cache.
         page_base := allocate_large_page();
         Cache_Page(page_base);
