@@ -28,6 +28,7 @@ mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_Sys
 
 flush_file_system :: (fs: *Mounted_File_System) {
     // Todo: Temporary.
+
     transfer_done: Semaphore;
 
     for fs.maybe_dirty {

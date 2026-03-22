@@ -386,7 +386,7 @@ file_system_test :: (sd: Storage_Device) {
     elf := map_file(fs, executable);
 
     pc := create_process_context("Test");
-    // simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
+    simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
     trace_file := create_file(fs, 1, "trace");
 

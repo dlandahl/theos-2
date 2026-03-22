@@ -11,7 +11,7 @@ pin_disk_block := (fs: *User_Data_Type, index: u32, overwrite := false) -> *void
     return fs + index * BLOCK_SIZE;
 }
 
-unpin_disk_block := (fs: *User_Data_Type, address: *void) { }
+unpin_disk_block := (fs: *User_Data_Type, address: *void) { } // Would probably be better if this got called with the disk block index rather than the virtual address.
 
 
 

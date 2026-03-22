@@ -962,7 +962,21 @@ stop_executing :: () {
     set_flag(.stopped, task);
 } @Syscall(2)
 
-create_thread :: (entry_point: () #no_context, stack: *void, stack_size: int) {
+Thread_Settings :: struct @SyscallAPI {
+    _: void;
+    version := 1;
+
+    stack_memory: *void; // Points to the lowest memory address in the stack. The initial stack pointer is stack_memory + stack_size.
+    stack_size: int;
+
+    priority := 50;
+    name: string;
+    cpu_core: int;
+
+    parameter: *void;
+}
+
+create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> thread_id: s64 {
     old_task := get_current_task();
 
     forward_to_usermode :: () {
@@ -973,21 +987,28 @@ create_thread :: (entry_point: () #no_context, stack: *void, stack_size: int) {
         enter_user_mode(entry_point, task.user_stack);
     }
 
+    using settings;
+
     new_task := create_task(
         entry_point       = forward_to_usermode,
-        name              = "Secondary",
+        name              = ifx name else "Unnamed user thread",
         user_data         = cast(*void) entry_point,
-        process_context = old_task.process_context
+        process_context   = old_task.process_context
     );
 
-    assert(cast(u64) (stack + stack_size) < 0x7fff_ffff_ffff);
-    assert(cast(u64) stack & 0xf == 0);
+    if       priority >= 75 new_task.priority = .High;
+    else if  priority <= 25 new_task.priority = .Low;
+    else                    new_task.priority = .Normal;
 
-    new_task.user_stack = stack + stack_size;
+    assert(cast(u64) (stack_memory + stack_size) < 0x7fff_ffff_ffff);
+    assert(cast(u64) stack_memory & 0xf == 0);
 
-    // Put each new thread on a random core for now.
-    r := random_get() % cast(u64) global.processor_cores.count;
-    put_task_on_core(new_task, *global.processor_cores[r]);
+    new_task.user_stack = stack_memory + stack_size;
+
+    assert(cpu_core < global.processore_cores.count && cpu_core >= 0);
+    put_task_on_core(new_task, *global.processor_cores[cpu_core]);
+
+    return 0; // Todo.
 } @Syscall(5)
 
 sleep_for_milliseconds :: (ms: int) {

@@ -238,10 +238,10 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
         set_build_options(options, workspace);
     }
 
-    intercept_flags := Intercept_Flags.SKIP_ALL & ~.SKIP_PROCEDURE_HEADERS;
+    intercept_flags := Intercept_Flags.SKIP_EXPRESSIONS_WITHOUT_NOTES;
     for plugins if it.before_intercept it.before_intercept(it, *intercept_flags);
 
-    compiler_begin_intercept(workspace, intercept_flags & ~.DO_PERFORMANCE_REPORT_RUNS);
+    compiler_begin_intercept(workspace, 0);
 
     for plugins if it.add_source it.add_source(it);
 
@@ -258,6 +258,8 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
         header: *Code_Procedure_Header;
     };
 
+    found_syscall_api_declarations: [..] *Code_Struct;
+
     success: bool;
 
     while true {
@@ -265,6 +267,15 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
         if message.kind == .TYPECHECKED {
             typed := cast(*Message_Typechecked) message;
+
+            for typed.structs {
+                decl := it.expression;
+
+                for decl.notes if it.text == "SyscallAPI" {
+                    array_add(*found_syscall_api_declarations, decl);
+                    continue;
+                }
+            }
 
             for header: typed.procedure_headers {
                 proc := header.expression;
@@ -345,7 +356,14 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         names_written += 1;
                     }
 
-                    print(*call_wrappers, "];\n");
+                    print(*call_wrappers, "];\n\n");
+
+                    for found_syscall_api_declarations {
+                        print(*call_wrappers, "% :: ", it.defined_type.name);
+                        print_expression(*call_wrappers, it);
+
+                        append(*call_wrappers, "\n");
+                    }
 
                     for found_syscalls {
                         parameters: string;
@@ -363,7 +381,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
                         if it.header.returns {
                             type: String_Builder;
-                            print_expression(*type, it.header.returns[0]);
+                            print_expression(*type, it.header.returns[0].type_inst);
                             return_type_expression = builder_to_string(*type);
 
                             returns = join(" -> ", return_type_expression);

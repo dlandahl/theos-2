@@ -1,4 +1,6 @@
 
+# Todo: Could port this to use https://github.com/farzher/Jai-HTTP-Server
+
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import ssl
 

@@ -8,10 +8,13 @@ main :: () {
     log("Hello world, from user space.");
 
     for 1..5 {
-        stack_size   := 0x1_0000; // 64 Kilobytes.
-        stack_memory := alloc(stack_size);
+        settings: Syscall.Thread_Settings;
 
-        Syscall.create_thread(other_thread, stack_memory, stack_size);
+        settings.stack_size   = 0x1_0000; // 64 Kilobytes.
+        settings.stack_memory = alloc(settings.stack_size);
+        settings.name         = tprint("Worker %", it);
+
+        Syscall.create_thread(other_thread, *settings);
     }
 
     for 1..5 {
