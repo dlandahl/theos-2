@@ -19,9 +19,13 @@ main :: () {
         settings.stack_memory = alloc(0x1_0000);
         settings.stack_size   = 0x1_0000;
         settings.name         = tprint("% priority", settings.priority);
-        settings.cpu_core     = 1;
+        settings.cpu_core     = 1; // Put them all on the same core.
 
-        Syscall.create_thread(proc, *settings);
+        thread_id := Syscall.create_thread(proc, *settings);
+
+        priorities[it] = { thread_id, settings.priority };
+
+        Syscall.start_thread(thread_id);
     }
 
     for 0..5 Syscall.wait_semaphore(semaphore);
@@ -29,7 +33,11 @@ main :: () {
     log("Finished.");
 }
 
-counter: int;
+priorities: [6] struct {
+    thread_id: s64;
+    priority:  s64;
+};
+
 semaphore: s64;
 
 proc :: () #no_context {
@@ -37,14 +45,14 @@ proc :: () #no_context {
 
     start_cpu_time := get_cpu_time();
 
-    start := get_wall_time();
+    start := get_monotonic_time();
     end   := start + seconds_to_apollo(5);
 
-    while get_wall_time() < end {
+    while get_monotonic_time() < end {
         Syscall.sleep_for_milliseconds(100);
 
         for 1..1000 {
-            if get_wall_time() >= end break;
+            if get_monotonic_time() >= end break;
             busy_wait(100);
         }
     }
@@ -52,9 +60,17 @@ proc :: () #no_context {
     end_cpu_time := get_cpu_time();
 
     cpu_time := end_cpu_time - start_cpu_time;
-    log("Priority %ms", to_milliseconds(cpu_time));
 
-    Syscall.signal_semaphore(semaphore);
+    my_id := Syscall.this_thread_id();
+
+    for priorities if it.thread_id == my_id {
+        log("Thread with priority % got %ms of CPU time over 5s of wall clock time.", it.priority, to_milliseconds(cpu_time));
+
+        Syscall.signal_semaphore(semaphore);
+        Syscall.stop_executing();
+    }
+
+    log_error("Didn't find my priority in the priorities table: %", my_id);
     Syscall.stop_executing();
 }
 
@@ -63,7 +79,7 @@ proc :: () #no_context {
 boot_time: Apollo_Time;
 tsc_frequency: u64;
 
-get_wall_time :: () -> Apollo_Time {
+get_monotonic_time :: () -> Apollo_Time {
     if !tsc_frequency {
         Syscall.get_boot_time(*boot_time);
         tsc_frequency = Syscall.get_tsc_frequency();
@@ -88,12 +104,12 @@ get_cpu_time :: () -> Apollo_Time {
 
 
 busy_wait :: (microseconds: s64) {
-    start := get_wall_time();
+    start := get_monotonic_time();
     end   := start + microseconds_to_apollo(microseconds);
 
     assert(end >= start);
 
-    while get_wall_time() < end #asm {
+    while get_monotonic_time() < end #asm {
         pause;
     }
 }

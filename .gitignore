@@ -17,3 +17,6 @@ kernel/modules/old_uACPI/
 
 tools/tracer.exe
 tools/tracer.pdb
+userspace/artifacts
+tools/root_extracted
+userspace/modules/Syscall.jai

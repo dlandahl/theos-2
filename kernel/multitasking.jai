@@ -972,8 +972,6 @@ Thread_Settings :: struct @SyscallAPI {
     priority := 50;
     name: string;
     cpu_core: int;
-
-    parameter: *void;
 }
 
 create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> thread_id: s64 {
@@ -991,7 +989,7 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
 
     new_task := create_task(
         entry_point       = forward_to_usermode,
-        name              = ifx name else "Unnamed user thread",
+        name              = ifx name then copy_string(name) else "Unnamed user thread",
         user_data         = cast(*void) entry_point,
         process_context   = old_task.process_context
     );
@@ -1004,18 +1002,41 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
     assert(cast(u64) stack_memory & 0xf == 0);
 
     new_task.user_stack = stack_memory + stack_size;
-
-    assert(cpu_core < global.processor_cores.count && cpu_core >= 0);
-    put_task_on_core(new_task, *global.processor_cores[cpu_core]);
+    new_task.on_core = *global.processor_cores[cpu_core];
 
     return new_task.id;
+} @Syscall(3)
+
+start_thread :: (id: s64) {
+    // Todo: Make sure he actually owns this thread.
+    // Todo: Start thread can be implemented in userspace.
+
+    task := lookup_object(*global.task_storage, id);
+    assert(task         != null);
+    assert(task.on_core != null);
+
+    scheduler := lock_scheduler_for_task(task);
+
+    queue_to_run(task);
+    
+    if task.on_core.id != get_core_id() {
+        execute_ipi(.RESCHEDULE_IPI, task.on_core);
+    }
+
+    release(*scheduler.spinlock);
+} @Syscall(4)
+
+this_thread_id :: () -> s64 {
+    return get_task_id();
 } @Syscall(5)
 
+
+
 get_new_page_frame :: () -> int {
+    new_page := allocate_large_page();
+
     task := get_current_task();
     acquire(*task.process_context.spinlock);
-
-    new_page := allocate_large_page();
 
     array_add(*task.process_context.page_frames, cast(s32) (new_page / 0x20_0000));
 
