@@ -159,7 +159,6 @@ core_begin_multitasking :: () {
 
     trace(.create_task, current_task.id, current_task.trace_name);
 
-
     for *waiting_to_run list_init(it);
     list_init(*sleeping);
 

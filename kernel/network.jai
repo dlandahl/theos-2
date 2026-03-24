@@ -2185,6 +2185,27 @@ allocate_port :: (net: *Network_Connection) -> u16 {
     return port;
 }
 
+start_network :: () -> bool {
+    log("Starting Network.");
+
+    net := *global.network_connection;
+    network_adapter_initialized := net.adapter.mmio != null;
+
+    if !network_adapter_initialized {
+        return false;
+    }
+
+    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
+    put_task_on_core(task, *global.processor_cores[1]);
+
+    log("Waiting for DHCP handshake.");
+    if Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000) {
+        return false;
+    }
+
+    return true;
+}
+
 network_thread :: () {
     log_category("Net");
 
@@ -2409,18 +2430,9 @@ network_test :: () -> string {
     USE_DNS :: false;
 
     log_category("TLS Test");
-    log("Starting.");
+    start_network();
 
     net := *global.network_connection;
-
-    network_adapter_initialized := net.adapter.mmio != null;
-    assert(network_adapter_initialized);
-
-    task := create_task(network_thread, name = "Network Thread", kernel_stack_size = 0x10_0000);
-    put_task_on_core(task, *global.processor_cores[1]);
-
-    log("Waiting for DHCP handshake.");
-    Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
     ip_address := bit_cast(u8.[127, 0, 0, 1], u32);
     port: u16 = 4443;

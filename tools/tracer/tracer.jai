@@ -305,9 +305,14 @@ draw_one_frame :: (dt: float) {
     ui_per_frame_update(my_window, width, height, current_time);
 
     r := get_rect(0, 0, xx width, xx height);
-    r = shrink(r, 20*UI_SCALE);
 
-    info_bar_rect:, r = cut_bottom(r, 30*UI_SCALE);
+    margin_size := 25*UI_SCALE;
+    r.x += margin_size;
+    r.y += margin_size / 2;
+    r.w -= margin_size * 2;
+    r.h -= margin_size;
+
+    info_bar_rect:, r = cut_bottom(r, 20*UI_SCALE);
 
     file_load_rect, main_region_rect := cut_top(r, 50*UI_SCALE);
     {
@@ -739,7 +744,7 @@ draw_one_frame :: (dt: float) {
     finish(slide_state);
 
     if hovered_entry != -1 {
-        info_bar_rect = shrink_y(info_bar_rect, 50*UI_SCALE);
+        info_bar_rect.y -= 5*UI_SCALE;
 
         t := my_theme.label_theme;
         t.alignment = .Left;

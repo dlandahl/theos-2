@@ -781,3 +781,55 @@ operator <= :: (a: S128, b: s64) -> bool {
 operator > :: (a: S128, b: s64) -> bool {
     return a > inline to_s128(b);
 }
+
+
+
+get_nist_network_time :: (net: *Network_Connection) -> success: bool, time: Apollo_Time = APOLLO_TIME_INVALID {
+    // Be careful when running and modifying this code to not piss them off.
+    // The time value also rolls over in 2036. https://tf.nist.gov/tf-cgi/servers.cgi
+
+    log_category("NIST TIME");
+
+    if net.dhcp_handshake_state != .COMPLETED {
+        log_error("No network.");
+        return success = false;
+    }
+
+    dns_query := transmit_dns_query(net, "time.nist.gov");
+
+    if Timeout(dns_query.complete, 5000) {
+        log_error("Failed to resolve host.");
+        return success = false;
+    }
+
+    // Todo: Ping the server so we can adjust the timing.
+    tcp := initiate_tcp_connection(net, dns_query.answer, remote_port=37);
+
+    if Timeout(tcp.handshake_state == .ESTABLISHED, 10_000) {
+        log_error("Failed to establish connection.");
+        tcp_close(tcp);
+        return success = false;
+    }
+
+    timeout   := seconds_to_apollo(5);
+    received  := blocking_read_tcp(tcp, 4, timeout);
+
+    tcp_close(tcp);
+
+    if received.count < 4 {
+        log_error("No data received.");
+        return success = false;
+    }
+
+    seconds   := (.*) cast(*u32) received.data;
+    byte_swap_in_place(*seconds);
+
+    epoch: Calendar_Time;
+    epoch.time_zone = .UTC;
+    epoch.year      = 1900;
+
+    apollo_epoch := native_calendar_to_apollo(epoch);
+    result       := apollo_epoch + seconds_to_apollo(seconds);
+
+    return true, result;
+}
