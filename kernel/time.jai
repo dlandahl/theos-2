@@ -785,7 +785,7 @@ operator > :: (a: S128, b: s64) -> bool {
 
 
 get_nist_network_time :: (net: *Network_Connection) -> success: bool, time: Apollo_Time = APOLLO_TIME_INVALID {
-    // Be careful when running and modifying this code to not piss them off.
+    // Be careful not to spam the server when modifying and running this code.
     // The time value also rolls over in 2036. https://tf.nist.gov/tf-cgi/servers.cgi
 
     log_category("NIST TIME");
