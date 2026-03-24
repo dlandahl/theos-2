@@ -38,6 +38,7 @@ Process_Context :: struct {
     root_page_table: u64;
 
     page_frames: [..] s32;
+    semaphores:  [..] Semaphore;
 
     spinlock: Spinlock;
 
@@ -523,7 +524,6 @@ prepare_task_sleep_until :: (time: Apollo_Time) {
 
     set_flag(.sleeping, task);
 
-    assert(time > get_monotonic_time());
     task.sleep_until = time;
 
     for* scheduler.sleeping {
@@ -1005,15 +1005,11 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
 
     new_task.user_stack = stack_memory + stack_size;
 
-    assert(cpu_core < global.processore_cores.count && cpu_core >= 0);
+    assert(cpu_core < global.processor_cores.count && cpu_core >= 0);
     put_task_on_core(new_task, *global.processor_cores[cpu_core]);
 
-    return 0; // Todo.
+    return new_task.id;
 } @Syscall(5)
-
-sleep_for_milliseconds :: (ms: int) {
-    sleep(ms, .milliseconds);
-} @Syscall(6)
 
 get_new_page_frame :: () -> int {
     task := get_current_task();
@@ -1090,53 +1086,78 @@ quit_process :: () {
 
 
 
+thread_cpu_time :: (apollo: *Apollo_Time) { // Todo: We should pass this through two registers instead of a pointer.
+    task := get_current_task();
+
+    preempt_disable();
+
+    runtime_this_tick := get_monotonic_time() - task.on_core.scheduler.last_task_switch_timestamp;
+    total_time        := task.total_cpu_time + runtime_this_tick;
+
+    preempt_restore();
+
+    apollo.* = total_time;
+} @Syscall(20)
+
+sleep_for_milliseconds :: (ms: int) {
+    sleep(ms, .milliseconds);
+} @Syscall(21)
+
+get_boot_time :: (apollo: *Apollo_Time) {
+    apollo.* = global.boot_time;
+} @Syscall(22)
+
+get_tsc_frequency :: () -> u64 {
+    return global.tsc_frequency;
+} @Syscall(23)
+
+
+
+create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
+    task := get_current_task();
+    acquire(*task.process_context.spinlock);
+
+    sema := array_add(*task.process_context.semaphores);
+    sema.counter_max = counter_max;
+    sema.counter     = counter_start;
+
+    id := task.process_context.semaphores.count; // 0 means invalid.
+
+    release(*task.process_context.spinlock);
+
+    return id;
+} @Syscall(30)
+
+signal_semaphore :: (id: s64) {
+    task := get_current_task();
+    acquire(*task.process_context.spinlock);
+
+    assert(id > 0 && id <= task.process_context.semaphores.count);
+
+    sema := *task.process_context.semaphores[id - 1];
+    release(*task.process_context.spinlock);
+
+    signal(sema);
+} @Syscall(31)
+
+wait_semaphore :: (id: s64) { // Todo: Timeout. But passing Apollo_Time is annoying right now, both because it doesn't fit in a register, and also because we need to import Basic in Syscall.jai, which is imported by Runtime_Support. I guess that's allowed, but I wish Apollo_Time was a separate module.
+    task := get_current_task();
+    acquire(*task.process_context.spinlock);
+
+    assert(id > 0 && id <= task.process_context.semaphores.count);
+
+    sema := *task.process_context.semaphores[id - 1];
+    release(*task.process_context.spinlock);
+
+    wait_for(sema);
+} @Syscall(32)
+
+
+
+
 enter_user_mode :: (entry_point: () #no_context, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Assembly;
 
 
-
-priority_test :: () {
-
-    get_task_cpu_time :: () -> Apollo_Time {
-        // Locally scoped because it's a messy way of doing this.
-        task := get_current_task();
-
-        preempt_disable();
-        runtime_this_tick := get_monotonic_time() - task.on_core.scheduler.last_task_switch_timestamp;
-        total_time := task.total_cpu_time + runtime_this_tick;
-        preempt_restore();
-
-        return total_time;
-    }
-
-    proc :: (priority: Task_Priority) {
-        task := get_current_task();
-        task.priority = priority;
-
-        start_cpu_time := get_task_cpu_time();
-
-        start := get_kernel_timestamp();
-        end   := start + seconds_to_apollo(5);
-
-        while get_kernel_timestamp() < end {
-            sleep(100, .milliseconds);
-
-            for 1..1000 {
-                if get_kernel_timestamp() >= end break;
-                busy_wait(100);
-            }
-        }
-
-        end_cpu_time := get_task_cpu_time();
-
-        cpu_time := end_cpu_time - start_cpu_time;
-        log("% priority %ms", priority, to_milliseconds(cpu_time));
-    }
-
-    for 0..5 {
-        priority := cast(Task_Priority) (it / 2);
-        simple_create_thread(proc, priority, name = "% priority", priority);
-    }
-}
 
 memory_test :: () {
     proc :: () {

@@ -392,7 +392,7 @@ __instrumentation_second :: () {
             no_inline __program_main();
         }
 
-        Syscall.stop_executing();
+        Syscall.quit_process();
         return 0;
     }
 }

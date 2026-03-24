@@ -117,8 +117,8 @@ Trace_String :: #type,distinct s32;
 
         if index >= max_trace_entries {
             // Since trace buffers use no synchronization, it's possible to see this message multiple times from different CPU cores if they race.
+            tracing_enabled = false; // write_string calls trace, so we have to set this before outputting the warning.
             write_string("Warning: Trace buffer overflow.\n");
-            tracing_enabled = false;
             return;
         }
 
@@ -146,11 +146,15 @@ Trace_String :: #type,distinct s32;
     add_trace_string :: (value: string) -> Trace_String #no_context {
         using global.trace_state;
 
-        offset := fetch_add(*string_table_size, value.count + 1);
-        memcpy(*string_table[offset], value.data, value.count);
-        string_table[offset + value.count] = 0;
+        if tracing_enabled {
+            offset := fetch_add(*string_table_size, value.count + 1);
+            memcpy(*string_table[offset], value.data, value.count);
+            string_table[offset + value.count] = 0;
 
-        return cast(Trace_String) offset;
+            return cast(Trace_String) offset;
+        } else {
+            return 0;
+        }
     }
 
     serialize_trace_buffers :: (callback: (data: string, user_data: *void), user_data := null) -> num_written: int {

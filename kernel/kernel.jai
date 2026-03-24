@@ -381,9 +381,8 @@ kernel_entry :: () #no_context {
 file_system_test :: (sd: Storage_Device) {
     fs := mount_file_system(sd, 0xb0_0000);
 
-    dir := resolve_path(fs, 1, "Software");
-    executable := get_directory_entry(fs, dir, "Test");
-    elf := map_file(fs, executable);
+    dir_entry := resolve_path(fs, 1, "Software/Priority Test");
+    elf := map_file(fs, dir_entry);
 
     pc := create_process_context("Test");
     simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);

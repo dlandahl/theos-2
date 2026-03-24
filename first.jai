@@ -341,6 +341,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     add_build_string(tprint(SYSCALL_DISPATCHER, builder_to_string(*dispatcher_body)), workspace);
 
                     call_wrappers: String_Builder;
+                    print(*call_wrappers, "\n#import \"Basic\";\n");
 
                     // Write the names of the syscalls into an array, indexable by syscall number.
                     print(*call_wrappers, "\nsyscall_names :: string.[\n");
@@ -370,10 +371,10 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
                         for it.header.arguments {
                             type: String_Builder;
-                            print_expression(*type, it.type_inst);
+                            print_expression(*type, it);
 
                             if parameters parameters = join(parameters, ", ");
-                            parameters = join(parameters, it.name, ": ", builder_to_string(*type));
+                            parameters = join(parameters, builder_to_string(*type));
                         }
 
                         returns: string;
@@ -381,7 +382,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
                         if it.header.returns {
                             type: String_Builder;
-                            print_expression(*type, it.header.returns[0].type_inst);
+                            print_expression(*type, it.header.returns[0].type_inst); // Todo: This hides the name of the return value.
                             return_type_expression = builder_to_string(*type);
 
                             returns = join(" -> ", return_type_expression);
@@ -523,7 +524,10 @@ compile_userspace :: () -> bool {
         return success;
     }
 
-    return compile_one_program("test.jai", "Test");
+    a := compile_one_program("test.jai", "Test");
+    b := compile_one_program("priority_test.jai", "Priority Test");
+
+    return a && b;
 }
 
 format_disk :: () -> bool {
