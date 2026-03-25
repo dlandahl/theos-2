@@ -14,7 +14,7 @@ X64_Core :: struct {
     interrupt_context_active: s64;
     irq_disable_count: s64;
 
-    online: bool; // The core has called core_begin_multitasking, so we can put threads on it.
+    online: bool #align 64; // The core has called core_begin_multitasking, so we can put threads on it.
 
     mcs_node: MCS_Node;
 
@@ -369,7 +369,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        // file_system_test(nvme_sd);
+        file_system_test(nvme_sd);
         start_network();
 
         success, network_time := get_nist_network_time(*global.network_connection);
@@ -736,6 +736,13 @@ spurious_interrupt :: (stack: Interrupt_Stack_Frame()) #c_call {
 
 bluescreen :: () #no_context {
     global.bluescreen_occurred = true;
+
+    if cpu_local_read("online") {
+        // Stop other CPU cores using IPI. Todo: hardcoded.
+        command: Apic_Interrupt_Command;
+        command.command = 0xc00a1;
+        apic_execute_ipi(command);
+    }
 
     write_string("Bluescreen!\n");
 

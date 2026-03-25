@@ -91,7 +91,7 @@ Apic_Interrupt_Command :: union {
     }
 }
 
-apic_execute_ipi :: (icr: Apic_Interrupt_Command) {
+apic_execute_ipi :: (icr: Apic_Interrupt_Command) #no_context {
     write_apic_register(.DES__INTERRUPT_DEST,    icr.destination);
     write_apic_register(.ICR__INTERRUPT_COMMAND, icr.command);
 }
@@ -465,6 +465,10 @@ ipi_reschedule :: (stack: *void) #c_call {
     push_context,defer_pop;
 
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+
+    if global.bluescreen_occurred { // Maybe we should use a separate IPI for bluescreen.
+        while true #asm { cli; hlt; }
+    }
 
     set_flag(.preempt, get_current_task());
 } @InterruptRoutine
