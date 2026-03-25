@@ -923,6 +923,9 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     all_handshake_payload: String_Builder;
     hashing_enabled := true;
 
+    // This code does more copies than necessary but not worrying about it for now.
+    // In the future we will want zero copy IO APIs for the user space.
+
     // Todo: Doing many small writes to the ring buffer instead of fewer large writes.
     send :: (value: $T) #expand {
         #if type_info(T).type != .ARRAY {
@@ -1059,6 +1062,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
             extensions_length -= extension_size;
         }
     }
+
     {
         // Receive security certificate.
 
@@ -1157,7 +1161,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Calculate encryption keys.
 
-        premaster_secret := cast(string)Curve25519.x25519(
+        premaster_secret := cast(string) Curve25519.x25519(
             *server_public_key,
             *our_secret_key,
         );
@@ -1395,24 +1399,24 @@ tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
 
 
 Dhcp_Message :: struct {
-    opcode:        u8;
-    hardware_type: u8;
-    mac_length:    u8;
-    hops:          u8;
-    xid:           u32;
-    seconds:       u16;
-    flags:         u16;
+    opcode:            u8;
+    hardware_type:     u8;
+    mac_length:        u8;
+    hops:              u8;
+    xid:               u32;
+    seconds:           u16;
+    flags:             u16;
 
-    client_ip:     u32;  @DontByteswap
-    your_ip:       u32;  @DontByteswap
-    server_ip:     u32;  @DontByteswap
-    gateway_ip:    u32;  @DontByteswap
+    client_ip:         u32;  @DontByteswap
+    your_ip:           u32;  @DontByteswap
+    server_ip:         u32;  @DontByteswap
+    gateway_ip:        u32;  @DontByteswap
 
-    client_mac:  [6] u8;
-    mac_padding: [10] u8;
+    client_mac:  [6]   u8;
+    mac_padding: [10]  u8;
 
-    boot_file_name: [192] u8;
-    magic:         u32;
+    boot_file:   [192] u8;
+    magic:             u32;
 
     MAGIC :: 0x63825363;
 }

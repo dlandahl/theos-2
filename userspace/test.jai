@@ -2,35 +2,18 @@
 Syscall :: #import "Syscall";
 
 #import "Basic";
-#import "Atomics";
 
 main :: () {
     log("Hello world, from user space.");
 
-    for 1..5 {
-        settings: Syscall.Thread_Settings;
-        settings.stack_size   = 0x1_0000; // 64 Kilobytes.
-        settings.stack_memory = alloc(settings.stack_size);
-        settings.name         = tprint("Worker %", it);
+    path := "text";
+    text := "Around the four seas all men are brothers.";
 
-        Syscall.create_thread(other_thread, *settings);
-    }
+    file := Syscall.open_file(path.data, path.count, true, true);
 
-    for 1..5 {
-        log("Main thread sleeping...");
-        Syscall.sleep_for_milliseconds(200);
-    }
-}
+    Syscall.write_to_file(file, text.data, text.count, 0);
 
-count: int;
+    Syscall.close_file(file);
 
-other_thread :: () #no_context {
-    push_context,defer_pop;
-
-    my_name := atomic_add(*count, 1);
-
-    while true {
-        log("Thread % sleeping...", my_name);
-        Syscall.sleep_for_milliseconds(200);
-    }
+    log("Done.");
 }

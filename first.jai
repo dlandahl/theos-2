@@ -526,8 +526,9 @@ compile_userspace :: () -> bool {
 
     a := compile_one_program("test.jai", "Test");
     b := compile_one_program("priority_test.jai", "Priority Test");
+    c := compile_one_program("counting.jai", "Counting");
 
-    return a && b;
+    return a && b && c;
 }
 
 format_disk :: () -> bool {

@@ -378,15 +378,17 @@ write_file :: (fs: File_System, id: s64, data: $T/.[string, []u8]) {
     assert(inode.type == .FILE);
 
     inode.file_size = 0;
-    append_to_file(fs, id, data);
+    write_file(fs, id, data, 0);
 }
 
-append_to_file :: (fs: File_System, id: s64, data: $T/.[string, []u8]) {
+write_file :: (fs: File_System, id: s64, data: $T/.[string, []u8], offset: int) {
     inode := lookup_inode(fs, id);
     assert(inode && inode.type == .FILE); // Todo: Handle errors.
 
-    current_block   := inode.file_size / BLOCK_SIZE;
-    offset_in_block := inode.file_size % BLOCK_SIZE;
+    offset_or_end := ifx offset == -1 then inode.file_size else offset;
+
+    current_block   := offset_or_end / BLOCK_SIZE;
+    offset_in_block := offset_or_end % BLOCK_SIZE;
 
     written: int;
 
@@ -416,12 +418,18 @@ append_to_file :: (fs: File_System, id: s64, data: $T/.[string, []u8]) {
     }
 
     assert(written == data.count);
-    inode.file_size += data.count;
-    inode.modified = get_disk_time();
+
+    inode.file_size = max(inode.file_size, data.count + offset);
+    inode.modified  = get_disk_time();
+}
+
+append_to_file :: (fs: File_System, id: s64, data: $T/.[string, []u8]) {
+    write_file(fs, id, data, -1);
 }
 
 resolve_path :: (fs: File_System, root_id: s64, path: string) -> id: s64 {
     // This is a low level routine (like all the routines currently in this file) so this is not where user facing paths come into the system.
+    // I think this maybe shouldn't be in here but it's a useful utility for now.
 
     segments := split(path, #char "/",, temp);
 
@@ -430,6 +438,7 @@ resolve_path :: (fs: File_System, root_id: s64, path: string) -> id: s64 {
         assert(!!it); // Don't give us trailing, leading or double slashes.
 
         current = get_directory_entry(fs, current, it);
+
         if !current return 0;
     }
 

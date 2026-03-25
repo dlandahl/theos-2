@@ -6,7 +6,7 @@ Mounted_File_System :: struct {
 
     storage_device: Storage_Device;
 
-    #as file_system: File_System;
+    #as file_system: File_System; // Should eventually a pointer to any type of file system. File_System is a specific driver for a specific on-disk format.
 
     maybe_dirty: [..] u32; // Temporary.
 }
@@ -28,6 +28,10 @@ mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_Sys
 
 flush_file_system :: (fs: *Mounted_File_System) {
     // Todo: Temporary.
+
+    // In future we maybe should flush as much and as early as possible (whenever the user isn't requesting
+    // explicit transfers with which we would compete for bandwidth) so that the disk cache doesn't
+    // block regular memory allocations with disk ops, which would make all sorts of things very slow.
 
     transfer_done: Semaphore;
 
@@ -56,7 +60,7 @@ flush_file_system :: (fs: *Mounted_File_System) {
 
 
 
-map_file :: (fs: File_System, id: s64) -> string {
+map_file :: (fs: File_System, id: s64, virtual_base := null, read_only := false, for_userspace := false) -> string {
     // We don't do lazy loading yet. This will read the whole file into RAM and keep it there.
 
     inode := lookup_inode(fs, id);
@@ -65,8 +69,13 @@ map_file :: (fs: File_System, id: s64) -> string {
     num_blocks := (inode.file_size + 0x1f_ffff) / BLOCK_SIZE;
 
     vm_it: VM_Iterator;
-    vm_it.start_address = cast(*void) alloc_block(*global.virtual_large_page_allocator, num_blocks * BLOCK_SIZE);
+    vm_it.start_address = ifx virtual_base else cast(*void) alloc_block(*global.virtual_large_page_allocator, num_blocks * BLOCK_SIZE);
     vm_it.page_count    = num_blocks * 512; // VM Iterator works using 4k pages, disk cache works using 2MB pages.
+
+    extra_flags: Page_Flags;
+
+    if !read_only     extra_flags |= .READ_WRITE;
+    if for_userspace  extra_flags |= .USER_SUPERVISOR;
 
     for vm_it {
         if it.level == 1 {
@@ -80,7 +89,7 @@ map_file :: (fs: File_System, id: s64) -> string {
             block := pin_disk_block(fs.user_data, block_index);
 
             it.value  = cast(u64) block - DIRECT_MAPPING_BASE;
-            it.flags |= .PRESENT | .READ_WRITE | .PAGE_SIZE;
+            it.flags |= .PRESENT | .PAGE_SIZE | extra_flags;
 
             continue;
         }
@@ -90,7 +99,7 @@ map_file :: (fs: File_System, id: s64) -> string {
         new_table := get_4k_page();
 
         it.value  = new_table;
-        it.flags |= .PRESENT | .READ_WRITE;
+        it.flags |= .PRESENT | extra_flags;
     }
 
     return {inode.file_size, vm_it.start_address};
@@ -157,3 +166,123 @@ my_unpin_disk_block :: (fs: *Mounted_File_System, address: *void) {
     assert(page_desc.pinned > 0 && page_desc.state == .DISK_CACHE);
     page_desc.pinned -= 1;
 }
+
+
+
+
+Opened_File :: struct {
+    inode_id:       int;
+    file_system:   *Mounted_File_System;
+    opened_for:     enum { READING; WRITING; };
+}
+
+
+open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_not_existent := false) -> id: int {
+    path_string := string.{path_length, path_bytes};
+
+    path, file_name := path_decomp(path_string);
+    path             = trim(path, "\\/");
+
+    parent_inode_id: s64;
+
+    if path {
+        parent_inode_id = resolve_path(global.file_system, 1, path);
+    } else {
+        parent_inode_id = 1;
+    }
+
+    assert(!!parent_inode_id);
+    assert(!!file_name);
+
+    file_inode_id := get_directory_entry(global.file_system, parent_inode_id, file_name);
+
+    if !file_inode_id {
+        // Todo: This redundantly checks all the directory entries to make sure it doesn't already exist, which we've already done.
+        file_inode_id = create_file(global.file_system, parent_inode_id, file_name);
+    }
+
+    assert(!!file_inode_id);
+
+    process := scope_lock_process_context();
+
+    new_file := array_add(*process.files);
+    new_file.opened_for  = ifx writable then .WRITING else .READING;
+    new_file.file_system = global.file_system; // There's always just one file system at the moment.
+    new_file.inode_id    = file_inode_id;
+
+    opened_file_id := process.files.count;
+
+    return opened_file_id;
+} @Syscall(40)
+
+File_Stats :: struct @SyscallAPI {
+    size_bytes:          int;
+
+    modified_consensus:  Apollo_Time;
+    modified_monotonic:  Apollo_Time;
+    created_consensus:   Apollo_Time;
+    created_monotonic:   Apollo_Time;
+
+    monotonic_clock_generation: int;
+}
+
+stat_file :: (id: s64, stats: *File_Stats) {
+    // Todo: Validate parameters.
+
+    process := scope_lock_process_context();
+
+    file := process.files[id - 1];
+
+    inode := lookup_inode(global.file_system, file.inode_id);
+
+    stats.size_bytes = inode.file_size;
+
+    stats.modified_consensus = inode.modified.consensus;
+    stats.modified_monotonic = inode.modified.monotonic;
+
+    stats.created_consensus  = inode.created.consensus;
+    stats.created_monotonic  = inode.created.monotonic;
+
+    stats.monotonic_clock_generation = inode.modified.clock_generation;
+} @Syscall(41)
+
+create_file_mapping :: (id: s64, virtual_address: *void) {
+    // Todo: Validate parameters.
+
+    process := scope_lock_process_context();
+    file := process.files[id - 1];
+
+    map_file(global.file_system, file.inode_id, virtual_address, file.opened_for == .READING, true);
+} @Syscall(42)
+
+flush_file :: (id: s64) {
+    assert(id > 0);
+
+    file_system: *Mounted_File_System;
+
+    {
+        process := scope_lock_process_context();
+        file_system = process.files[id - 1].file_system;
+    }
+
+    flush_file_system(file_system);
+} @Syscall(43)
+
+read_file :: (id: s64, buffer: *void, bytes: int, offset: int) -> bytes_read: int {
+    // Todo;
+    assert(false);
+    return 0;
+} @Syscall(44)
+
+write_to_file :: (id: s64, buffer: *void, bytes: int, offset: int) {
+
+    process := scope_lock_process_context(); // Todo: Holding this lock much longer than needed.
+    file    := process.files[id - 1];
+
+    write_file(file.file_system, file.inode_id, string.{bytes, buffer}, offset);
+} @Syscall(45)
+
+close_file :: (id: s64) {
+    // Todo;
+    flush_file(id);
+} @Syscall(46)

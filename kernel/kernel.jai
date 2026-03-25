@@ -106,10 +106,12 @@ Kernel_Globals :: struct {
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
+    pci_devices: [..] Pci_Device;
+
     nvme: *Nvme_Controller;
     sata: *Sata_Controller;
 
-    pci_devices: [..] Pci_Device;
+    file_system: *Mounted_File_System;
 
     bluescreen_occurred: bool;
 }
@@ -356,7 +358,7 @@ kernel_entry :: () #no_context {
                 global.network_connection.adapter = init_i8254x(it);
 
               case .HIGH_DEFINITION_AUDIO;
-                // init_high_definition_audio_controller(it);
+                init_high_definition_audio_controller(it);
             }
         }
 
@@ -370,12 +372,13 @@ kernel_entry :: () #no_context {
         });
 
         file_system_test(nvme_sd);
-        start_network();
 
-        success, network_time := get_nist_network_time(*global.network_connection);
-        assert(success);
-
-        log("Time delta: %ms", to_milliseconds(get_system_time() - network_time));
+        // start_network();
+        //
+        // success, network_time := get_nist_network_time(*global.network_connection);
+        // assert(success);
+        //
+        // log("Time delta: %ms", to_milliseconds(get_system_time() - network_time));
 
         {
             set_flag(.stopped, get_current_task());
@@ -386,8 +389,9 @@ kernel_entry :: () #no_context {
 
 file_system_test :: (sd: Storage_Device) {
     fs := mount_file_system(sd, 0xb0_0000);
+    global.file_system = fs;
 
-    dir_entry := resolve_path(fs, 1, "Software/Priority Test");
+    dir_entry := resolve_path(fs, 1, "Software/Test");
     elf := map_file(fs, dir_entry);
 
     pc := create_process_context("Test");
@@ -395,7 +399,6 @@ file_system_test :: (sd: Storage_Device) {
 
     trace_file := create_file(fs, 1, "trace");
 
-    // sleep(1, .seconds);
     trace  := serialize_trace_buffers();
     buffer := get_base_buffer(*trace);
 

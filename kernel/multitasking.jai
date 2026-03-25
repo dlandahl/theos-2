@@ -39,6 +39,7 @@ Process_Context :: struct {
 
     page_frames: [..] s32;
     semaphores:  [..] Semaphore;
+    files:       [..] Opened_File;
 
     spinlock: Spinlock;
 
@@ -311,15 +312,19 @@ schedule_tasks :: () {
         }
     }
 
+    previous  := get_current_task();
+    unset_flag(.preempt, previous);
+    
     {
         count := cpu_local_read("preempt_disable_count");
-        assert(count == 0, "Context switch with preemption disabled is not allowed.");
+
+        if count != 0 {
+            write_string("Running the scheduler while preemption is disabled.");
+            bluescreen();
+        }
     }
 
-    previous  := get_current_task();
     scheduler := lock_scheduler_for_task(previous);
-
-    unset_flag(.preempt, previous);
 
     // This all uses apollo time but should probably use native clock counter values for performance.
     time_now  := get_monotonic_time();
@@ -952,6 +957,17 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
 
 
+scope_lock_process_context :: () -> *Process_Context #expand {
+    // This is called too much and I want to figure out how do do things in a more lock free way.
+    pc := get_current_task().process_context;
+
+    acquire(*pc.spinlock);
+    defer release(*pc.spinlock);
+
+    return pc;
+}
+
+
 display_string :: (data: *u8, count: s64) {
     kernel_write_string({count, data});
 } @Syscall(1)
@@ -1034,24 +1050,19 @@ this_thread_id :: () -> s64 {
 get_new_page_frame :: () -> int {
     new_page := allocate_large_page();
 
-    task := get_current_task();
-    acquire(*task.process_context.spinlock);
+    process := scope_lock_process_context();
 
-    array_add(*task.process_context.page_frames, cast(s32) (new_page / 0x20_0000));
+    array_add(*process.page_frames, cast(s32) (new_page / 0x20_0000));
 
-    id := task.process_context.page_frames.count; // 0 means invalid.
-
-    release(*task.process_context.spinlock);
-
-    return id; // Todo: Would like to have discriminated integers for kernel object handles.
+    return process.page_frames.count; // Todo: Would like to have discriminated integers for kernel object handles.
 } @Syscall(7)
 
 map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
     task := get_current_task();
 
-    acquire(*task.process_context.spinlock);
+    process := scope_lock_process_context();
 
-    page_array: []s32 = task.process_context.page_frames;
+    page_array: []s32 = process.page_frames;
 
     assert(page_id > 0 && page_id <= page_array.count);
     assert(cast(u64) virtual_address & 0x1f_ffff == 0);
@@ -1081,24 +1092,20 @@ map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
         it.value  = new_page_table;
         it.flags |= .PRESENT | .READ_WRITE | .USER_SUPERVISOR;
     }
-
-    release(*task.process_context.spinlock);
 } @Syscall(8)
 
 quit_process :: () {
-    task := get_current_task();
-    acquire(*task.process_context.spinlock);
 
-    if !task.process_context.stopped { // Prevent unecessary IPIs in case of a race.
-        task.process_context.stopped = true;
+    process := scope_lock_process_context();
+
+    if !process.stopped { // Prevent unecessary IPIs in case of a race.
+        process.stopped = true;
         execute_ipi(.RESCHEDULE_IPI, null);
     }
 
-    release(*task.process_context.spinlock);
-
     // Todo: Maybe we should set this flag on all threads of this process. But we don't track that currently, and I want to minimize duplicated
     // state tracking in the scheduler, so we signal to the scheduler that the thread is done by setting a flag on the process.
-    set_flag(.stopped, task);
+    set_flag(.stopped, get_current_task());
 
     // Todo: Here we need to figure out when other threads of the same process have stopped running so we can free resources.
     // Probably just put a counter on the process struct and spin. Or have a separate thread check the counter.
@@ -1134,44 +1141,43 @@ get_tsc_frequency :: () -> u64 {
 
 
 create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
-    task := get_current_task();
-    acquire(*task.process_context.spinlock);
 
-    sema := array_add(*task.process_context.semaphores);
+    process := scope_lock_process_context();
+
+    sema := array_add(*process.semaphores);
     sema.counter_max = counter_max;
     sema.counter     = counter_start;
 
-    id := task.process_context.semaphores.count; // 0 means invalid.
-
-    release(*task.process_context.spinlock);
+    id := process.semaphores.count; // 0 means invalid.
 
     return id;
 } @Syscall(30)
 
 signal_semaphore :: (id: s64) {
-    task := get_current_task();
-    acquire(*task.process_context.spinlock);
 
-    assert(id > 0 && id <= task.process_context.semaphores.count);
+    process := scope_lock_process_context();
 
-    sema := *task.process_context.semaphores[id - 1];
-    release(*task.process_context.spinlock);
+    assert(id > 0 && id <= process.semaphores.count);
+
+    sema := *process.semaphores[id - 1];
 
     signal(sema);
 } @Syscall(31)
 
-wait_semaphore :: (id: s64) { // Todo: Timeout. But passing Apollo_Time is annoying right now, both because it doesn't fit in a register, and also because we need to import Basic in Syscall.jai, which is imported by Runtime_Support. I guess that's allowed, but I wish Apollo_Time was a separate module.
-    task := get_current_task();
-    acquire(*task.process_context.spinlock);
+wait_semaphore :: (id: s64) { // Todo: Timeout.
 
-    assert(id > 0 && id <= task.process_context.semaphores.count);
+    sema: *Semaphore;
 
-    sema := *task.process_context.semaphores[id - 1];
-    release(*task.process_context.spinlock);
+    {
+        process := scope_lock_process_context();
+
+        assert(id > 0 && id <= process.semaphores.count);
+
+        sema = *process.semaphores[id - 1];
+    }
 
     wait_for(sema);
 } @Syscall(32)
-
 
 
 
@@ -1368,18 +1374,18 @@ List_Debug_Metadata :: struct {
     // Todo: We could track the caller location of where the node was added to its current list. Then report that (and the expected value) if there's an issue.
 }
 
+detect_corruption :: (node: *List_Node) {
+    assert(node.next != null);
+    assert(node.prev != null);
+
+    assert(node.next.prev == node);
+    assert(node.prev.next == node);
+    assert(node.prev.prev.next == node.prev);
+    assert(node.next.next.prev == node.next);
+}
+
 DEBUG :: (a: *List_Node, b: *List_Node) #expand {
     #if LIST_DEBUG {
-
-        detect_corruption :: (node: *List_Node) {
-            assert(node.next != null);
-            assert(node.prev != null);
-
-            assert(node.next.prev == node);
-            assert(node.prev.next == node);
-            assert(node.prev.prev.next == node.prev);
-            assert(node.next.next.prev == node.next);
-        }
 
         init      :: #procedure_of_call(list_init    (a));
         insert    :: #procedure_of_call(insert_after (a, b));
