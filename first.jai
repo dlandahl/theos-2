@@ -363,7 +363,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         print(*call_wrappers, "% :: ", it.defined_type.name);
                         print_expression(*call_wrappers, it);
 
-                        append(*call_wrappers, "\n");
+                        append(*call_wrappers, "\n\n");
                     }
 
                     for found_syscalls {

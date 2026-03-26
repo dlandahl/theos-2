@@ -37,9 +37,11 @@ Process_Context :: struct {
     id: int;
     root_page_table: u64;
 
+    // Todo: Think of a better way of prepresenting these user space resources.
     page_frames: [..] s32;
-    semaphores:  [..] Semaphore;
-    files:       [..] Opened_File;
+    semaphores:  [..] *Semaphore;
+    mutexes:     [..] *Mutex;
+    files:       [..]  Opened_File;
 
     spinlock: Spinlock;
 
@@ -596,10 +598,10 @@ release :: (using mutex: *Mutex) {
     acquire(*spinlock);
     task := get_current_task();
 
-    ensure_initialized(*queue);
-
     assert(held_by == task);
     held_by = null;
+
+    ensure_initialized(*queue);
 
     if is_empty(*queue) {
         release(*spinlock);
@@ -616,7 +618,7 @@ release :: (using mutex: *Mutex) {
     unset_flag(.blocked, next);
 
     queue_to_run(next);
-    execute_ipi(.RESCHEDULE_IPI, task.on_core);
+    execute_ipi(.RESCHEDULE_IPI, next.on_core);
 
     release(*scheduler.spinlock);
 }
@@ -952,7 +954,7 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
     maybe_reschedule();
 
-    trace(.sysret, data.r12);
+    trace(.sysret, data.rax, data.r12);
 }
 
 
@@ -1017,29 +1019,12 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
     assert(cast(u64) stack_memory & 0xf == 0);
 
     new_task.user_stack = stack_memory + stack_size;
-    new_task.on_core = *global.processor_cores[cpu_core];
+
+    assert(cpu_core >= 0 && cpu_core < global.processor_cores.count);
+    put_task_on_core(new_task, *global.processor_cores[cpu_core]);
 
     return new_task.id;
 } @Syscall(3)
-
-start_thread :: (id: s64) {
-    // Todo: Make sure he actually owns this thread.
-    // Todo: Start thread can be implemented in userspace.
-
-    task := lookup_object(*global.task_storage, id);
-    assert(task         != null);
-    assert(task.on_core != null);
-
-    scheduler := lock_scheduler_for_task(task);
-
-    queue_to_run(task);
-    
-    if task.on_core.id != get_core_id() {
-        execute_ipi(.RESCHEDULE_IPI, task.on_core);
-    }
-
-    release(*scheduler.spinlock);
-} @Syscall(4)
 
 this_thread_id :: () -> s64 {
     return get_task_id();
@@ -1145,8 +1130,10 @@ create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
     process := scope_lock_process_context();
 
     sema := array_add(*process.semaphores);
-    sema.counter_max = counter_max;
-    sema.counter     = counter_start;
+    sema.* = New(Semaphore,, global.small_objects);
+
+    sema.*.counter_max = counter_max;
+    sema.*.counter     = counter_start;
 
     id := process.semaphores.count; // 0 means invalid.
 
@@ -1155,11 +1142,15 @@ create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
 
 signal_semaphore :: (id: s64) {
 
-    process := scope_lock_process_context();
+    sema: *Semaphore;
 
-    assert(id > 0 && id <= process.semaphores.count);
+    {
+        process := scope_lock_process_context();
 
-    sema := *process.semaphores[id - 1];
+        assert(id > 0 && id <= process.semaphores.count);
+
+        sema = process.semaphores[id - 1];
+    }
 
     signal(sema);
 } @Syscall(31)
@@ -1173,11 +1164,43 @@ wait_semaphore :: (id: s64) { // Todo: Timeout.
 
         assert(id > 0 && id <= process.semaphores.count);
 
-        sema = *process.semaphores[id - 1];
+        sema = process.semaphores[id - 1];
     }
 
     wait_for(sema);
 } @Syscall(32)
+
+create_mutex :: () -> s64 {
+    process := scope_lock_process_context();
+    mutex := array_add(*process.mutexes);
+    mutex.* = New(Mutex,, global.small_objects);
+    
+    return process.mutexes.count;
+} @Syscall(33)
+
+lock_mutex :: (id: s64) {
+    mutex: *Mutex;
+
+    {
+        process := scope_lock_process_context();
+        assert(id > 0 && id <= process.mutexes.count);
+        mutex = process.mutexes[id - 1];
+    }
+
+    acquire(mutex);
+} @Syscall(34)
+
+unlock_mutex :: (id: s64) {
+    mutex: *Mutex;
+
+    {
+        process := scope_lock_process_context();
+        assert(id > 0 && id <= process.mutexes.count);
+        mutex = process.mutexes[id - 1];
+    }
+
+    release(mutex);
+} @Syscall(35)
 
 
 

@@ -1,48 +1,39 @@
 
 #import "Basic";
 #import "Atomics";
-#import "Machine_X64";
 
-#import "Syscall";
+Syscall :: #import "Syscall";
+
+#import "Operating_System";
 
 main :: () {
     log("Beginning thread priority test.");
 
-    semaphore = Syscall.create_semaphore();
+    threads: [6] Thread_Handle;
 
-    for 0..5 {
+    for *threads {
         // Make two threads at each priority level.
+        priority  := 20 * it_index;
+        name      := tprint("% priority", priority);
 
-        settings: Thread_Settings;
-        settings.priority = 20 * it;
+        it.* = create_thread(
+            entry_point = proc,
+            parameter   = xx priority,
+            name        = name,
+            cpu_core    = 1, // Put them all on the same core.
+            priority    = priority,
+        );
 
-        settings.stack_memory = alloc(0x1_0000);
-        settings.stack_size   = 0x1_0000;
-        settings.name         = tprint("% priority", settings.priority);
-        settings.cpu_core     = 1; // Put them all on the same core.
-
-        thread_id := Syscall.create_thread(proc, *settings);
-
-        priorities[it] = { thread_id, settings.priority };
-
-        Syscall.start_thread(thread_id);
+        start_thread(it);
     }
-
-    for 0..5 Syscall.wait_semaphore(semaphore);
+    
+    for threads join_thread(it);
 
     log("Finished.");
 }
 
-priorities: [6] struct {
-    thread_id: s64;
-    priority:  s64;
-};
-
-semaphore: s64;
-
-proc :: () #no_context {
-    push_context,defer_pop;
-
+proc :: (param: *void) -> int {
+    log("Starting thread.");
     start_cpu_time := get_cpu_time();
 
     start := get_monotonic_time();
@@ -59,48 +50,12 @@ proc :: () #no_context {
 
     end_cpu_time := get_cpu_time();
 
-    cpu_time := end_cpu_time - start_cpu_time;
+    cpu_time := to_milliseconds(end_cpu_time - start_cpu_time);
 
-    my_id := Syscall.this_thread_id();
+    log("Thread with priority % got %ms of CPU time over 5s of wall clock time.", cast(int) param, cpu_time);
 
-    for priorities if it.thread_id == my_id {
-        log("Thread with priority % got %ms of CPU time over 5s of wall clock time.", it.priority, to_milliseconds(cpu_time));
-
-        Syscall.signal_semaphore(semaphore);
-        Syscall.stop_executing();
-    }
-
-    log_error("Didn't find my priority in the priorities table: %", my_id);
-    Syscall.stop_executing();
+    return 0;
 }
-
-
-
-boot_time: Apollo_Time;
-tsc_frequency: u64;
-
-get_monotonic_time :: () -> Apollo_Time {
-    if !tsc_frequency {
-        Syscall.get_boot_time(*boot_time);
-        tsc_frequency = Syscall.get_tsc_frequency();
-    }
-
-    timestamp: Apollo_Time;
-    timestamp.low = rdtsc();
-
-    FEMTOSECONDS_PER_SECOND :: 1_000_000_000_000_000;
-    timestamp *= FEMTOSECONDS_PER_SECOND;
-    timestamp /= cast(s64) tsc_frequency;
-
-    return timestamp + boot_time;
-}
-
-get_cpu_time :: () -> Apollo_Time {
-    result: Apollo_Time;
-    Syscall.thread_cpu_time(*result);
-    return result;
-}
-
 
 
 busy_wait :: (microseconds: s64) {

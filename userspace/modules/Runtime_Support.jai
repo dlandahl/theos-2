@@ -1,6 +1,8 @@
 
 Syscall :: #import "Syscall";
 
+#import "Operating_System";
+
 //
 // Runtime_Support is less volatile than Preload and contains imports and various biggish code;
 // it is considered reasonable that you can mess around with Runtime_Support and ship your own
@@ -372,6 +374,9 @@ __instrumentation_second :: () {
     #program_export "main"
     __system_entry_point :: (argc: s32, argv: **u8) -> s32 #c_call {
         __jai_runtime_init(argc, argv);
+
+        // Really this module is supposed to be for the Jai runtime, not OS runtime. So we should initialize this earlier, before calling the system entry point.
+        all_threads_mutex = Syscall.create_mutex();
 
         push_context first_thread_context {
             #if ENABLE_BACKTRACE_ON_CRASH {
