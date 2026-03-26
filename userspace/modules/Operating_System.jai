@@ -1,5 +1,5 @@
 
-// This is a module of user space code to turn syscalls into a more full featured API.
+// This is a module of user space code to provide a more full featured API around system calls.
 
 Thread_Data :: struct {
     thread_id: int;
@@ -88,10 +88,14 @@ join_thread :: (thread: Thread_Handle) {
 
 
 
+get_variable :: (name: string, buffer: *$T) {
+    Syscall.get_variable(name.data, name.count, buffer);
+}
+
 get_monotonic_time :: () -> Apollo_Time {
     if !tsc_frequency {
-        Syscall.get_boot_time(*boot_time);
-        tsc_frequency = Syscall.get_tsc_frequency();
+        get_variable("tsc_frequency", *tsc_frequency);
+        get_variable("boot_time",     *boot_time);
     }
 
     timestamp: Apollo_Time;

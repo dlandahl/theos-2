@@ -397,7 +397,8 @@ file_system_test :: (sd: Storage_Device) {
     pc := create_process_context("Test");
     simple_create_thread(load_and_run_elf_executable, elf, name = "Userspace", process_context = pc);
 
-    trace_file := create_file(fs, 1, "trace");
+    trace_file := get_directory_entry(fs, 1, "trace");
+    if !trace_file trace_file = create_file(fs, 1, "trace");
 
     trace  := serialize_trace_buffers();
     buffer := get_base_buffer(*trace);

@@ -7,7 +7,7 @@ main :: () {
     log("Hello world, from user space.");
 
     path := "text";
-    text := "Around the four seas all men are brothers.";
+    text := "All men around the four seas are brothers.";
 
     file := Syscall.open_file(path.data, path.count, true, true);
 

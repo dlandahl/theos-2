@@ -1096,6 +1096,14 @@ quit_process :: () {
     // Probably just put a counter on the process struct and spin. Or have a separate thread check the counter.
 } @Syscall(9)
 
+get_variable :: (name_bytes: *u8, name_length: int, output: *void) {
+    // Temporary system.
+    s: string = {name_length, name_bytes};
+
+    if equal_nocase(s, "tsc_frequency") memcpy(output, *global.tsc_frequency, 8);
+    if equal_nocase(s, "boot_time")     memcpy(output, *global.boot_time,     16);
+} @Syscall(10)
+
 
 
 thread_cpu_time :: (apollo: *Apollo_Time) { // Todo: We should pass this through two registers instead of a pointer.
@@ -1115,14 +1123,6 @@ sleep_for_milliseconds :: (ms: int) {
     sleep(ms, .milliseconds);
 } @Syscall(21)
 
-get_boot_time :: (apollo: *Apollo_Time) {
-    apollo.* = global.boot_time;
-} @Syscall(22)
-
-get_tsc_frequency :: () -> u64 {
-    return global.tsc_frequency;
-} @Syscall(23)
-
 
 
 create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
@@ -1141,14 +1141,11 @@ create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
 } @Syscall(30)
 
 signal_semaphore :: (id: s64) {
-
     sema: *Semaphore;
 
     {
         process := scope_lock_process_context();
-
         assert(id > 0 && id <= process.semaphores.count);
-
         sema = process.semaphores[id - 1];
     }
 
@@ -1156,14 +1153,11 @@ signal_semaphore :: (id: s64) {
 } @Syscall(31)
 
 wait_semaphore :: (id: s64) { // Todo: Timeout.
-
     sema: *Semaphore;
 
     {
         process := scope_lock_process_context();
-
         assert(id > 0 && id <= process.semaphores.count);
-
         sema = process.semaphores[id - 1];
     }
 

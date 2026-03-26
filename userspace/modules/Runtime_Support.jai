@@ -13,8 +13,6 @@ Syscall :: #import "Syscall";
 
 #scope_export
 
-OS_IS_UNIX :: OS == .MACOS || OS == .LINUX || OS == .PS5 || OS == .IOS || OS == .ANDROID;
-
 // @Cleanup: __element_duplicate should lose its c_call status, and also be faster...!
 __element_duplicate :: (start: *u8, num_elements: s64, size: s64) #c_call #no_aoc {
     cursor := start + size;
@@ -445,21 +443,7 @@ debug_break :: () #no_context {
         compile_time_debug_break();
     } else {
         // Break into the debugger, or stop the running process.
-        #if OS == .PS5 {
-            #asm { int 0x41; }
-        } else #if OS == .NN_SWITCH2 && CPU == .ARM64 {
-           #bytes .[0x02, 0x80, 0x00, 0x00]; // udf 0x8002: 16 bit instruction (0x00, 16 bit immediate)
-        } else #if CPU == .X64 {
-            #asm { int3; }
-        } else #if CPU == .ARM64 {
-            #bytes .[0x20, 0x00, 0b001_0_0000, 0b1101_0100]; // BRK 0x01: 11 bit instruction, 16 bit immediate, 5 bit unused.
-        } else #if OS == .WASM {
-            wasm_debug_break :: () #foreign; // You will need to provide this function as JS code in your WASM environment. :JaiWasm:
-            wasm_debug_break();
-        } else {
-            llvm_trap :: () #intrinsic "llvm.debugtrap"; // @ToDo: This used to be llvm.trap which supposedly doesn’t work on Android. We need to test if "debugtrap" works there or if we need a different implemenation.
-            llvm_trap();
-        }
+        #asm { int3; }
     }
 }
 

@@ -23,10 +23,9 @@ main :: () {
             cpu_core    = 1, // Put them all on the same core.
             priority    = priority,
         );
-
-        start_thread(it);
     }
     
+    for threads start_thread(it);
     for threads join_thread(it);
 
     log("Finished.");
@@ -34,6 +33,7 @@ main :: () {
 
 proc :: (param: *void) -> int {
     log("Starting thread.");
+
     start_cpu_time := get_cpu_time();
 
     start := get_monotonic_time();
@@ -56,6 +56,7 @@ proc :: (param: *void) -> int {
 
     return 0;
 }
+
 
 
 busy_wait :: (microseconds: s64) {
