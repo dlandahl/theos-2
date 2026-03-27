@@ -388,15 +388,13 @@ schedule_tasks :: () {
             break;
         }
 
-        next = list_pop(run_queue);
+        while true {
+            next = list_pop(run_queue);
 
-        if next {
-            if next.process_context && next.process_context.stopped {
-                // This will probably be removed when in the future process contexts track the threads they own.
-                continue;
-            }
+            if !next continue run_queue; // Queue is empty, try the next lower priority level.
+            if  next.process_context && next.process_context.stopped continue; // This thread is from a stopped process, try the next task on the same queue.
 
-            break;
+            break run_queue; // Found a task that may preempt.
         }
     }
 
