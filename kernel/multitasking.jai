@@ -1106,7 +1106,7 @@ get_variable :: (name_bytes: *u8, name_length: int, output: *void) {
 
 
 
-thread_cpu_time :: (apollo: *Apollo_Time) { // Todo: We should pass this through two registers instead of a pointer.
+thread_cpu_time :: () -> apollo_low: u64, apollo_high: s64 {
     task := get_current_task();
 
     preempt_disable();
@@ -1116,12 +1116,16 @@ thread_cpu_time :: (apollo: *Apollo_Time) { // Todo: We should pass this through
 
     preempt_restore();
 
-    apollo.* = total_time;
+    return total_time.low, total_time.high;
 } @Syscall(20)
 
 sleep_for_milliseconds :: (ms: int) {
     sleep(ms, .milliseconds);
 } @Syscall(21)
+
+apollo_sleep :: (low: u64, high: s64) {
+    sleep({low, high});
+} @Syscall(22)
 
 
 

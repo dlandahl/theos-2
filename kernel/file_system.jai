@@ -6,9 +6,9 @@ Mounted_File_System :: struct {
 
     storage_device: Storage_Device;
 
-    #as file_system: File_System; // Should eventually a pointer to any type of file system. File_System is a specific driver for a specific on-disk format.
+    #as file_system: File_System; // Should eventually be a pointer to any type of file system. File_System is a specific driver for a specific on-disk format.
 
-    maybe_dirty: [..] u32; // Temporary.
+    maybe_dirty: [..] u64; // Temporary. Contains the hashes of all disk blocks that may be dirty in the cache.
 }
 
 mount_file_system :: (sd: Storage_Device, disk_offset: u64) -> *Mounted_File_System {
@@ -38,17 +38,19 @@ flush_file_system :: (fs: *Mounted_File_System) {
     for fs.maybe_dirty {
         transfer: Transfer_Request;
 
-        disk_byte_address := fs.disk_offset_in_bytes + it * 0x20_0000;
-        block_index       := fs.disk_offset_in_bytes / 0x20_0000 + it;
+        hash_table_entry  := global.large_pages[it];
 
-        hash_table_entry := global.large_pages[cast(s64) block_index % global.large_pages.count];
-        page_base        := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+        disk_byte_address :=           hash_table_entry.lru_current_block * 0x20_0000;
+        page_base         := cast(u64) hash_table_entry.lru_entry         * 0x20_0000;
 
         transfer.start_lba = cast(s64) disk_byte_address / 512;
         transfer.count_lba = 0x20_0000                   / 512;
         transfer.direction = .WRITE;
         transfer.semaphore = *transfer_done;
         transfer.physical_memory_address = page_base;
+
+        // Todo: Lots of tracing for file system and disk cache.
+        // log("FLUSH LBA % <-> address %", transfer.start_lba, hex(transfer.physical_memory_address));
 
         do_storage_transfer(fs.storage_device, transfer);
     }
@@ -133,8 +135,12 @@ unmap_file :: (fs: File_System, id: s64, mapping: *void) {
 
 my_pin_disk_block :: (fs: *Mounted_File_System, block_index: u32, overwrite := false) -> *void {
     disk_byte_address := fs.disk_offset_in_bytes + block_index * 0x20_0000;
+    assert(fs.disk_offset_in_bytes & 0x1f_ffff == 0);
 
-    array_add_if_unique(*fs.maybe_dirty, block_index); // Todo: Temporary.
+    disk_block_index  := disk_byte_address / 0x20_0000;
+    block_hash        := disk_block_index % cast(u64) global.large_pages.count; // Nice meaningless cast.
+
+    array_add_if_unique(*fs.maybe_dirty, block_hash); // Todo: Temporary.
 
     page_base, was_present := find_or_add_disk_cache_entry(disk_byte_address);
 
@@ -151,6 +157,9 @@ my_pin_disk_block :: (fs: *Mounted_File_System, block_index: u32, overwrite := f
         transfer.direction = .READ;
         transfer.semaphore = *transfer_done;
         transfer.physical_memory_address = page_base;
+
+        // Todo: Lots of tracing for file system and disk cache.
+        // log("CACHE LBA % <-> address %", transfer.start_lba, hex(transfer.physical_memory_address));
 
         do_storage_transfer(fs.storage_device, transfer);
         wait_for(*transfer_done);
@@ -215,13 +224,21 @@ open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_no
     return opened_file_id;
 } @Syscall(40)
 
+AT :: struct @SyscallAPI {
+    _: void;
+    low:  u64;
+    high: s64;
+}
+
 File_Stats :: struct @SyscallAPI {
+    _: void; // Program_Print.print_expression skips the first struct field...
+    version := 1;
     size_bytes:          int;
 
-    modified_consensus:  Apollo_Time;
-    modified_monotonic:  Apollo_Time;
-    created_consensus:   Apollo_Time;
-    created_monotonic:   Apollo_Time;
+    modified_consensus:  AT;
+    modified_monotonic:  AT;
+    created_consensus:   AT;
+    created_monotonic:   AT;
 
     monotonic_clock_generation: int;
 }
@@ -237,11 +254,11 @@ stat_file :: (id: s64, stats: *File_Stats) {
 
     stats.size_bytes = inode.file_size;
 
-    stats.modified_consensus = inode.modified.consensus;
-    stats.modified_monotonic = inode.modified.monotonic;
+    stats.modified_consensus = cast,FORCE(AT) inode.modified.consensus;
+    stats.modified_monotonic = cast,FORCE(AT) inode.modified.monotonic;
 
-    stats.created_consensus  = inode.created.consensus;
-    stats.created_monotonic  = inode.created.monotonic;
+    stats.created_consensus  = cast,FORCE(AT) inode.created.consensus;
+    stats.created_monotonic  = cast,FORCE(AT) inode.created.monotonic;
 
     stats.monotonic_clock_generation = inode.modified.clock_generation;
 } @Syscall(41)

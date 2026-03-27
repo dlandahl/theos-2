@@ -255,7 +255,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
     generated_syscall_dispatcher: bool;
     found_syscalls: [..] struct {
         number: int;
-        header: *Code_Procedure_Header;
+        using header: *Code_Procedure_Header;
     };
 
     found_syscall_api_declarations: [..] *Code_Struct;
@@ -272,6 +272,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                 decl := it.expression;
 
                 for decl.notes if it.text == "SyscallAPI" {
+                    assert(!generated_syscall_dispatcher, "It appears there's a non-top-level syscall marker.");
                     array_add(*found_syscall_api_declarations, decl);
                     continue;
                 }
@@ -292,7 +293,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name, pop_error_code, ip_offset);
                         array_add(*found_interrupts, proc.name);
                     } else if begins_with(it.text, "Syscall") {
-                        assert(!generated_syscall_dispatcher);
+                        assert(!generated_syscall_dispatcher, "It appears there's a non-top-level syscall marker.");
 
                         number: int;
                         success := scan2(it.text, "Syscall(%)", *number);
@@ -318,30 +319,57 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                     quick_sort(found_syscalls, (a, b) => a.number - b.number);
 
                     // The registers used to pass parameters in order to syscalls.
-                    input_registers     :: string.["rbx", "rdx", "rsi", "rdi"];
+                    input_registers      :: string.["rbx", "rdx", "rsi", "rdi"];
 
                     // Jai's names for the same registers, omitting the size prefix/suffix.
-                    input_registers_jai :: string.["b",   "d",   "si",  "di"];
+                    input_registers_jai  :: string.["b",   "d",   "si",  "di"];
 
-                    dispatcher_body: String_Builder;
+                    // Same thing for returns. Note r12 is used for the usermode stack by syscall_entry, r11 is used internally by SYSCALL to store RFLAGS.
+                    // There's no reason we can't use the same registers for input and output, it just makes the syntax in the syscall wrappers noisier. 
+                    output_registers     :: string.["r8", "r9", "r10", "r13"];
+                    output_registers_jai :: string.[ "8",  "9",  "10",  "13"];
 
-                    for found_syscalls {
-                        parameters: string;
+                    {
+                        // Generate a case-statement for each syscall, for dispatching syscalls based on the value of RAX inside the kernel.
+                        dispatcher_body: String_Builder;
 
-                        for it.header.arguments {
-                            parameters = join(parameters, "xx data.", input_registers[it_index], ", ");
+                        for found_syscalls {
+
+                            print(*dispatcher_body, "      case %;\n        ", it.number);
+
+                            for it.returns {
+                                // You can't have multiple return values and cast them.
+                                if !it.name it.name = tprint("result%", it_index);
+
+                                print_expression(*dispatcher_body, it);
+                                append(*dispatcher_body, ";\n        ");
+                            }
+
+                            for ret: it.returns {
+                                append(*dispatcher_body, ifx ret.name);
+
+                                if it_index != it.returns.count-1 append(*dispatcher_body, ", ");
+                                else                              append(*dispatcher_body, " = ");
+                            }
+
+                            append(*dispatcher_body, it.header.name);
+                            append(*dispatcher_body, "(");
+                            
+                            for it.arguments print(*dispatcher_body, "xx data.%, ", input_registers[it_index]);
+
+                            append(*dispatcher_body, ");\n");
+
+                            for it.returns {
+                                print(*dispatcher_body, "        data.% = xx %;\n", output_registers[it_index], it.name);
+                            }
+
+                            append(*dispatcher_body, "\n");
                         }
 
-                        assert(it.header.returns.count <= 1);
-                        returns := ifx it.header.returns then "data.rax = xx ";
-
-                        print(*dispatcher_body, "      case %;\n       %%(%);\n\n", it.number, returns, it.header.name, parameters);
+                        add_build_string(tprint(SYSCALL_DISPATCHER, builder_to_string(*dispatcher_body)), workspace);
                     }
 
-                    add_build_string(tprint(SYSCALL_DISPATCHER, builder_to_string(*dispatcher_body)), workspace);
-
                     call_wrappers: String_Builder;
-                    print(*call_wrappers, "\n#import \"Basic\";\n");
 
                     // Write the names of the syscalls into an array, indexable by syscall number.
                     print(*call_wrappers, "\nsyscall_names :: string.[\n");
@@ -359,6 +387,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
 
                     print(*call_wrappers, "];\n\n");
 
+
                     for found_syscall_api_declarations {
                         print(*call_wrappers, "% :: ", it.defined_type.name);
                         print_expression(*call_wrappers, it);
@@ -366,52 +395,80 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         append(*call_wrappers, "\n\n");
                     }
 
+
                     for found_syscalls {
-                        parameters: string;
+                        print(*call_wrappers, "% :: (", it.header.name);
 
-                        for it.header.arguments {
-                            type: String_Builder;
-                            print_expression(*type, it);
-
-                            if parameters parameters = join(parameters, ", ");
-                            parameters = join(parameters, builder_to_string(*type));
+                        return_value_names := NewArray(it.returns.count, string); // Allow unnamed return values in the kernel syscall definitions, by generating names for them.
+                        for it.returns {
+                            return_value_names[it_index] = ifx it.name else tprint("result%", it_index);
                         }
 
-                        returns: string;
-                        return_type_expression: string;
+                        // Find the longest return or argument name, to align the ===.
+                        longest_name: int = "syscall_number".count;
+                        for it.arguments          longest_name = max(longest_name, it.name.count);
+                        for return_value_names    longest_name = max(longest_name, it.count);
 
-                        if it.header.returns {
-                            type: String_Builder;
-                            print_expression(*type, it.header.returns[0].type_inst); // Todo: This hides the name of the return value.
-                            return_type_expression = builder_to_string(*type);
-
-                            returns = join(" -> ", return_type_expression);
+                        for arg: it.arguments {
+                            print_expression(*call_wrappers, arg);
+                            if it_index != it.arguments.count - 1 append(*call_wrappers, ", ");
                         }
 
-                        // Todo: If the syscall return value has a name in the kernel, we should automatically use the name here for the return value as well.
-                        // Todo: No need to reuse the RAX register for return values, the inline assembly syntax is simpler if you pin a separate register instead.
+                        append(*call_wrappers, ")");
 
-                        print(*call_wrappers, "\n% :: (%)% #no_context {\n", it.header.name, parameters, returns);
-                        print(*call_wrappers, "    syscall_number := %;\n\n", it.number);
-                        if returns print(*call_wrappers, "    result: u64;\n\n");
-                        print(*call_wrappers, "    #asm SYSCALL_SYSRET {\n");
-                        print(*call_wrappers, "        %;\n", ifx it.header.returns then "mov rax: gpr === a, syscall_number" else "syscall_number === a");
-                        for it.header.arguments {
-                            print(*call_wrappers, "        % === %;\n", it.name, input_registers_jai[it_index]);
+                        if it.returns append(*call_wrappers, " -> ");
+
+                        for ret: it.returns {
+                            print_expression(*call_wrappers, ret);
+                            if it_index != it.returns.count - 1   append(*call_wrappers, ", ");
                         }
-                        print(*call_wrappers, "\n        syscall c:, _11:");
-                        print(*call_wrappers, ifx returns then ", rax" else ", syscall_number");
-                        for it.header.arguments {
+
+                        print(*call_wrappers, " #no_context {\n    syscall_number := %;\n\n", it.number);
+
+                        for it.returns {
+                            print(*call_wrappers, "    %: ", return_value_names[it_index]);
+                            print_expression(*call_wrappers, it.type_inst);
+                            print(*call_wrappers, ";\n\n");
+                        }
+
+                        append(*call_wrappers,    "    #asm SYSCALL_SYSRET {\n");
+                        append(*call_wrappers,    "        syscall_number");
+                        for 0..(longest_name - "syscall_number".count) append(*call_wrappers, " ");
+                        append(*call_wrappers,    "=== a;\n");
+
+                        for it.arguments {
+                            print(*call_wrappers, "        %", it.name);
+                            for 0..(longest_name - it.name.count) append(*call_wrappers, " ");
+                            print(*call_wrappers, "=== %;\n", input_registers_jai[it_index]);
+                        }
+                        
+                        for return_value_names {
+                            print(*call_wrappers, "        %", it);
+                            for 0..(longest_name - it.count) append(*call_wrappers, " ");
+                            print(*call_wrappers, "=== %;\n", output_registers_jai[it_index]);
+                        }
+
+                        append(*call_wrappers,    "\n        syscall c:, _11:, syscall_number");
+
+                        for it.arguments {
                             print(*call_wrappers, ", %", it.name);
                         }
-                        print(*call_wrappers, ";\n");
-                        if returns print(*call_wrappers, "        mov result, rax;\n");
-                        print(*call_wrappers, "    }\n");
-                        if returns print(*call_wrappers, "\n    return cast(%) result;\n", return_type_expression);
-                        print(*call_wrappers, "}\n");
-                    }
 
-                    make_directory_if_it_does_not_exist("userspace/modules");
+                        for return_value_names {
+                            print(*call_wrappers, ", %", it);
+                        }
+
+                        append(*call_wrappers,    ";\n    }\n");
+
+                        if  it.returns append(*call_wrappers, "\n    return ");
+                        for return_value_names {
+                            print(*call_wrappers, "%", it);
+                            if it_index != return_value_names.count-1 append(*call_wrappers, ", ");
+                        }
+                        if it.returns append(*call_wrappers, ";\n");
+
+                        append(*call_wrappers,    "}\n\n");
+                    }
 
                     write_entire_file("userspace/modules/Syscall.jai", builder_to_string(*call_wrappers));
 
@@ -567,7 +624,8 @@ format_disk :: () -> bool {
 
     {
         // Create a partition containing our custom file system format.
-        partition := create_partition(disk, PARTITION_TYPE_GUID, "File System", 2048 + filesystem_size / disk.sector_size, 0x1000_0000);
+        partition := create_partition(disk, PARTITION_TYPE_GUID, "File System", 4096 + filesystem_size / disk.sector_size, 0x1000_0000);
+        assert((disk.all_file_data.data - partition.data) & 0x1f_ffff == 0);
 
         fs        := format_file_system(partition.data);
         subdir    := create_directory(fs, 1, "Software");

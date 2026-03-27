@@ -109,8 +109,8 @@ get_monotonic_time :: () -> Apollo_Time {
 }
 
 get_cpu_time :: () -> Apollo_Time {
-    result: Apollo_Time;
-    Syscall.thread_cpu_time(*result);
+    result: Apollo_Time = ---;
+    result.low, result.high = Syscall.thread_cpu_time();
     return result;
 }
 
