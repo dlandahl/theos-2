@@ -55,7 +55,22 @@ flush_file_system :: (fs: *Mounted_File_System) {
         do_storage_transfer(fs.storage_device, transfer);
     }
 
+    count := fs.maybe_dirty.count;
+
     for fs.maybe_dirty {
+        // Todo: Racy.
+
+        hash_table_entry  := global.large_pages[it];
+        lru_entry         := global.large_pages[hash_table_entry.lru_entry];
+
+        assert(lru_entry.state == .DISK_CACHE);
+
+        if lru_entry.pinned == 0 {
+            remove it;
+        }
+    }
+
+    for 0..count-1 {
         wait_for(*transfer_done);
     }
 }
@@ -186,7 +201,7 @@ Opened_File :: struct {
 }
 
 
-open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_not_existent := false) -> id: int {
+open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_not_existent := false) -> id: u64 {
     path_string := string.{path_length, path_bytes};
 
     path, file_name := path_decomp(path_string);
@@ -214,14 +229,12 @@ open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_no
 
     process := scope_lock_process_context();
 
-    new_file := array_add(*process.files);
+    new_file, id := add_object(*process.files);
     new_file.opened_for  = ifx writable then .WRITING else .READING;
     new_file.file_system = global.file_system; // There's always just one file system at the moment.
     new_file.inode_id    = file_inode_id;
 
-    opened_file_id := process.files.count;
-
-    return opened_file_id;
+    return id;
 } @Syscall(40)
 
 AT :: struct @SyscallAPI {
@@ -243,12 +256,13 @@ File_Stats :: struct @SyscallAPI {
     monotonic_clock_generation: int;
 }
 
-stat_file :: (id: s64, stats: *File_Stats) {
+stat_file :: (id: u64, stats: *File_Stats) {
     // Todo: Validate parameters.
 
     process := scope_lock_process_context();
 
-    file := process.files[id - 1];
+    file := lookup(*process.files, id);
+    assert(file != null);
 
     inode := lookup_inode(global.file_system, file.inode_id);
 
@@ -263,43 +277,46 @@ stat_file :: (id: s64, stats: *File_Stats) {
     stats.monotonic_clock_generation = inode.modified.clock_generation;
 } @Syscall(41)
 
-create_file_mapping :: (id: s64, virtual_address: *void) {
+create_file_mapping :: (id: u64, virtual_address: *void) {
     // Todo: Validate parameters.
 
     process := scope_lock_process_context();
-    file := process.files[id - 1];
+
+    file := lookup(*process.files, id);
+    assert(file != null);
 
     map_file(global.file_system, file.inode_id, virtual_address, file.opened_for == .READING, true);
 } @Syscall(42)
 
-flush_file :: (id: s64) {
-    assert(id > 0);
+flush_file :: (id: u64) {
 
-    file_system: *Mounted_File_System;
+    file: *Opened_File;
 
     {
         process := scope_lock_process_context();
-        file_system = process.files[id - 1].file_system;
+        file = lookup(*process.files, id);
+        assert(file != null);
     }
 
-    flush_file_system(file_system);
+    flush_file_system(file.file_system);
 } @Syscall(43)
 
-read_file :: (id: s64, buffer: *void, bytes: int, offset: int) -> bytes_read: int {
+read_file :: (id: u64, buffer: *void, bytes: int, offset: int) -> bytes_read: int {
     // Todo;
     assert(false);
     return 0;
 } @Syscall(44)
 
-write_to_file :: (id: s64, buffer: *void, bytes: int, offset: int) {
+write_to_file :: (id: u64, buffer: *void, bytes: int, offset: int) {
 
     process := scope_lock_process_context(); // Todo: Holding this lock much longer than needed.
-    file    := process.files[id - 1];
+    file    := lookup(*process.files, id);
+    assert(file != null);
 
     write_file(file.file_system, file.inode_id, string.{bytes, buffer}, offset);
 } @Syscall(45)
 
-close_file :: (id: s64) {
+close_file :: (id: u64) {
     // Todo;
     flush_file(id);
 } @Syscall(46)

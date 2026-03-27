@@ -37,11 +37,12 @@ Process_Context :: struct {
     id: int;
     root_page_table: u64;
 
-    // Todo: Think of a better way of prepresenting these user space resources.
-    page_frames: [..] s32;
-    semaphores:  [..] *Semaphore;
-    mutexes:     [..] *Mutex;
-    files:       [..]  Opened_File;
+    // Object_Table is a Bucket_Array with generational indices added on. Maybe all types of objects should be in a tagged union and we just have one big table.
+
+    page_frames: Object_Table(s32);
+    semaphores:  Object_Table(Semaphore);
+    mutexes:     Object_Table(Mutex);
+    files:       Object_Table(Opened_File);
 
     spinlock: Spinlock;
 
@@ -518,7 +519,7 @@ sleep_until :: (time: Apollo_Time) {
     yield_execution();
 }
 
-// This is separate from prepare-and-yield above, because often you need to put the task to sleep under a lock, but not hold the lock while sleeping, to prevent lost wakeups.
+// This is separate from prepare-and-yield above, because often you need to put a task to sleep under a lock to prevent lost wakeups, but not hold the lock while sleeping.
 prepare_task_sleep :: (time: Apollo_Time) {
     until := ifx time == INFINITE_TIMEOUT then INFINITE_TIMEOUT else get_monotonic_time() + time;
     prepare_task_sleep_until(until);
@@ -1032,28 +1033,27 @@ this_thread_id :: () -> s64 {
 
 
 
-get_new_page_frame :: () -> int {
+get_new_page_frame :: () -> u64 {
     new_page := allocate_large_page();
 
     process := scope_lock_process_context();
 
-    array_add(*process.page_frames, cast(s32) (new_page / 0x20_0000));
+    page, id := add_object(*process.page_frames);
+    page.* = cast(s32) (new_page / 0x20_0000);
 
-    return process.page_frames.count; // Todo: Would like to have discriminated integers for kernel object handles.
+    return id;
 } @Syscall(7)
 
-map_page :: (page_id: int, virtual_address: *void) { // Todo: Page permissions.
+map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
     task := get_current_task();
 
     process := scope_lock_process_context();
 
-    page_array: []s32 = process.page_frames;
-
-    assert(page_id > 0 && page_id <= page_array.count);
     assert(cast(u64) virtual_address & 0x1f_ffff == 0);
     assert(cast(u64) virtual_address <= 0x7fff_ffff_ffff);
 
-    page_frame := cast(u64) page_array[page_id - 1] * 0x20_0000;
+    page_index := lookup(*process.page_frames, page_id).*;
+    page_frame := cast(u64) page_index * 0x20_0000;
 
     for VM_Iterator.{virtual_address, 512} {
         if it.level == 1 {
@@ -1129,74 +1129,69 @@ apollo_sleep :: (low: u64, high: s64) {
 
 
 
-create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> s64 {
-
+create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> u64 {
     process := scope_lock_process_context();
 
-    sema := array_add(*process.semaphores);
-    sema.* = New(Semaphore,, global.small_objects);
+    sema, id := add_object(*process.semaphores);
 
-    sema.*.counter_max = counter_max;
-    sema.*.counter     = counter_start;
-
-    id := process.semaphores.count; // 0 means invalid.
+    sema.counter_max = counter_max;
+    sema.counter     = counter_start;
 
     return id;
 } @Syscall(30)
 
-signal_semaphore :: (id: s64) {
+signal_semaphore :: (id: u64) {
     sema: *Semaphore;
 
     {
         process := scope_lock_process_context();
-        assert(id > 0 && id <= process.semaphores.count);
-        sema = process.semaphores[id - 1];
+        sema = lookup(*process.semaphores, id);
     }
 
+    assert(sema != null);
     signal(sema);
 } @Syscall(31)
 
-wait_semaphore :: (id: s64) { // Todo: Timeout.
+wait_semaphore :: (id: u64) { // Todo: Timeout.
     sema: *Semaphore;
 
     {
         process := scope_lock_process_context();
-        assert(id > 0 && id <= process.semaphores.count);
-        sema = process.semaphores[id - 1];
+        sema = lookup(*process.semaphores, id);
     }
 
     wait_for(sema);
 } @Syscall(32)
 
-create_mutex :: () -> s64 {
+create_mutex :: () -> u64 {
     process := scope_lock_process_context();
-    mutex := array_add(*process.mutexes);
-    mutex.* = New(Mutex,, global.small_objects);
-    
-    return process.mutexes.count;
+
+    mutex, id := add_object(*process.mutexes);
+
+    return id;
 } @Syscall(33)
 
-lock_mutex :: (id: s64) {
+lock_mutex :: (id: u64) {
     mutex: *Mutex;
 
     {
         process := scope_lock_process_context();
-        assert(id > 0 && id <= process.mutexes.count);
-        mutex = process.mutexes[id - 1];
+        mutex = lookup(*process.mutexes, id);
     }
 
+    assert(mutex != null);
     acquire(mutex);
 } @Syscall(34)
 
-unlock_mutex :: (id: s64) {
+unlock_mutex :: (id: u64) {
     mutex: *Mutex;
 
     {
         process := scope_lock_process_context();
-        assert(id > 0 && id <= process.mutexes.count);
-        mutex = process.mutexes[id - 1];
+        mutex = lookup(*process.mutexes, id);
     }
 
+    assert(mutex != null);
     release(mutex);
 } @Syscall(35)
 

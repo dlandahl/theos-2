@@ -5,8 +5,8 @@ Thread_Data :: struct {
     thread_id: int;
     parameter: *void;
 
-    semaphore_for_starting: int;
-    semaphore_for_joining:  int;
+    semaphore_for_starting: u64;
+    semaphore_for_joining:  u64;
 
     entry_point: (*void) -> int;
     result: int;
@@ -15,7 +15,7 @@ Thread_Data :: struct {
 Thread_Handle :: Bucket_Locator;
 
 all_threads:       Bucket_Array(Thread_Data, 64);
-all_threads_mutex: int;
+all_threads_mutex: u64;
 
 create_thread :: (entry_point: (*void) -> int, parameter := null, name := "", priority := 50, cpu_core := -1) -> Thread_Handle {
 
