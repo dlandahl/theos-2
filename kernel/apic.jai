@@ -639,18 +639,20 @@ page_fault :: (stack: *Interrupt_Stack_Frame(true)) #c_call {
         SHADOW_STACK;
     }
 
-    flags := cast(Flags)stack.error_code;
+    flags := cast(Flags) stack.error_code;
     was_fetch := flags & .INSTRUCTION_FETCH > 0;
     was_write := flags & .WRITE             > 0;
 
     settings := get_page_settings(cr2);
 
-    if stack.cs == .RING3_CODE {
+    if stack.cs == .RING3_CODE || cr2 < cast(*void) 0x7fff_ffff_ffff {
+        assert(task.process_context != null);
+
         b: String_Builder;
         print(*b, "Task \"%\": memory access violation at %. ", task.name, cr2);
 
-        if      !settings.usermode_accessible     print(*b, "This was a privilege violation.\n");
-        else if !settings.present                 print(*b, "The page is not mapped.\n");
+             if !settings.present                 print(*b, "The page is not mapped.\n");
+        else if !settings.usermode_accessible     print(*b, "This was a privilege violation.\n");
         else if !settings.writeable  && was_write print(*b, "This was a write to a read-only page.\n");
         else if !settings.executable && was_fetch print(*b, "Tried to execute code from memory not marked executable.\n");
         else {

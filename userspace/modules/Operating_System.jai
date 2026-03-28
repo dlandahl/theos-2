@@ -88,14 +88,14 @@ join_thread :: (thread: Thread_Handle) {
 
 
 
-get_variable :: (name: string, buffer: *$T) {
-    Syscall.get_variable(name.data, name.count, buffer);
+read_variable :: (name: string, buffer: *$T) {
+    Syscall.read_variable(name.data, name.count, buffer);
 }
 
 get_monotonic_time :: () -> Apollo_Time {
     if !tsc_frequency {
-        get_variable("tsc_frequency", *tsc_frequency);
-        get_variable("boot_time",     *boot_time);
+        read_variable("tsc_frequency", *tsc_frequency);
+        read_variable("boot_time",     *boot_time);
     }
 
     timestamp: Apollo_Time;

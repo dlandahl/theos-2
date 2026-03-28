@@ -63,7 +63,7 @@ Task_Flags :: enum_flags s8 {
     sleeping;
     blocked;
     stopped;
-    preempt; // Todo: Might make more sense to have this in CPU-local data.
+    preempt;
 }
 
 Scheduler :: struct {
@@ -959,7 +959,6 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
 
 scope_lock_process_context :: () -> *Process_Context #expand {
-    // This is called too much and I want to figure out how do do things in a more lock free way.
     pc := get_current_task().process_context;
 
     acquire(*pc.spinlock);
@@ -968,8 +967,30 @@ scope_lock_process_context :: () -> *Process_Context #expand {
     return pc;
 }
 
+memory_is_not_userspace :: (base: *void, size: int) -> bool {
+    USER_LIMIT :: 0x7fff_ffff_ffff;
+
+    if size > USER_LIMIT return false;
+    if size < 0          return false;
+
+    if  base         > cast(*void) USER_LIMIT return false;
+    if (base + size) > cast(*void) USER_LIMIT return false;
+
+    return false;
+}
+
+set_syscall_failed :: () {
+    // Todo.
+}
+
+
 
 display_string :: (data: *u8, count: s64) {
+    if memory_is_not_userspace(data, count) {
+        set_syscall_failed();
+        return;
+    }
+
     kernel_write_string({count, data});
 } @Syscall(1)
 
@@ -988,10 +1009,45 @@ Thread_Settings :: struct @SyscallAPI {
     priority := 50;
     name: string;
     cpu_core: int;
+
+    process_id: int; // 0 means use current process context.
 }
 
 create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> thread_id: s64 {
-    old_task := get_current_task();
+
+    if memory_is_not_userspace(settings, size_of(Thread_Settings)) {
+        set_syscall_failed();
+        return 0;
+    }
+
+    using settings;
+
+    if memory_is_not_userspace(name.data, name.count) {
+        set_syscall_failed();
+        return 0;
+    }
+
+    if (cpu_core < 0) || (cpu_core >= global.processor_cores.count) {
+        set_syscall_failed();
+        return 0;
+    }
+
+    if memory_is_not_userspace(stack_memory, stack_size) {
+        set_syscall_failed();
+        return 0;
+    }
+
+    old_task       := get_current_task();
+    parent_process := old_task.process_context;
+
+    if process_id {
+        parent_process = lookup_object(*global.pc_storage, process_id);
+    }
+
+    if !parent_process {
+        set_syscall_failed();
+        return 0;
+    }
 
     forward_to_usermode :: () {
         task := get_current_task();
@@ -1001,25 +1057,19 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
         enter_user_mode(entry_point, task.user_stack);
     }
 
-    using settings;
-
     new_task := create_task(
         entry_point       = forward_to_usermode,
         name              = ifx name then copy_string(name) else "Unnamed user thread",
         user_data         = cast(*void) entry_point,
-        process_context   = old_task.process_context
+        process_context   = parent_process
     );
 
     if       priority >= 75 new_task.priority = .High;
     else if  priority <= 25 new_task.priority = .Low;
     else                    new_task.priority = .Normal;
 
-    assert(cast(u64) (stack_memory + stack_size) < 0x7fff_ffff_ffff);
-    assert(cast(u64) stack_memory & 0xf == 0);
-
     new_task.user_stack = stack_memory + stack_size;
 
-    assert(cpu_core >= 0 && cpu_core < global.processor_cores.count);
     put_task_on_core(new_task, *global.processor_cores[cpu_core]);
 
     return new_task.id;
@@ -1037,6 +1087,12 @@ get_new_page_frame :: () -> u64 {
     process := scope_lock_process_context();
 
     page, id := add_object(*process.page_frames);
+
+    if !page {
+        set_syscall_failed();
+        return 0;
+    }
+
     page.* = cast(s32) (new_page / 0x20_0000);
 
     return id;
@@ -1047,8 +1103,15 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
 
     process := scope_lock_process_context();
 
-    assert(cast(u64) virtual_address & 0x1f_ffff == 0);
-    assert(cast(u64) virtual_address <= 0x7fff_ffff_ffff);
+    if cast(u64) virtual_address & 0x1f_ffff {
+        set_syscall_failed();
+        return;
+    }
+
+    if memory_is_not_userspace(virtual_address, 0x20_0000) {
+        set_syscall_failed();
+        return;
+    }
 
     page_index := lookup(*process.page_frames, page_id).*;
     page_frame := cast(u64) page_index * 0x20_0000;
@@ -1094,14 +1157,41 @@ quit_process :: () {
     // Probably just put a counter on the process struct and spin. Or have a separate thread check the counter.
 } @Syscall(9)
 
-get_variable :: (name_bytes: *u8, name_length: int, output: *void) {
+read_variable :: (name_bytes: *u8, name_length: int, output: *void) {
     // Temporary system.
-    s: string = {name_length, name_bytes};
 
-    if equal_nocase(s, "tsc_frequency") memcpy(output, *global.tsc_frequency, 8);
-    if equal_nocase(s, "boot_time")     memcpy(output, *global.boot_time,     16);
+    if memory_is_not_userspace(name_bytes, name_length) { // Could make this always set an error that says memory address invalid.
+        set_syscall_failed();
+        return;
+    }
+
+    s: string = {name_length, name_bytes};
+    variable: Any;
+
+    if equal_nocase(s, "tsc_frequency") variable = global.tsc_frequency;
+    if equal_nocase(s, "boot_time")     variable = global.boot_time;
+
+    if memory_is_not_userspace(output, variable.type.runtime_size) {
+        set_syscall_failed();
+        return;
+    }
+
+    memcpy(output, variable.value_pointer, variable.type.runtime_size);
 } @Syscall(10)
 
+Process_Settings :: struct @SyscallAPI {
+    version := 1;
+
+    name: string;
+}
+
+start_process :: (settings: *Process_Settings) -> id: int {
+    if memory_is_not_userspace(settings, size_of(Process_Settings)) {
+        return 0;
+    }
+
+    
+} @Syscall(11)
 
 
 thread_cpu_time :: () -> apollo_low: u64, apollo_high: s64 {
@@ -1146,7 +1236,11 @@ signal_semaphore :: (id: u64) {
         sema = lookup(*process.semaphores, id);
     }
 
-    assert(sema != null);
+    if sema == null {
+        set_syscall_failed();
+        return;
+    }
+
     signal(sema);
 } @Syscall(31)
 
@@ -1156,6 +1250,11 @@ wait_semaphore :: (id: u64) { // Todo: Timeout.
     {
         process := scope_lock_process_context();
         sema = lookup(*process.semaphores, id);
+    }
+
+    if sema == null {
+        set_syscall_failed();
+        return;
     }
 
     wait_for(sema);
@@ -1177,7 +1276,11 @@ lock_mutex :: (id: u64) {
         mutex = lookup(*process.mutexes, id);
     }
 
-    assert(mutex != null);
+    if mutex == null {
+        set_syscall_failed();
+        return;
+    }
+
     acquire(mutex);
 } @Syscall(34)
 
@@ -1189,7 +1292,11 @@ unlock_mutex :: (id: u64) {
         mutex = lookup(*process.mutexes, id);
     }
 
-    assert(mutex != null);
+    if mutex == null {
+        set_syscall_failed();
+        return;
+    }
+
     release(mutex);
 } @Syscall(35)
 

@@ -428,8 +428,9 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                         for it.returns {
                             print(*call_wrappers, "    %: ", return_value_names[it_index]);
                             print_expression(*call_wrappers, it.type_inst);
-                            print(*call_wrappers, ";\n\n");
+                            print(*call_wrappers, ";\n");
                         }
+                        if it.returns append(*call_wrappers, "\n");
 
                         append(*call_wrappers,    "    #asm SYSCALL_SYSRET {\n");
                         append(*call_wrappers,    "        syscall_number");
@@ -441,7 +442,7 @@ compile_kernel :: (to_create: [..] Plugin_To_Create) -> success: bool {
                             for 0..(longest_name - it.name.count) append(*call_wrappers, " ");
                             print(*call_wrappers, "=== %;\n", input_registers_jai[it_index]);
                         }
-                        
+
                         for return_value_names {
                             print(*call_wrappers, "        %", it);
                             for 0..(longest_name - it.count) append(*call_wrappers, " ");

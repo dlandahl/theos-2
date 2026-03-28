@@ -430,6 +430,7 @@ append_to_file :: (fs: File_System, id: s64, data: $T/.[string, []u8]) {
 resolve_path :: (fs: File_System, root_id: s64, path: string) -> id: s64 {
     // This is a low level routine (like all the routines currently in this file) so this is not where user facing paths come into the system.
     // I think this maybe shouldn't be in here but it's a useful utility for now.
+    if !path return root_id;
 
     segments := split(path, #char "/",, temp);
 

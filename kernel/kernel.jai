@@ -2705,6 +2705,7 @@ array_add :: (array: *Bucket_Array) -> *array.type {
 }
 
 #import "Bitfield"(true);
+#import "Object_Table";
 
 set          :: bitfield_set;
 get          :: bitfield_get;

@@ -19,7 +19,9 @@ Nvme_Controller :: struct {
     initialized: bool;
 
     active_transfers: [..] Nvme_Transfer_Metadata;
-    metadata_lock: Spinlock;
+
+    // Todo: We should have an IO queue per CPU core, and then disable preemption when accessing them. That way there don't need to be any locks, and caches are warm as completions can be serviced on the same core that the request was made from.
+    transfer_lock: Mutex;
 }
 
 nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
@@ -38,16 +40,14 @@ nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
     full_transfers  := block_count / max_blocks;
     remainder       := block_count % max_blocks;
 
+    acquire(*nvme.transfer_lock); // Todo: Don't lock.
 
-    acquire(*nvme.metadata_lock);
     metadata := array_add(*nvme.active_transfers);
-
     metadata.prp_pages.allocator = temp;
 
     metadata.first_command   = nvme.io_queue.next_command_id;
     metadata.total_commands  = full_transfers + cast(int) (remainder > 0);
     metadata.semaphore = request.semaphore;
-    release(*nvme.metadata_lock);
 
     memory_base := cast(*void) request.physical_memory_address + DIRECT_MAPPING_BASE;
 
@@ -68,6 +68,7 @@ nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
 
         do_single_transfer(nvme, cast(u64) start_block, memory, max_blocks, request.direction, *metadata.prp_pages);
     }
+    release(*nvme.transfer_lock);
 }
 
 init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
@@ -505,7 +506,7 @@ reset_controller :: (nvme: *Nvme_Controller) {
 
         nvme.AQA__admin_queue_attributes = {
             // Subtract one, because the field is zero based.
-            depth-1, depth-1 // Todo: Hardcoded.
+            depth-1, depth-1
         };
 
         nvme.ASQ__admin_sq = admin_sq;
@@ -709,7 +710,7 @@ completion_thread :: () {
             report_errors(completed);
 
             found_metadata := false;
-            acquire(*controller.metadata_lock);
+            acquire(*controller.transfer_lock);
 
             cid := completed.CID__command_identifier;
 
@@ -744,7 +745,7 @@ completion_thread :: () {
                 break;
             }
 
-            release(*controller.metadata_lock);
+            release(*controller.transfer_lock);
             assert(found_metadata, "Completion queue entry not associated with any transfer metadata.");
 
             finish_dequeueing_command(*controller.io_queue);

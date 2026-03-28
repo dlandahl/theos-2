@@ -202,30 +202,38 @@ Opened_File :: struct {
 
 
 open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_not_existent := false) -> id: u64 {
+    if memory_is_not_userspace(path_bytes, path_length) {
+        set_syscall_failed();
+        return 0;
+    }
+
     path_string := string.{path_length, path_bytes};
 
     path, file_name := path_decomp(path_string);
     path             = trim(path, "\\/");
 
-    parent_inode_id: s64;
+    parent_inode_id := resolve_path(global.file_system, 1, path);
 
-    if path {
-        parent_inode_id = resolve_path(global.file_system, 1, path);
-    } else {
-        parent_inode_id = 1;
+    if !parent_inode_id || !file_name {
+        set_syscall_failed();
+        return 0;
     }
-
-    assert(!!parent_inode_id);
-    assert(!!file_name);
 
     file_inode_id := get_directory_entry(global.file_system, parent_inode_id, file_name);
 
     if !file_inode_id {
-        // Todo: This redundantly checks all the directory entries to make sure it doesn't already exist, which we've already done.
-        file_inode_id = create_file(global.file_system, parent_inode_id, file_name);
+        if create_if_not_existent {
+            // Todo: This redundantly checks all the directory entries to make sure it doesn't already exist, which we've already done.
+            file_inode_id = create_file(global.file_system, parent_inode_id, file_name);
+        } else {
+            return 0;
+        }
     }
 
-    assert(!!file_inode_id);
+    if !file_inode_id {
+        set_syscall_failed();
+        return 0;
+    }
 
     process := scope_lock_process_context();
 
@@ -259,12 +267,22 @@ File_Stats :: struct @SyscallAPI {
 stat_file :: (id: u64, stats: *File_Stats) {
     // Todo: Validate parameters.
 
+    if memory_is_not_userspace(stats, size_of(File_Stats)) {
+        set_syscall_failed();
+        return;
+    }
+
     process := scope_lock_process_context();
 
     file := lookup(*process.files, id);
-    assert(file != null);
+
+    if file == null {
+        set_syscall_failed();
+        return;
+    }
 
     inode := lookup_inode(global.file_system, file.inode_id);
+    assert(!!inode);
 
     stats.size_bytes = inode.file_size;
 
@@ -278,14 +296,24 @@ stat_file :: (id: u64, stats: *File_Stats) {
 } @Syscall(41)
 
 create_file_mapping :: (id: u64, virtual_address: *void) {
-    // Todo: Validate parameters.
 
     process := scope_lock_process_context();
 
     file := lookup(*process.files, id);
-    assert(file != null);
 
-    map_file(global.file_system, file.inode_id, virtual_address, file.opened_for == .READING, true);
+    if file == null {
+        set_syscall_failed();
+        return;
+    }
+
+    inode := lookup_inode(file.file_system, file.inode_id);
+
+    if memory_is_not_userspace(virtual_address, inode.file_size) {
+        set_syscall_failed();
+        return;
+    }
+
+    map_file(file.file_system, file.inode_id, virtual_address, file.opened_for == .READING, true);
 } @Syscall(42)
 
 flush_file :: (id: u64) {
@@ -295,7 +323,11 @@ flush_file :: (id: u64) {
     {
         process := scope_lock_process_context();
         file = lookup(*process.files, id);
-        assert(file != null);
+    }
+
+    if file == null {
+        set_syscall_failed();
+        return;
     }
 
     flush_file_system(file.file_system);
@@ -309,9 +341,18 @@ read_file :: (id: u64, buffer: *void, bytes: int, offset: int) -> bytes_read: in
 
 write_to_file :: (id: u64, buffer: *void, bytes: int, offset: int) {
 
+    if memory_is_not_userspace(buffer, bytes) {
+        set_syscall_failed();
+        return;
+    }
+
     process := scope_lock_process_context(); // Todo: Holding this lock much longer than needed.
     file    := lookup(*process.files, id);
-    assert(file != null);
+
+    if file == null {
+        set_syscall_failed();
+        return;
+    }
 
     write_file(file.file_system, file.inode_id, string.{bytes, buffer}, offset);
 } @Syscall(45)
