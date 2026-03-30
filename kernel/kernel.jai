@@ -27,7 +27,7 @@ X64_Core :: struct {
 // reserve 8Mb in the executable, all of which is zero.
 space_for_processor_cores: [1024] X64_Core;
 
-// For the same reason this struct shouldn't have default values. Todo: move the IOPB.
+// For the same reason this struct shouldn't have default values.
 #assert initializer_of(X64_Core) == null;
 
 Kernel_Globals :: struct {
@@ -106,7 +106,7 @@ Kernel_Globals :: struct {
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
 
-    pci_devices: [..] Pci_Device;
+    pci_devices: [..] PCI_Device;
 
     nvme: *Nvme_Controller;
     sata: *Sata_Controller;

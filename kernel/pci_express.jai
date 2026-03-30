@@ -66,35 +66,35 @@ find_all_pci_devices :: () {
     }
 }
 
-Pci_Device :: struct {
-    using configuration_space: *Pci_Configuration_Space;
+PCI_Device :: struct {
+    using configuration_space: *PCI_Configuration_Space;
 
     #overlay(configuration_space) registers: *u32;
 
-    bus_address: Pci_Bus_Address;
+    bus_address: PCI_Bus_Address;
 
     union {
-        msi: *Pci_Capability_Msi;
-        msi64: *Pci_Capability_Msi64;
+        msi: *PCI_Capability_Msi;
+        msi64: *PCI_Capability_Msi64;
     }
     msi_64bit_address: bool;
 
-    msi_x: *Pci_Capability_Msi_X;
+    msi_x: *PCI_Capability_Msi_X;
     msi_x_table: [] Msi_X_Table_Entry;
     msi_x_pending: Bit_Array;
 }
 
-Pci_Bus_Address :: struct {
+PCI_Bus_Address :: struct {
     bus: u8;
     device: u8;
     function: u8;
 }
 
-read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
+read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *PCI_Configuration_Space {
     device_offset := cast(u64, bus * 256 + device * 8 + function);
     address := base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
 
-    header := cast(*Pci_Configuration_Space, address + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
+    header := cast(*PCI_Configuration_Space, address + DIRECT_MAPPING_BASE); // Todo: does cache need to be disabled for this memory?
 
     if header.vendor_id == PCI_VENDOR_ID_NO_DEVICE {
         return null;
@@ -107,17 +107,17 @@ read_configuration_space :: (base_address: u64, bus: int, device: int, function:
     return header;
 }
 
-Pci_Configuration_Space :: struct {
+PCI_Configuration_Space :: struct {
     start: void;
 
     vendor_id:       u16;
     device_id:       u16;
-    command:         Pci_Command;
+    command:         PCI_Command;
     status:          u16;
     revision_id:     u8;
     prog_if:         u8;
     subclass:        u8;
-    class_code:      Pci_Class;
+    class_code:      PCI_Class;
     cache_line_size: u8;
     latency_timer:   u8;
     header_type:     u8;
@@ -138,10 +138,10 @@ Pci_Configuration_Space :: struct {
         interrupt_pin:  u8;
     }
 
-    #overlay(subclass) combined_class_code: Combined_Pci_Class_Code;
+    #overlay(subclass) combined_class_code: Combined_PCI_Class_Code;
 }
 
-Pci_Capability :: struct {
+PCI_Capability :: struct {
     id: enum u8 {
         NULL                           :: 0x0;
         POWER_MANAGEMENT_INTERFACE     :: 0x1;
@@ -164,16 +164,16 @@ Msi_Control_Flags :: enum_flags u16 {
     _64_BIT :: 0x80;
 }
 
-Pci_Capability_Msi :: struct {
-    #as cap: Pci_Capability;
+PCI_Capability_Msi :: struct {
+    #as cap: PCI_Capability;
 
     control: Msi_Control_Flags;
     address: u32;
     data: u16;
 }
 
-Pci_Capability_Msi64 :: struct {
-    #as cap: Pci_Capability;
+PCI_Capability_Msi64 :: struct {
+    #as cap: PCI_Capability;
 
     control: Msi_Control_Flags;
     address: u64 #align 1;
@@ -187,8 +187,8 @@ Msi_X_Control :: enum u16 {
     enable        :: 1;
 } @Bitfield
 
-Pci_Capability_Msi_X :: struct {
-    #as cap: Pci_Capability;
+PCI_Capability_Msi_X :: struct {
+    #as cap: PCI_Capability;
 
     control: Msi_X_Control;
     table_offset: u32;
@@ -204,22 +204,22 @@ Msi_X_Table_Entry :: struct {
     };
 }
 
-parse_pci_capability_list :: (device: *Pci_Device) {
+parse_pci_capability_list :: (device: *PCI_Device) {
 
     // Todo: this code (and probably code in other places) will likely generate non-DWORD aligned and sized accesses to PCI registers, which is not necessarily supported by the hardware.
 
-    capability: *Pci_Capability = cast(*void) device.configuration_space + device.capability_pointer;
+    capability: *PCI_Capability = cast(*void) device.configuration_space + device.capability_pointer;
 
     while true {
         log("Found capability %.", capability.id);
 
         if capability.id == {
           case .MESSAGE_SIGNALLED_INTERRUPT;
-            device.msi = cast(*Pci_Capability_Msi) capability;
+            device.msi = cast(*PCI_Capability_Msi) capability;
             device.msi_64bit_address = device.msi.control & ._64_BIT > 0;
 
           case .MSI_X;
-            device.msi_x = cast(*Pci_Capability_Msi_X) capability;
+            device.msi_x = cast(*PCI_Capability_Msi_X) capability;
         }
 
         if !capability.next {
@@ -230,7 +230,7 @@ parse_pci_capability_list :: (device: *Pci_Device) {
     }
 }
 
-enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) -> enum { NONE; MSI; MSI_X; } {
+enable_msi_or_msi_x :: (device: *PCI_Device, interrupt_handler: () #c_call) -> enum { NONE; MSI; MSI_X; } {
 
     if device.msi_x {
         log("Enabling MSI-X");
@@ -300,12 +300,12 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) -> e
 PCI_VENDOR_ID_NO_DEVICE :: 0xffff;
 PCI_CONFIGURATION_SPACE_SIZE :: 4096;
 
-Pci_Bar :: struct {
+PCI_Bar :: struct {
     base: u64;
     limit: u32;
 }
 
-read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
+read_base_address_register :: (device: PCI_Device, bar_index: int) -> PCI_Bar {
     bar := device.registers[0x4 + bar_index];
 
     if bar & 0b001 {
@@ -333,7 +333,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
     return {base, limit};
 }
 
-map_base_address_register :: (bar: Pci_Bar) -> *void {
+map_base_address_register :: (bar: PCI_Bar) -> *void {
 
     uncacheable_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
 
@@ -357,7 +357,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     return virtual;
 }
 
-register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
+register_legacy_pci_interrupt :: (pci: *PCI_Device, interrupt_handler: () #c_call) -> bool {
 
     for entry: global.pci_routing_table {
         device := (entry.address >> 16) & 0xFFFF;
@@ -416,11 +416,12 @@ register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_cal
     return false;
 }
 
-Combined_Pci_Class_Code :: enum u16 {
+Combined_PCI_Class_Code :: enum u16 {
     NVME_CONTROLLER        :: 0x0108;
     SATA_CONTROLLER        :: 0x0106;
     I8254X_ETHERNET        :: 0x0200;
     HIGH_DEFINITION_AUDIO  :: 0x0403;
+    UNIVERSAL_SERIAL_BUS   :: 0x0c03;
 }
 
 
@@ -711,7 +712,7 @@ I8254x_Network_Interface_Card :: struct {
     mac_address: [6] u8;
 }
 
-init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
+init_i8254x :: (device: *PCI_Device) -> I8254x_Network_Interface_Card {
     log_category("8254x");
 
     log("Vendor ID: %", hex(device.vendor_id));
@@ -875,7 +876,7 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
     for* packets_received {
         i8254_packet := *nic.rx_queue[nic.rx_queue_head];
 
-        it.data = cast(*void)i8254_packet.buffer_address + DIRECT_MAPPING_BASE;
+        it.data = cast(*void) i8254_packet.buffer_address + DIRECT_MAPPING_BASE;
         it.length = i8254_packet.length;
 
         nic.rx_queue_head += 1;
@@ -1022,7 +1023,7 @@ HDA_Codec_Verb :: enum u32 {
     codec_address :: 4;
 }
 
-init_high_definition_audio_controller :: (device: *Pci_Device) {
+init_high_definition_audio_controller :: (device: *PCI_Device) {
     log_category("HDA");
 
     log("Found an INTEL HDA audio device");
@@ -1102,7 +1103,7 @@ hda_submit_command :: (hda: *High_Definition_Audio, verb: HDA_Codec_Verb) -> enu
 
 
 
-Pci_Class :: enum u8 {
+PCI_Class :: enum u8 {
     UNCLASSIFIED             :: 0x0;
     MASS_STORAGE             :: 0x1;
     NETWORK                  :: 0x2;
@@ -1119,7 +1120,7 @@ Pci_Class :: enum u8 {
     WIRELESS_CONTROLLER      :: 0xd;
 }
 
-Pci_Command :: enum_flags u16 {
+PCI_Command :: enum_flags u16 {
     IO_SPACE                    :: 1 << 0;
     MEMORY_SPACE                :: 1 << 1;
     BUS_MASTER                  :: 1 << 2;

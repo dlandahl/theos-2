@@ -1412,8 +1412,8 @@ Dhcp_Message :: struct {
     server_ip:         u32;  @DontByteswap
     gateway_ip:        u32;  @DontByteswap
 
-    client_mac:  [6]   u8;
-    mac_padding: [10]  u8;
+    client_mac:    [6] u8;
+    mac_padding:  [10] u8;
 
     boot_file:   [192] u8;
     magic:             u32;
@@ -1823,16 +1823,14 @@ handle_icmp_packet :: (net: *Network_Connection, eth: *Ethernet_Header) {
         transmit_pong(net, icmp);
 
       case .echo_reply;
-        for net.pings_in_flight {
-            if it.id == icmp.data {
-                time := get_monotonic_time();
+        for net.pings_in_flight if it.id == icmp.data {
+            time := get_monotonic_time();
 
-                delta_ms := to_milliseconds(time - it.sent_at);
-                log("Ping % = %ms", format_ip(it.destination_ip), delta_ms);
+            delta_ms := to_milliseconds(time - it.sent_at);
+            log("Ping % = %ms", format_ip(it.destination_ip), delta_ms);
 
-                remove it;
-                break;
-            }
+            remove it;
+            break;
         }
     }
 }
@@ -2210,7 +2208,9 @@ start_network :: () -> bool {
     return true;
 }
 
-network_thread :: () {
+network_thread :: () #no_context {
+    kernel_thread_entry();
+
     log_category("Net");
 
     time := get_system_time();
@@ -2316,6 +2316,18 @@ network_thread :: () {
         }
     }
 }
+
+create_udp :: (ip: u32, port: u16) -> u64 {
+
+} @Syscall(71)
+
+transmit_udp :: (udp: u64, buffer: *void, bytes: int) {
+
+} @Syscall(72)
+
+receive_udp :: (udp: u64, buffer: *void, bytes: int) {
+
+} @Syscall(73)
 
 
 

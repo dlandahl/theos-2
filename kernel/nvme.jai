@@ -71,7 +71,7 @@ nvme_transfer :: (device_specific: *void, request: Transfer_Request) {
     release(*nvme.transfer_lock);
 }
 
-init_nvme_controller :: (device: *Pci_Device) -> Storage_Device {
+init_nvme_controller :: (device: *PCI_Device) -> Storage_Device {
     log_category("NVMe");
 
     assert(device.class_code == .MASS_STORAGE);
@@ -691,7 +691,9 @@ nvme_interrupt :: (stack: *void) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
-completion_thread :: () {
+completion_thread :: () #no_context {
+    kernel_thread_entry();
+
     log_category("NVMe");
 
     task        := get_current_task();

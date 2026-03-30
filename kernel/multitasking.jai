@@ -11,7 +11,6 @@ Task_Info :: struct {
     name: string;
     trace_name: Trace_String;
 
-    entry_point: ();
     user_data: *void;
 
     temporary_storage: *Temporary_Storage;
@@ -151,8 +150,13 @@ core_begin_multitasking :: () {
 
     if core.id == 0 {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
+        idle_proc :: () #no_context {
+            kernel_thread_entry();
 
-        idle_task = create_task(cpu_idle_loop, 0x8000, name = current_task.name);
+            cpu_idle_loop();
+        }
+
+        idle_task = create_task(idle_proc, 0x8000, name = current_task.name);
         idle_task.on_core = core;
 
         current_task.name = "Kernel Main";
@@ -203,7 +207,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     release(*scheduler.spinlock);
 }
 
-create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, user_data := null, process_context: *Process_Context = null) -> *Task_Info {
+create_task :: (entry_point: () #no_context, kernel_stack_size := 0x1_0000, name: string, user_data := null, process_context: *Process_Context = null) -> *Task_Info {
 
     // We could allocate task infos out of a bucket array in case we ever want to iterate them directly rather than indirectly.
     new_task := New(Task_Info,, global.small_objects);
@@ -226,17 +230,16 @@ create_task :: (entry_point: (), kernel_stack_size := 0x1_0000, name: string, us
     }
 
     stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
-    stack.flags = 0;
-    stack.return_address = cast(*void) new_task_start;
-    stack.irq_disable_count = 1; // The entry point will release the scheduler spinlock. Setting this to 1 will cause that to enable IRQs on that core.
+    stack.flags              = 0;
+    stack.return_address     = xx entry_point;
+    stack.irq_disable_count  = 1; // The entry point will release the scheduler spinlock. Setting this to 1 will cause that to enable IRQs on that core.
 
-    new_task.rsp = stack;
+    new_task.rsp         = stack;
     new_task.xsave.mxcsr = .MASK_ALL;
-    new_task.entry_point = entry_point;
-    new_task.name = name;
-    new_task.user_data = user_data;
-    new_task.priority = .Normal;
-    new_task.trace_name = add_trace_string(name);
+    new_task.name        = name;
+    new_task.user_data   = user_data;
+    new_task.priority    = .Normal;
+    new_task.trace_name  = add_trace_string(name);
     new_task.process_context = process_context;
 
     if process_context {
@@ -436,23 +439,22 @@ schedule_tasks :: () {
 
 context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Assembly;
 
-new_task_start :: () #no_context {
+kernel_thread_entry :: () #expand {
     set_stack_trace_sentinel();
 
-    push_context {
-        core := get_current_core();
-        release(*core.scheduler.spinlock);
+   `push_context,defer_pop;
 
-        trace(.start_task);
+    core := get_current_core();
+    release(*core.scheduler.spinlock);
 
-        setup_temporary_storage();
+    trace(.start_task);
 
-        task := get_current_task();
-        task.entry_point();
+    setup_temporary_storage();
 
+   `defer {
         shutdown_temporary_storage();
 
-        set_flag(.stopped, task);
+        set_flag(.stopped, get_current_task());
         yield_execution();
     }
 }
@@ -817,6 +819,7 @@ wait_for :: (using var: *Condition_Variable, user_lock: *$T/Any_Lock, $predicate
 
 Implicit_Lock_Condition_Variable :: struct (Lock := Spinlock) {
     // If you only need one cvar, and you supply both the state change and predicate as #code, the mutex doesn't need to be provided by the user code.
+
     cvar: Condition_Variable;
     user_lock: Lock;
 }
@@ -842,7 +845,9 @@ fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Cod
 
 
 simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2, process_context: *Process_Context = null) {
-    simple_thread_entry :: () {
+    simple_thread_entry :: () #no_context {
+        kernel_thread_entry();
+
         task := get_current_task();
         user_data: T = (.*) cast(*T) task.user_data;
 
@@ -1049,7 +1054,9 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
         return 0;
     }
 
-    forward_to_usermode :: () {
+    forward_to_usermode :: () #no_context {
+        kernel_thread_entry();
+
         task := get_current_task();
         entry_point := cast(() #no_context) task.user_data;
 
@@ -1099,9 +1106,6 @@ get_new_page_frame :: () -> u64 {
 } @Syscall(7)
 
 map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
-    task := get_current_task();
-
-    process := scope_lock_process_context();
 
     if cast(u64) virtual_address & 0x1f_ffff {
         set_syscall_failed();
@@ -1112,6 +1116,8 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
         set_syscall_failed();
         return;
     }
+
+    process := scope_lock_process_context();
 
     page_index := lookup(*process.page_frames, page_id).*;
     page_frame := cast(u64) page_index * 0x20_0000;
@@ -1140,6 +1146,35 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
     }
 } @Syscall(8)
 
+map_subpage :: (page_id: u64, start: u64, count: u64, virtual_address: *void) {
+    if !count return;
+
+    if start < 0 || count < 0 || start + count > 511 {
+        set_syscall_failed();
+        return;
+    }
+    
+    if cast(u64) virtual_address & 0x1f_ffff {
+        set_syscall_failed();
+        return;
+    }
+
+    if memory_is_not_userspace(virtual_address, 0x20_0000) {
+        set_syscall_failed();
+        return;
+    }
+
+    process := scope_lock_process_context();
+
+    page_index := lookup(*process.page_frames, page_id).*;
+    page_frame := cast(u64) page_index * 0x20_0000;
+
+    physical_start := page_frame + start * 512;
+    flags          := Page_Flags.PRESENT | .READ_WRITE | .USER_SUPERVISOR;
+
+    map_pages(virtual_address, physical_start, cast(s64) count, flags);
+} @Syscall(9)
+
 quit_process :: () {
 
     process := scope_lock_process_context();
@@ -1155,7 +1190,7 @@ quit_process :: () {
 
     // Todo: Here we need to figure out when other threads of the same process have stopped running so we can free resources.
     // Probably just put a counter on the process struct and spin. Or have a separate thread check the counter.
-} @Syscall(9)
+} @Syscall(10)
 
 read_variable :: (name_bytes: *u8, name_length: int, output: *void) {
     // Temporary system.
@@ -1177,7 +1212,7 @@ read_variable :: (name_bytes: *u8, name_length: int, output: *void) {
     }
 
     memcpy(output, variable.value_pointer, variable.type.runtime_size);
-} @Syscall(10)
+} @Syscall(11)
 
 Process_Settings :: struct @SyscallAPI {
     version := 1;
@@ -1187,11 +1222,12 @@ Process_Settings :: struct @SyscallAPI {
 
 start_process :: (settings: *Process_Settings) -> id: int {
     if memory_is_not_userspace(settings, size_of(Process_Settings)) {
+        set_syscall_failed();
         return 0;
     }
 
     
-} @Syscall(11)
+} @Syscall(12)
 
 
 thread_cpu_time :: () -> apollo_low: u64, apollo_high: s64 {
@@ -1307,7 +1343,9 @@ enter_user_mode :: (entry_point: () #no_context, user_stack: *void, flags := X64
 
 
 memory_test :: () {
-    proc :: () {
+    proc :: () #no_context {
+        kernel_thread_entry();
+
         task := get_current_task();
 
         random_seed(rdtsc() ^ (cast(u64) task.id) ^ cast(u64) (task & 0xffff_ffff));

@@ -858,7 +858,9 @@ uACPI_State :: struct {
     work_added:     Semaphore;
     work_completed: Condition_Variable;
 
-    work_thread_proc :: () {
+    work_thread_proc :: () #no_context {
+        kernel_thread_entry();
+
         using global.uacpi_state;
 
         log_category("uACPI");

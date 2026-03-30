@@ -15,7 +15,7 @@ sata_interrupt :: (data: *void) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
-init_sata_controller :: (device: *Pci_Device) -> c: *Sata_Controller = null, success: bool {
+init_sata_controller :: (device: *PCI_Device) -> c: *Sata_Controller = null, success: bool {
     log_category("SATA");
 
     device.command |= .BUS_MASTER | .MEMORY_SPACE;
