@@ -49,6 +49,8 @@ Process_Context :: struct {
     trace_name: Trace_String;
 
     stopped: bool;
+
+    arena: Physical_Memory_Arena;
 }
 
 Task_Priority :: enum s8 {
@@ -260,7 +262,7 @@ create_process_context :: (name: string) -> *Process_Context {
     pc.name       = name;
     pc.trace_name = add_trace_string(name);
 
-    pc.root_page_table = get_4k_page();
+    pc.root_page_table = arena_get(*pc.arena, 4096, 4096);
 
     page_table := cast(*u64) (pc.root_page_table + DIRECT_MAPPING_BASE);
     memcpy(*page_table[256], *global.page_tables.pml4[256], 256*8);
@@ -883,6 +885,7 @@ load_and_run_elf_executable :: (elf_data: string) {
     using Page_Flags;
 
     task := get_current_task();
+    assert(task.process_context != null);
 
     for elf.program_header_table {
         if it.type != .LOAD {
@@ -891,11 +894,10 @@ load_and_run_elf_executable :: (elf_data: string) {
 
         region_size := align(4096, cast(s64) (it.memsz + it.vaddr & 0xfff));
 
-        _, physical := allocate_page_aligned_physical_memory(region_size);
-        virtual     := cast(*void) it.vaddr & ~0xfff;
+        virtual  := cast(*void) it.vaddr & ~0xfff;
+        pages    := region_size / 4096;
 
-        pages := region_size / 4096;
-        map_pages(virtual, physical, pages);
+        map_pages(virtual, *task.process_context.arena, pages);
 
         memcpy(
             cast(*void)     it.vaddr,
@@ -926,11 +928,10 @@ load_and_run_elf_executable :: (elf_data: string) {
 
         stack_size := 0x1_0000;
 
-        _, physical := allocate_page_aligned_physical_memory(stack_size);
-        virtual     := task.user_stack - stack_size;
+        virtual    := task.user_stack - stack_size;
+        flags      := PRESENT | READ_WRITE | USER_SUPERVISOR;
 
-        flags := PRESENT | READ_WRITE | USER_SUPERVISOR;
-        map_pages(virtual, physical, stack_size / 4096, flags);
+        map_pages(virtual, *task.process_context.arena, stack_size / 4096, flags);
 
         // Todo: Update the stack tracing logic to work better with user mode stacks.
         task.user_stack -= 8;
@@ -1009,7 +1010,7 @@ Thread_Settings :: struct @SyscallAPI {
     version := 1;
 
     stack_memory: *void; // Points to the lowest memory address in the stack. The initial stack pointer is stack_memory + stack_size.
-    stack_size: int;
+    stack_size: int; // Todo: Unecessary.
 
     priority := 50;
     name: string;
@@ -1124,7 +1125,6 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
 
     for VM_Iterator.{virtual_address, 512} {
         if it.level == 1 {
-            assert(it.flags & .PRESENT == 0);
 
             it.value  = page_frame;
             it.flags |= .PRESENT | .READ_WRITE | .USER_SUPERVISOR | .PAGE_SIZE;
@@ -1135,13 +1135,10 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
         if it.flags & .PRESENT > 0 {
             assert(it.flags & .USER_SUPERVISOR > 0);
             assert(it.flags & .READ_WRITE      > 0);
-
             continue;
         }
 
-        new_page_table := get_4k_page();
-
-        it.value  = new_page_table;
+        it.value  = arena_get(*process.arena, 4096, 4096);
         it.flags |= .PRESENT | .READ_WRITE | .USER_SUPERVISOR;
     }
 } @Syscall(8)
@@ -1172,6 +1169,7 @@ map_subpage :: (page_id: u64, start: u64, count: u64, virtual_address: *void) {
     physical_start := page_frame + start * 512;
     flags          := Page_Flags.PRESENT | .READ_WRITE | .USER_SUPERVISOR;
 
+    // Todo: Use the arena for page tables.
     map_pages(virtual_address, physical_start, cast(s64) count, flags);
 } @Syscall(9)
 

@@ -121,7 +121,6 @@ init_usb_controller :: (device: *PCI_Device) {
 
         // All USB3 ports should be USB2 compatible.
         for sockets {
-            log("%", it);
             if it.usb3_port assert(!!it.usb2_port);
         }
     }
@@ -144,7 +143,7 @@ init_usb_controller :: (device: *PCI_Device) {
 
     // Todo: In the book there's another sleep here, but he doesn't say how long or what it's for.
 
-    page_size_flags := controller.ops.PAGE_SIZE & 0xffff;
+    page_size_flags := controller.ops.PAGESIZE & 0xffff;
     if page_size_flags & 1 == 0 {
         log_error("4K page size is not supported.");
         return;
@@ -152,40 +151,43 @@ init_usb_controller :: (device: *PCI_Device) {
 
     controller.arena.alignment = 64;
 
-    device_context_index := arena_get(*controller.arena, size_of(Device_Context_Index), 4096);
+    {
+        physical             := arena_get(*controller.arena, size_of(Device_Context_Index), 4096);
+        device_context_index := cast(*Device_Context_Index) (physical + DIRECT_MAPPING_BASE);
 
-    // Allocate scratchpad buffers.
-    number_of_scratchpad_buffers := get(caps.HCSPARAMS2, .Max_Scratchpad_Bufs_Hi) << 5
-                                  | get(caps.HCSPARAMS2, .Max_Scratchpad_Bufs_Lo);
+        // Allocate scratchpad buffers.
+        number_of_scratchpad_buffers := get(caps.HCSPARAMS2, .Max_Scratchpad_Bufs_Hi) << 5
+                                      | get(caps.HCSPARAMS2, .Max_Scratchpad_Bufs_Lo);
 
-    if number_of_scratchpad_buffers != 0 {
-        size := align(64, number_of_scratchpad_buffers * size_of(u64));
-        device_context_index.scratchpad_buffers = arena_get(*controller.arena, size, 4096);
+        if number_of_scratchpad_buffers != 0 {
+            size := align(64, number_of_scratchpad_buffers * size_of(u64));
+            device_context_index.scratchpad_buffers = arena_get(*controller.arena, size, 4096);
 
-        write_pointer := cast(*u64) (device_context_index.scratchpad_buffers + DIRECT_MAPPING_BASE);
+            write_pointer := cast(*u64) (device_context_index.scratchpad_buffers + DIRECT_MAPPING_BASE);
 
-        for 0..number_of_scratchpad_buffers-1 {
-            write_pointer[it] = arena_get(*controller.arena, 4096, 4096);
+            for 0..number_of_scratchpad_buffers-1 {
+                write_pointer[it] = arena_get(*controller.arena, 4096, 4096);
+            }
+         }
+
+        max_slots    :=     get    (caps.HCSPARAMS1, .MaxSlots);
+        context_size := ifx get_bit(caps.HCCPARAMS1, .CSZ__context_size) then 2048 else 1024;
+
+        for 0..max_slots-1 {
+            device_context_index.device_contexts[it] = arena_get(*controller.arena, context_size, 4096);
         }
+
+        ops.DCBAAP = physical;
     }
 
-    max_slots    :=     get    (caps.HCSPARAMS1, .MaxSlots);
-    context_size := ifx get_bit(caps.HCCPARAMS1, .CSZ__context_size) then 2048 else 1024;
-
-    for 0..max_slots-1 {
-        device_context.device_contexts[it] = arena_get(*controller.arena, context_size, 4096);
-    }
-
-    command_ring   := get_4k_page();
-
-    ops.DCBAAP = device_context;
+    command_ring := get_4k_page();
 
     crcr := ops.CRCR;
     set_bit     (*crcr, .RCS__ring_cycle_state);
     set_in_place(*crcr, .command_ring_pointer, command_ring);
     ops.CRCR = crcr;
 
-    set(*ops.CONFIG, .MaxSlotsEn, max_slots);
+    set(*ops.CONFIG, .MaxSlotsEn, get(caps.HCSPARAMS1, .MaxSlots));
 
     ops.DNCTRL = 0x0002; // Notification type FUNCTION_WAKE. Todo: Magic number.
 
@@ -197,7 +199,7 @@ init_usb_controller :: (device: *PCI_Device) {
     }
 
     // Reset ports.
-    for sockets {
+    for *sockets {
         it.usb3_active = reset_port(controller, it.usb3_port);
         it.usb2_active = reset_port(controller, it.usb2_port);
     }
@@ -208,6 +210,214 @@ Device_Context_Index :: struct {
 
     scratchpad_buffers:       u64;
     device_contexts:    [255] u64;
+}
+
+#assert size_of(Device_Context_Index) == 2048;
+
+Endpoint_Context :: struct {
+    dword0: enum u32 {
+        endpoint_state       :: 3;
+        _                    :: 5;
+        mult                 :: 2;
+        max_primary_streams  :: 5;
+        linear_stream_array  :: 1;
+        interval             :: 8;
+        max_endpoint_service_time_interval_payload_high :: 8;
+    }
+
+    dword1: enum u32 {
+        _                     :: 1;
+        error_count           :: 2;
+        endpoint_type         :: 3;
+        _                     :: 1;
+        host_initiate_disable :: 1;
+        max_burst_size        :: 8;
+        max_packet_size       :: 8;
+    }
+
+    dword2_and_dword3 :: enum u64 {
+        dequeue_cycle_state   :: 1;
+        _                     :: 3;
+        tr_dequeue_pointer    :: 63;
+    }
+
+    averate_trb_length: u16;
+    max_endpoint_service_time_interval_payload_low: u16;
+
+    _: [3] u32; // Used by the hardware.
+}
+
+Normal_TRB :: struct {
+    data_pointer: u64;
+
+    dword2 :: enum u32 {
+        transfer_length    :: 17;
+        td_size            :: 5;
+        interrupt_target   :: 10;
+    }
+
+    dword3 :: enum u32 {
+        cycle_bit              :: 1;
+        evaluate_next_trb      :: 1;
+        interrupt_on_short_packet :: 1;
+        no_snoop               :: 1;
+        chain_bit              :: 1;
+        interrupt_on_completion :: 1;
+        immediate_data         :: 1;
+        _                      :: 2;
+        block_event_interrupt  :: 1;
+        trb_type               :: 6;
+        _                      :: 16;
+    }
+}
+
+Setup_Stage_TRB :: struct {
+    bm_request_type: u8;
+    b_request: u8;
+    w_value: u16;
+
+    w_index: u16;
+    w_length: u16;
+
+    dword2: enum u32 {
+        trb_transfer_length   :: 17;
+        _                     :: 5;
+        interrupt_target      :: 10;
+    }
+
+    dword3 :: enum u32 {
+        cycle_bit               :: 1;
+        _                       :: 4;
+        interrupt_on_completion :: 1;
+        immediate_data          :: 1;
+        _                       :: 3;
+        trb_type                :: 6;
+        transfer_type           :: 2;
+        _                       :: 14;
+    }
+}
+
+Data_Stage_TRB :: struct {
+    data_pointer: u64;
+
+    dword2: enum u32 {
+        trb_transfer_length    :: 17;
+        td_size                :: 5;
+        interrupt_target       :: 10;
+    }
+
+    dword3: enum u32 {
+        cycle_bit              :: 1;
+        evaluate_next_trb      :: 1;
+        interrupt_on_short_packet :: 1;
+        no_snoop               :: 1;
+        chain_bit              :: 1;
+        interrupt_on_completion :: 1;
+        immediate_data         :: 1;
+        _                      :: 3;
+        trb_type               :: 6;
+        direction              :: 1;
+        _                      :: 15;
+    }
+}
+
+Status_Stage_TRB :: struct {
+    _: u64;
+
+    dword2: enum u32 {
+        _                :: 22;
+        interrupt_target :: 10;
+    }
+
+    dword3: enum u32 {
+        cycle_bit               :: 1;
+        evaluate_next_trb       :: 1;
+        _                       :: 2;
+        chain_bit               :: 1;
+        interrupt_on_completion :: 1;
+        _                       :: 4;
+        trb_type                :: 6;
+        direction               :: 1;
+        _                       :: 15;
+    }
+}
+
+Command_Completion_TRB :: struct {
+    command_trb_pointer: u64;
+
+    dword2: enum u32 {
+        _                 :: 24;
+        completion_code   :: 8;
+    }
+
+    dword3: enum u32 {
+        cycle_bit         :: 1;
+        _                 :: 9;
+        trb_type          :: 6;
+        vf_id             :: 8;
+        slod_id           :: 8;
+    }
+}
+
+Link_TRB :: struct {
+    ring_segment_pointer: u64;
+
+    dword2: enum u32 {
+        _                :: 22;
+        interrupt_target :: 10;
+    }
+
+    dword3: enum u32 {
+        cycle_bit               :: 1;
+        toggle_cycle            :: 1;
+        _                       :: 2;
+        chain_bit               :: 1;
+        interrupt_on_completion :: 1;
+        _                       :: 4;
+        trb_type                :: 6;
+        _                       :: 16;
+    }
+}
+
+Event_Data_TRB :: struct {
+    event_data: u64;
+
+    dword2: enum u32 {
+        _                :: 22;
+        interrupt_target :: 10;
+    }
+
+    dword3: enum u32 {
+        cycle_bit               :: 1;
+        evaluate_next_trb       :: 1;
+        _                       :: 2;
+        chain_bit               :: 1;
+        interrupt_on_completion :: 1;
+        _                       :: 3;
+        block_event_interrupt   :: 1;
+        trb_type                :: 6;
+        _                       :: 16;
+    }
+}
+
+Transfer_Event_TRB :: struct {
+    event_data: u64;
+
+    dword2: enum u32 {
+        trb_transfer_length   :: 17;
+        completion_code       :: 8;
+    }
+
+    dword3: enum u32 {
+        cycle_bit               :: 1;
+        _                       :: 1;
+        event_data              :: 1;
+        interrupt_on_completion :: 7;
+        trb_type                :: 6;
+        endpoint_id             :: 5;
+        _                       :: 3;
+        slot_id                 :: 8;
+    }
 }
 
 Slot_Context :: struct {
@@ -221,6 +431,7 @@ Slot_Context :: struct {
         entry_count     :: 5;
     }
 
+    // No reason for this to be a bitfield, but maybe it should be one for consistency.
     max_exit_latency:     u16;
     root_hub_port_number: u8;
     number_of_ports:      u8;
@@ -232,6 +443,14 @@ Slot_Context :: struct {
         _                  :: 4;
         interrupter_target :: 10;
     }
+
+    dword3: enum u32 {
+        device_address     :: 8;
+        _                  :: 19;
+        slot_state         :: 5;
+    }
+
+    // There may be four zeroed DWORDS here, depending on HCCPARAMS1.CSZ.
 }
 
 reset_port :: (controller: USB_Controller, port: *XHCI_Port_Register_Set) -> success: bool {

@@ -77,7 +77,7 @@ flush_file_system :: (fs: *Mounted_File_System) {
 
 
 
-map_file :: (fs: File_System, id: s64, virtual_base := null, read_only := false, for_userspace := false) -> string {
+map_file :: (fs: File_System, id: s64, virtual_base := null, read_only := false, for_userspace := false, arena: *Physical_Memory_Arena = null) -> string {
     // We don't do lazy loading yet. This will read the whole file into RAM and keep it there.
 
     inode := lookup_inode(fs, id);
@@ -113,7 +113,7 @@ map_file :: (fs: File_System, id: s64, virtual_base := null, read_only := false,
 
         if it.flags & .PRESENT continue;
 
-        new_table := get_4k_page();
+        new_table := ifx arena then arena_get(arena, 4096, 4096) else get_4k_page();
 
         it.value  = new_table;
         it.flags |= .PRESENT | extra_flags;
@@ -313,7 +313,7 @@ create_file_mapping :: (id: u64, virtual_address: *void) {
         return;
     }
 
-    map_file(file.file_system, file.inode_id, virtual_address, file.opened_for == .READING, true);
+    map_file(file.file_system, file.inode_id, virtual_address, file.opened_for == .READING, true, *process.arena);
 } @Syscall(42)
 
 flush_file :: (id: u64) {

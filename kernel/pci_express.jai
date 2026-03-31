@@ -899,7 +899,7 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
     nic.tx_queue_tail += 1;
     nic.TDT__transmit_descriptor_tail = nic.tx_queue_tail;
 
-    if Timeout(nic.TPT__total_packets_transmitted) {
+    if Timeout(nic.TPT__total_packets_transmitted) { // Todo: Synchronous.
         log_error("Failed to transmit network packet. (%)", desc.status);
     }
 

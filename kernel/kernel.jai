@@ -342,12 +342,14 @@ kernel_entry :: () #no_context {
 
             if it.combined_class_code == {
               case .SATA_CONTROLLER;
-                sata, success := init_sata_controller(it);
-                if success {
-                    global.sata = sata;
+                if !global.sata {
+                    sata, success := init_sata_controller(it);
+                    if success {
+                        global.sata = sata;
 
-                    sata_sd.data_pointer = sata;
-                    sata_sd.transfer     = sata_transfer;
+                        sata_sd.data_pointer = sata;
+                        sata_sd.transfer     = sata_transfer;
+                    }
                 }
 
               case .NVME_CONTROLLER;
@@ -355,10 +357,10 @@ kernel_entry :: () #no_context {
                 global.nvme = nvme_sd.data_pointer;
 
               case .I8254X_ETHERNET;
-                global.network_connection.adapter = init_i8254x(it);
+                // global.network_connection.adapter = init_i8254x(it);
 
               case .HIGH_DEFINITION_AUDIO;
-                init_high_definition_audio_controller(it);
+                // init_high_definition_audio_controller(it);
 
               case .UNIVERSAL_SERIAL_BUS;
                 init_usb_controller(it);
@@ -816,16 +818,16 @@ append_formatted_stack_trace :: (builder: *String_Builder, trace: []u32, use_deb
         address := cast(u64)it + 0xffff_ffff_0000_0000;
 
         if !use_debug_info {
-            print(builder, "%. [%]\n", it_index, formatInt(address, base=16));
+            print(builder, "%. [%]\n", dec(it_index), hex(address));
             continue;
         }
 
         proc_name, file, line := get_debug_info_for_address(address);
 
-        print(builder, "%. [%] %\n", it_index, formatInt(address, base=16), proc_name);
+        print(builder, "%. [%] %\n", dec(it_index), hex(address), proc_name);
 
         if file {
-            print(builder, "   at %:%\n", file, line);
+            print(builder, "   at %:%\n", file, dec(line));
         }
     }
 }
@@ -1327,6 +1329,35 @@ map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_f
     }
 }
 
+map_pages :: (virtual_start: *void, arena: *Physical_Memory_Arena, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
+    assert(virtual_start  & 0xfff == null);
+
+    for VM_Iterator.{virtual_start, page_count} {
+        assert(it.flags & .PAGE_SIZE == 0);
+
+        if it.level == 0 {
+            assert(it.flags & .PRESENT == 0);
+
+            physical := arena_get(arena, 4096, 4096);
+
+            it.value  = physical;
+            it.flags |= page_flags;
+
+            continue;
+        }
+
+        // It's a page table, create it if it doesn't exist.
+
+        // Note this means that the page flags will not be changed at this level.
+        if it.flags & .PRESENT continue;
+
+        new_table := arena_get(arena, 4096, 4096);
+
+        it.value  = new_table;
+        it.flags |= page_flags;
+    }
+}
+
 change_page_flags :: (virtual_start: *void, page_count: int, new_page_flags: Page_Flags) {
     assert(virtual_start & 0xfff == null);
 
@@ -1627,6 +1658,10 @@ resize_block :: (using allocator: *Block_Allocator, address: u64, new_size: u64)
 
     assert(block && block.used);
 
+    if block.size >= new_size {
+        return true;
+    }
+
     if m == blocks.count-1 {
         return false;
     }
@@ -1916,6 +1951,65 @@ remove_object :: (storage: *Id_Based_Storage, id: int) {
 
     assert(false);
     release(*storage.spinlock);
+}
+
+
+
+Physical_Memory_Arena :: struct {
+    pages: [..] s32;
+    current_offset: int;
+
+    // This alignment is not provided to the user automatically, but is here for catching errors
+    // in the client code. So clients should only make allocations that are a multiple of this.
+    // If the client wants a certain alignment, they can pass that for the size and boundary value,
+    // provided the alignment is the same size or larger than the allocation. Must be a power of 2.
+    // Todo: Maybe this should be a parameter to "get", and be applied automatically.
+    alignment := 4096;
+}
+
+arena_get :: (using arena: *Physical_Memory_Arena, bytes: int, boundary: int = 0) -> u64 {
+    assert(bytes & (alignment-1) == 0);
+
+    if boundary {
+        // It's common that physical memory allocations must not cross a multiple of an N-byte boundary in memory.
+        offset_in_boundary := (current_offset & (boundary-1));
+
+        if offset_in_boundary + bytes > boundary {
+            current_offset += boundary - offset_in_boundary;
+        }
+    }
+
+    if !pages || current_offset + bytes > 0x20_0000 {
+        new_page := allocate_large_page();
+
+        // Store the page index because it makes the array only half as big, and still supports thousands of terabytes of RAM.
+        array_add(*pages, cast(s32) (new_page / 0x20_0000));
+        current_offset = 0;
+    }
+
+    current_offset += bytes;
+    return cast(u64) peek(pages) * 0x20_0000 + cast(u64) current_offset;
+}
+
+arena_get_mark :: (using arena: Physical_Memory_Arena) -> int {
+    // User will have to store the mark, because alignment is often so big that it's not a good idea to use the arena's memory to store it.
+    return pages.count * 0x20_0000 + current_offset;
+}
+
+arena_set_mark :: (using arena: *Physical_Memory_Arena, mark: int) {
+    current_offset  = mark & (0x1f_ffff);
+    pages_used     := mark / 0x20_0000;
+
+    for pages_used..pages.count-1 {
+        release_large_page(cast(u64) pages[it] * 0x20_0000);
+    }
+
+    array_resize(*pages, pages_used);
+}
+
+arena_reset :: (using arena: *Physical_Memory_Arena) {
+    array_reset(*pages);
+    current_offset = 0;
 }
 
 
@@ -2510,7 +2604,7 @@ draw_text :: (text: string) #no_context {
 
             count := cursor_y * line_height * framebuffer.stride;
 
-            // Inefficient when printing strings with many newlines.
+            // Inefficient when printing strings with many newlines. Todo: Circular buffer.
             memcpy(framebuffer.software_buffer + target, framebuffer.software_buffer + source, count * size_of(u32));
 
             if global.bluescreen_occurred {
@@ -2741,6 +2835,7 @@ Curve25519 :: #import "Curve25519";
 #load "file_system.jai";
 #load "nvme.jai";
 #load "sata.jai";
+#load "usb.jai";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";
