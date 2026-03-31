@@ -2317,18 +2317,6 @@ network_thread :: () #no_context {
     }
 }
 
-create_udp :: (ip: u32, port: u16) -> u64 {
-
-} @Syscall(71)
-
-transmit_udp :: (udp: u64, buffer: *void, bytes: int) {
-
-} @Syscall(72)
-
-receive_udp :: (udp: u64, buffer: *void, bytes: int) {
-
-} @Syscall(73)
-
 
 
 // SPSC ring buffer based on multiple articles by F.G.

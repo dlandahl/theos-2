@@ -359,6 +359,9 @@ kernel_entry :: () #no_context {
 
               case .HIGH_DEFINITION_AUDIO;
                 init_high_definition_audio_controller(it);
+
+              case .UNIVERSAL_SERIAL_BUS;
+                init_usb_controller(it);
             }
         }
 

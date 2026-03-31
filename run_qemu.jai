@@ -20,6 +20,9 @@
             -serial chardev:char0
             -chardev file,id=char1,path=logs/kernel_trace.bin
             -serial chardev:char1
+            -device qemu-xhci,id=xhci
+            -device usb-kbd,bus=xhci.0,port=1
+            -device usb-mouse,bus=xhci.0,port=4
             -m 2G
             -smp 4 
     QEMU_CMD);
