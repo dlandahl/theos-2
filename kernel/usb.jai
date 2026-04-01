@@ -1,11 +1,4 @@
 
-USB_Prog_IF :: enum {
-    UHCI :: 0x00;
-    OHCI :: 0x10;
-    EHCI :: 0x20;
-    XHCI :: 0x30;
-}
-
 USB_Controller :: struct {
     Socket :: struct {
         // Either of these may be null if the socket does not support that protocol.
@@ -20,39 +13,49 @@ USB_Controller :: struct {
 
     mmio: *void;
 
-    caps: *XHCI_Capability_Registers;
-    ops:  *XHCI_Operational_Registers;
+    caps:    *XHCI_Capability_Registers;
+    ops:     *XHCI_Operational_Registers;
+    runtime: *XHCI_Runtime_Registers;
+    doorbell: *u32;
 
     arena: Physical_Memory_Arena;
 }
 
+#program_export
+xhci_interrupt :: () #c_call {
+    write_string("\n\nXHCI interrupt received.\n\n\n");
+} @InterruptRoutine
+
 init_usb_controller :: (device: *PCI_Device) {
+    assert(device.combined_class_code == .UNIVERSAL_SERIAL_BUS);
+
     log_category("USB");
 
     ps := push_print_style();
     ps.base = 0x10;
     ps.use_newlines_if_long_form = true;
 
-    log("Found device with vendor %, interface %.", device.vendor_id, device.prog_if);
-
-    controller_type := cast(USB_Prog_IF) device.prog_if;
-
-    if controller_type != .XHCI {
-        log_error("Unsupported controller type: %.", controller_type);
+    if device.prog_if != 0x30 {
+        log_error("Unsupported controller type: %.", device.prog_if);
         return;
     }
 
-    using controller: USB_Controller;
+    device.command |= .BUS_MASTER | .MEMORY_SPACE;
+    device.command &= ~.INTERRUPT_DISABLE;
+
+    using xhci: USB_Controller;
 
     bar  := read_base_address_register(device, 0);
     mmio  = map_base_address_register(bar);
-
+    
     parse_pci_capability_list(device);
-    enabled := enable_msi_or_msi_x(device, null);
+    enabled := enable_msi_or_msi_x(device, isr__xhci_interrupt);
     log("Enabled interrupts: %", enabled);
 
-    caps = cast(*XHCI_Capability_Registers)   mmio;
-    ops  = cast(*XHCI_Operational_Registers) (mmio + caps.CAPLENGTH);
+    caps     = cast(*XHCI_Capability_Registers)   mmio;
+    ops      = cast(*XHCI_Operational_Registers) (mmio + caps.CAPLENGTH);
+    runtime  = cast(*XHCI_Runtime_Registers)     (mmio + caps.RTSOFF);
+    doorbell = cast(*u32)                        (mmio + caps.DBOFF);
 
     xecp := get(caps.HCCPARAMS1, .xECP__extended_caps_pointer); 
     assert(xecp != 0);
@@ -143,16 +146,18 @@ init_usb_controller :: (device: *PCI_Device) {
 
     // Todo: In the book there's another sleep here, but he doesn't say how long or what it's for.
 
-    page_size_flags := controller.ops.PAGESIZE & 0xffff;
+    page_size_flags := xhci.ops.PAGESIZE & 0xffff;
     if page_size_flags & 1 == 0 {
         log_error("4K page size is not supported.");
         return;
     }
 
-    controller.arena.alignment = 64;
+    xhci.arena.alignment = 64;
 
     {
-        physical             := arena_get(*controller.arena, size_of(Device_Context_Index), 4096);
+        // Setup device context array.
+
+        physical             := arena_get(*xhci.arena, size_of(Device_Context_Index), 4096);
         device_context_index := cast(*Device_Context_Index) (physical + DIRECT_MAPPING_BASE);
 
         // Allocate scratchpad buffers.
@@ -161,31 +166,46 @@ init_usb_controller :: (device: *PCI_Device) {
 
         if number_of_scratchpad_buffers != 0 {
             size := align(64, number_of_scratchpad_buffers * size_of(u64));
-            device_context_index.scratchpad_buffers = arena_get(*controller.arena, size, 4096);
+            device_context_index.scratchpad_buffers = arena_get(*xhci.arena, size, 4096);
 
             write_pointer := cast(*u64) (device_context_index.scratchpad_buffers + DIRECT_MAPPING_BASE);
 
             for 0..number_of_scratchpad_buffers-1 {
-                write_pointer[it] = arena_get(*controller.arena, 4096, 4096);
+                write_pointer[it] = arena_get(*xhci.arena, 4096, 4096);
             }
-         }
+        }
 
         max_slots    :=     get    (caps.HCSPARAMS1, .MaxSlots);
         context_size := ifx get_bit(caps.HCCPARAMS1, .CSZ__context_size) then 2048 else 1024;
 
         for 0..max_slots-1 {
-            device_context_index.device_contexts[it] = arena_get(*controller.arena, context_size, 4096);
+            device_context_index.device_contexts[it] = arena_get(*xhci.arena, context_size, 4096);
         }
 
         ops.DCBAAP = physical;
     }
 
-    command_ring := get_4k_page();
 
-    crcr := ops.CRCR;
-    set_bit     (*crcr, .RCS__ring_cycle_state);
-    set_in_place(*crcr, .command_ring_pointer, command_ring);
-    ops.CRCR = crcr;
+    command_ring_physical := arena_get(*xhci.arena, 0x1_0000, 0x1_0000);
+
+    set_bit     (*ops.CRCR, .RCS__ring_cycle_state);
+    set_in_place(*ops.CRCR, .command_ring_pointer, command_ring_physical);
+
+    // event_ring_max_segments := get(caps.HCSPARAMS2, .ERST_Max);
+
+    segment_table_physical := arena_get(*xhci.arena, 64 * size_of(Event_Ring_Segment_Table_Entry), 0x1_0000);
+    segment_table := cast(*Event_Ring_Segment_Table_Entry) (segment_table_physical + DIRECT_MAPPING_BASE);
+
+    for 0..63 {
+        segment_table[it].size = 4096;
+        segment_table[it].base_address = arena_get(*xhci.arena, size_of(Transfer_Event_TRB) * 4096, 0x1_0000);
+    }
+
+    primary_interrupter := *xhci.runtime.IR[0];
+    primary_interrupter.IMAN__interrupter_management |= .IE__interrupt_enable;
+    primary_interrupter.ERSTS\__event_ring_segment_table_size = 64;
+    primary_interrupter.ERSTBA__event_ring_segment_table_base = segment_table_physical;
+
 
     set(*ops.CONFIG, .MaxSlotsEn, get(caps.HCSPARAMS1, .MaxSlots));
 
@@ -194,15 +214,31 @@ init_usb_controller :: (device: *PCI_Device) {
     ops.USBCMD = .RS__run_stop | .INTE__interrupter_enable | .HSEE__host_system_error_enable;
 
     if Timeout(ops.USBSTS & .HC_Halted == 0) {
-        log_error("Start schedule timeout, host controller halted.");
+        log_error("Start schedule timeout, host xhci halted.");
         return;
     }
 
     // Reset ports.
     for *sockets {
-        it.usb3_active = reset_port(controller, it.usb3_port);
-        it.usb2_active = reset_port(controller, it.usb2_port);
+        it.usb3_active = reset_port(xhci, it.usb3_port);
+        it.usb2_active = reset_port(xhci, it.usb2_port);
     }
+
+
+    command_ring := cast(*Normal_TRB) (command_ring_physical + DIRECT_MAPPING_BASE);
+    set(*command_ring[0].dword3, .trb_type, 9);
+    set(*command_ring[0].dword3, .interrupt_on_completion, 1);
+    set(*command_ring[0].dword3, .cycle_bit, 1);
+
+    memory_fence();
+    doorbell.* = 0;
+
+    log("Interrupter management: %", primary_interrupter.IMAN__interrupter_management);
+
+    event_ring := cast(*Transfer_Event_TRB) (segment_table[0].base_address + DIRECT_MAPPING_BASE);
+    log("%", event_ring[0]);
+
+    while true #asm { hlt; }
 }
 
 Device_Context_Index :: struct {
@@ -250,24 +286,24 @@ Endpoint_Context :: struct {
 Normal_TRB :: struct {
     data_pointer: u64;
 
-    dword2 :: enum u32 {
+    dword2: enum u32 {
         transfer_length    :: 17;
         td_size            :: 5;
         interrupt_target   :: 10;
     }
 
-    dword3 :: enum u32 {
-        cycle_bit              :: 1;
-        evaluate_next_trb      :: 1;
+    dword3: enum u32 {
+        cycle_bit                 :: 1;
+        evaluate_next_trb         :: 1;
         interrupt_on_short_packet :: 1;
-        no_snoop               :: 1;
-        chain_bit              :: 1;
-        interrupt_on_completion :: 1;
-        immediate_data         :: 1;
-        _                      :: 2;
-        block_event_interrupt  :: 1;
-        trb_type               :: 6;
-        _                      :: 16;
+        no_snoop                  :: 1;
+        chain_bit                 :: 1;
+        interrupt_on_completion   :: 1;
+        immediate_data            :: 1;
+        _                         :: 2;
+        block_event_interrupt     :: 1;
+        trb_type                  :: 6;
+        _                         :: 16;
     }
 }
 
@@ -280,12 +316,12 @@ Setup_Stage_TRB :: struct {
     w_length: u16;
 
     dword2: enum u32 {
-        trb_transfer_length   :: 17;
-        _                     :: 5;
-        interrupt_target      :: 10;
+        trb_transfer_length     :: 17;
+        _                       :: 5;
+        interrupt_target        :: 10;
     }
 
-    dword3 :: enum u32 {
+    dword3: enum u32 {
         cycle_bit               :: 1;
         _                       :: 4;
         interrupt_on_completion :: 1;
@@ -307,17 +343,17 @@ Data_Stage_TRB :: struct {
     }
 
     dword3: enum u32 {
-        cycle_bit              :: 1;
-        evaluate_next_trb      :: 1;
+        cycle_bit                 :: 1;
+        evaluate_next_trb         :: 1;
         interrupt_on_short_packet :: 1;
-        no_snoop               :: 1;
-        chain_bit              :: 1;
-        interrupt_on_completion :: 1;
-        immediate_data         :: 1;
-        _                      :: 3;
-        trb_type               :: 6;
-        direction              :: 1;
-        _                      :: 15;
+        no_snoop                  :: 1;
+        chain_bit                 :: 1;
+        interrupt_on_completion   :: 1;
+        immediate_data            :: 1;
+        _                         :: 3;
+        trb_type                  :: 6;
+        direction                 :: 1;
+        _                         :: 15;
     }
 }
 
@@ -422,6 +458,7 @@ Transfer_Event_TRB :: struct {
 
 Slot_Context :: struct {
     // First entry in a device context data block, pointed-to by an entry in the device context index array.
+
     dword0: enum u32 {
         route_string    :: 20;
         speed           :: 4;
@@ -453,10 +490,10 @@ Slot_Context :: struct {
     // There may be four zeroed DWORDS here, depending on HCCPARAMS1.CSZ.
 }
 
-reset_port :: (controller: USB_Controller, port: *XHCI_Port_Register_Set) -> success: bool {
+reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Register_Set) -> success: bool {
     if !port return false; // Allowed so the caller can treat USB2 and 3 ports on the same socket the same, even if one or the other is not present.
 
-    if get(controller.caps.HCCPARAMS1, .PPC__port_power_control) {
+    if get(xhci.caps.HCCPARAMS1, .PPC__port_power_control) {
         // Ports may need to be powered on manually.
 
         set_bit(*port.PORTSC, .PP__power);
@@ -466,10 +503,6 @@ reset_port :: (controller: USB_Controller, port: *XHCI_Port_Register_Set) -> suc
             return false;
         }
     }
-
-    // if get_bit(port.PORTSC, .CCS__current_connect_status) {
-    //     return true; // Ports that are already
-    // }
 
     // Clear status change flags.
     // Todo: Bitfields don't have a good way to set multiple fields at once.
@@ -483,13 +516,78 @@ reset_port :: (controller: USB_Controller, port: *XHCI_Port_Register_Set) -> suc
 
     set_bit(*port.PORTSC, .PR__reset);
 
-    if Timeout(get_bit(port.PORTSC, .PRC__reset_change), time_ms = 10) {
+    if Timeout(get_bit(port.PORTSC, .PRC__reset_change), time_ms = 1) {
         // Not an error, there's just no device connected.
         return false;
     }
 
     return get_bit(port.PORTSC, .PED__enabled_disabled);
 }
+
+XHCI_Capability_Registers :: struct {
+    CAPLENGTH:       u8;
+    _:               u8;
+    HCIVERSION:      u16;
+
+    HCSPARAMS1:      enum u32 {
+        MaxSlots     :: 8;
+        MaxIntrs     :: 11;
+        _            :: 5;
+        MaxPorts     :: 8;
+    }
+
+    HCSPARAMS2:      enum u32 {
+        IST                    :: 4;
+        ERST_Max               :: 4;
+        _                      :: 13;
+        Max_Scratchpad_Bufs_Hi :: 5;
+        SPR                    :: 1;
+        Max_Scratchpad_Bufs_Lo :: 5;
+    }
+
+    HCSPARAMS3:      enum u32 {
+        U1_Device_Exit_Latency   :: 8;
+        _                        :: 8;
+        U2_Device_Exit_Latency   :: 16;
+    }
+
+    HCCPARAMS1:      enum u32 {
+        AC64          :: 1;
+        BNC           :: 1;
+        CSZ__context_size       :: 1;
+        PPC__port_power_control :: 1;
+        PIND          :: 1;
+        LHRC          :: 1;
+        LTC           :: 1;
+        NSS           :: 1;
+        PAE           :: 1;
+        SPC           :: 1;
+        SEC           :: 1;
+        CFC           :: 1;
+        MaxPSASize    :: 4;
+        xECP__extended_caps_pointer :: 16;
+    }
+
+    DBOFF:           u32;
+    RTSOFF:          u32;
+
+    HCCPARAMS2:      enum_flags u32 {
+        U3C           :: 0x1;
+        CMC           :: 0x2;
+        FSC           :: 0x4;
+        CTC           :: 0x8;
+        LEC           :: 0x10;
+        CIC           :: 0x20;
+        ETC           :: 0x40;
+        ETC_TSC       :: 0x80;
+        GSC           :: 0x100;
+        VTC           :: 0x200;
+    }
+
+    VTIOSOFF:        u32;
+}
+
+#assert size_of(XHCI_Capability_Registers) == 0x24;
 
 XHCI_Operational_Registers :: struct {
     start: void;
@@ -583,73 +681,37 @@ XHCI_Port_Register_Set :: struct {
     PORTHLPMC: u32;
 }
 
-XHCI_Capability_Registers :: struct {
-    CAPLENGTH:       u8;
-    _:               u8;
-    HCIVERSION:      u16;
+XHCI_Runtime_Registers :: struct {
+    // Base address of this register space is (caps + caps.RTSOFF) (section 5.3.8).
 
-    HCSPARAMS1:      enum u32 {
-        MaxSlots     :: 8;
-        MaxIntrs     :: 11;
-        _            :: 5;
-        MaxPorts     :: 8;
-    }
-
-    HCSPARAMS2:      enum u32 {
-        IST                    :: 4;
-        ERST_Max               :: 4;
-        _                      :: 13;
-        Max_Scratchpad_Bufs_Hi :: 5;
-        SPR                    :: 1;
-        Max_Scratchpad_Bufs_Lo :: 5;
-    }
-
-    HCSPARAMS3:      enum u32 {
-        U1_Device_Exit_Latency   :: 8;
-        _                        :: 8;
-        U2_Device_Exit_Latency   :: 16;
-    }
-
-    HCCPARAMS1:      enum u32 {
-        AC64          :: 1;
-        BNC           :: 1;
-        CSZ__context_size       :: 1;
-        PPC__port_power_control :: 1;
-        PIND          :: 1;
-        LHRC          :: 1;
-        LTC           :: 1;
-        NSS           :: 1;
-        PAE           :: 1;
-        SPC           :: 1;
-        SEC           :: 1;
-        CFC           :: 1;
-        MaxPSASize    :: 4;
-        xECP__extended_caps_pointer :: 16;
-    }
-
-    DBOFF:           u32;
-    RTSOFF:          u32;
-
-    HCCPARAMS2:      enum_flags u32 {
-        U3C           :: 0x1;
-        CMC           :: 0x2;
-        FSC           :: 0x4;
-        CTC           :: 0x8;
-        LEC           :: 0x10;
-        CIC           :: 0x20;
-        ETC           :: 0x40;
-        ETC_TSC       :: 0x80;
-        GSC           :: 0x100;
-        VTC           :: 0x200;
-    }
-
-    VTIOSOFF:        u32;
+    MFINDEX:       u32;
+    _:         [7] u32;
+    IR:     [1024] XHCI_Interrupter_Register_Set;
 }
 
-#assert size_of(XHCI_Capability_Registers) == 0x24;
+XHCI_Interrupter_Register_Set :: struct {
+    IMAN__interrupter_management: enum_flags u32 {
+        IP__interrupt_pending;
+        IE__interrupt_enable;
+    }
+
+    // IMOD (interrupter moderation) register.
+    IMODI__interrupter_moderation_interval: u16;
+    IMODC__interrupter_moderation_counter:  u16;
+
+    // ERSTSZ register
+    ERSTS__event_ring_segment_table_size: u16;
+    _: u16;
+    _: u32;
+
+    ERSTBA__event_ring_segment_table_base: u64;
+    ERDP__event_ring_dequeue_pointer:    u64;
+}
+
+#assert size_of(XHCI_Interrupter_Register_Set) == 0x20;
 
 xHCI_Protocol_List_Entry :: struct {
-    #as dword0: enum u32 { // My physical hardware supports misaligned accesses here, but QEMU doesn't... WTH.
+    #as dword0: enum u32 { // My physical hardware supports misaligned accesses here, but QEMU doesn't...
         id               :: 8;
         next_offset      :: 8;
         revision_minor   :: 8;
@@ -667,3 +729,15 @@ xHCI_Protocol_List_Entry :: struct {
 
     slot_type: u32;
 }
+
+Event_Ring_Segment_Table_Entry :: struct {
+    // Pointed-to by XHCI_Interrupter_Register_Set.ERSTBA
+
+    base_address: u64;
+    size: u16;
+
+    _:  u16;
+    _:  u32;
+}
+
+#assert size_of(Event_Ring_Segment_Table_Entry) == 16;

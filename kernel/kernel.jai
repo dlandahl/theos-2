@@ -1967,11 +1967,14 @@ Physical_Memory_Arena :: struct {
     alignment := 4096;
 }
 
-arena_get :: (using arena: *Physical_Memory_Arena, bytes: int, boundary: int = 0) -> u64 {
+arena_get :: (using arena: *Physical_Memory_Arena, bytes: int, boundary := 0) -> u64 {
     assert(bytes & (alignment-1) == 0);
+    assert(boundary >= 0 && boundary < 0x20_0000);
 
     if boundary {
         // It's common that physical memory allocations must not cross a multiple of an N-byte boundary in memory.
+        assert(bytes <= boundary);
+
         offset_in_boundary := (current_offset & (boundary-1));
 
         if offset_in_boundary + bytes > boundary {
@@ -1988,7 +1991,11 @@ arena_get :: (using arena: *Physical_Memory_Arena, bytes: int, boundary: int = 0
     }
 
     current_offset += bytes;
-    return cast(u64) peek(pages) * 0x20_0000 + cast(u64) current_offset;
+
+    result := cast(u64) peek(pages) * 0x20_0000 + cast(u64) current_offset;
+    memset(cast(*void) result + DIRECT_MAPPING_BASE, 0, bytes);
+
+    return result;
 }
 
 arena_get_mark :: (using arena: Physical_Memory_Arena) -> int {
