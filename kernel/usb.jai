@@ -24,6 +24,7 @@ USB_Controller :: struct {
 #program_export
 xhci_interrupt :: () #c_call {
     write_string("\n\nXHCI interrupt received.\n\n\n");
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 init_usb_controller :: (device: *PCI_Device) {
@@ -193,23 +194,34 @@ init_usb_controller :: (device: *PCI_Device) {
 
     // event_ring_max_segments := get(caps.HCSPARAMS2, .ERST_Max);
 
-    segment_table_physical := arena_get(*xhci.arena, 64 * size_of(Event_Ring_Segment_Table_Entry), 0x1_0000);
+    event_ring_segment_count :: 1;
+
+    segment_table_physical := arena_get(*xhci.arena, align(64, event_ring_segment_count * size_of(Event_Ring_Segment_Table_Entry)), 0x1_0000);
     segment_table := cast(*Event_Ring_Segment_Table_Entry) (segment_table_physical + DIRECT_MAPPING_BASE);
 
-    for 0..63 {
+    for 0..event_ring_segment_count-1 {
         segment_table[it].size = 4096;
         segment_table[it].base_address = arena_get(*xhci.arena, size_of(Transfer_Event_TRB) * 4096, 0x1_0000);
     }
 
     primary_interrupter := *xhci.runtime.IR[0];
-    primary_interrupter.IMAN__interrupter_management |= .IE__interrupt_enable;
-    primary_interrupter.ERSTS\__event_ring_segment_table_size = 64;
+    primary_interrupter.* = {};
+    primary_interrupter.ERSTS__event_ring_segment_table_size = cast(u32) event_ring_segment_count;
     primary_interrupter.ERSTBA__event_ring_segment_table_base = segment_table_physical;
+    primary_interrupter.ERDP__event_ring_dequeue_pointer = segment_table[0].base_address;
+    primary_interrupter.IMAN__interrupter_management = .IP__interrupt_pending | .IE__interrupt_enable;
 
 
     set(*ops.CONFIG, .MaxSlotsEn, get(caps.HCSPARAMS1, .MaxSlots));
 
     ops.DNCTRL = 0x0002; // Notification type FUNCTION_WAKE. Todo: Magic number.
+    ops.USBSTS = .HSE__host_system_error
+               | .EINT__event_interrupt
+               | .PCD__port_change_detected
+               | .SSS__save_state_status
+               | .RSS__save_restore_status
+               | .SRE__save_restore_error
+               | .HCE__host_controller_error;
 
     ops.USBCMD = .RS__run_stop | .INTE__interrupter_enable | .HSEE__host_system_error_enable;
 
@@ -607,6 +619,7 @@ XHCI_Operational_Registers :: struct {
         HC_Halted;
         _;
         HSE__host_system_error;
+        EINT__event_interrupt;
         PCD__port_change_detected;
         _;
         _;
@@ -616,7 +629,6 @@ XHCI_Operational_Registers :: struct {
         SRE__save_restore_error;
         CNR__controller_not_ready;
         HCE__host_controller_error;
-       
     }
 
     PAGESIZE:      u32;
