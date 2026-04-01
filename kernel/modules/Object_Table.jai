@@ -60,14 +60,7 @@ add_object :: (table: *Object_Table) -> *table.Object, id: u64 {
 }
 
 remove_object :: (table: *Object_Table, id: u64) -> bool {
-    handle := cast(Handle) id;
-
-    locator: Bucket_Locator;
-    locator.slot_index    = cast(s32) get(handle, .slot_index);
-    locator.bucket_index  = cast(u32) get(handle, .bucket_index);
-    generation           := cast(u32) get(handle, .generation);
-
-    slot := check_generation(table, locator, generation);
+    slot, locator := lookup(table, id);
     if slot == null return false; // The slot isn't occupied, or the generation doesn't match.
 
     bucket_array_remove(*table.array, locator);
@@ -76,7 +69,7 @@ remove_object :: (table: *Object_Table, id: u64) -> bool {
     return true;
 }
 
-lookup :: (table: *Object_Table, id: u64) -> *table.Object {
+lookup :: (table: *Object_Table, id: u64) -> *table.Object, Bucket_Locator {
     handle := cast(Handle) id;
 
     locator: Bucket_Locator;
@@ -85,5 +78,5 @@ lookup :: (table: *Object_Table, id: u64) -> *table.Object {
     generation           := cast(u32) get(handle, .generation);
 
     slot := check_generation(table, locator, generation);
-    return slot;
+    return slot, locator;
 }
