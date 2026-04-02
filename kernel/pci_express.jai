@@ -34,7 +34,7 @@ find_all_pci_devices :: () {
 
     for global.pci_ecam {
         for bus: it.start_bus..it.end_bus {
-            for device: 0..255 {
+            for device: 0..0x1f {
                 header := read_configuration_space(it.base_address, bus, device, 0);
                 if !header continue;
 

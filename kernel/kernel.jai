@@ -110,6 +110,7 @@ Kernel_Globals :: struct {
 
     nvme: *Nvme_Controller;
     sata: *Sata_Controller;
+    xhci: USB_Controller;
 
     file_system: *Mounted_File_System;
 
@@ -1959,6 +1960,8 @@ Physical_Memory_Arena :: struct {
     pages: [..] s32;
     current_offset: int;
 
+    lost_to_boundary_requirement: int;
+
     // This alignment is not provided to the user automatically, but is here for catching errors
     // in the client code. So clients should only make allocations that are a multiple of this.
     // If the client wants a certain alignment, they can pass that for the size and boundary value,
@@ -1978,7 +1981,10 @@ arena_get :: (using arena: *Physical_Memory_Arena, bytes: int, boundary := 0) ->
         offset_in_boundary := (current_offset & (boundary-1));
 
         if offset_in_boundary + bytes > boundary {
-            current_offset += boundary - offset_in_boundary;
+            required_padding := boundary - offset_in_boundary;
+
+            lost_to_boundary_requirement += required_padding;
+            current_offset               += required_padding;
         }
     }
 
@@ -2000,10 +2006,11 @@ arena_get :: (using arena: *Physical_Memory_Arena, bytes: int, boundary := 0) ->
 
 arena_get_mark :: (using arena: Physical_Memory_Arena) -> int {
     // User will have to store the mark, because alignment is often so big that it's not a good idea to use the arena's memory to store it.
-    return pages.count * 0x20_0000 + current_offset;
+    return (pages.count - 1) * 0x20_0000 + current_offset;
 }
 
 arena_set_mark :: (using arena: *Physical_Memory_Arena, mark: int) {
+    // Todo: Doesn't track lost_to_boundary_requirement properly.
     current_offset  = mark & (0x1f_ffff);
     pages_used     := mark / 0x20_0000;
 
@@ -2017,6 +2024,21 @@ arena_set_mark :: (using arena: *Physical_Memory_Arena, mark: int) {
 arena_reset :: (using arena: *Physical_Memory_Arena) {
     array_reset(*pages);
     current_offset = 0;
+    lost_to_boundary_requirement = 0;
+}
+
+log_stats :: (using arena: Physical_Memory_Arena) {
+    push_print_style().base = 10;
+
+    log("Arena stats: pages = %, offset = %/%, lost = %", pages.count, current_offset, 0x20_0000, lost_to_boundary_requirement);
+
+    mark := arena_get_mark(arena);
+
+    percent_lost := (lost_to_boundary_requirement * 100) / mark;
+    // Measures all internal and external fragmentation, including if the most recent page is not filled.
+    percent_used := ((mark - lost_to_boundary_requirement) * 100) / (mark + 0x20_0000 - current_offset);
+
+    log("             lost = %\%, used = %\%", percent_lost, percent_used);
 }
 
 
