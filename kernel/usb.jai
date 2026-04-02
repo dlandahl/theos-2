@@ -10,6 +10,9 @@ USB_Controller :: struct {
         active_protocol: enum {
             NONE; USB3; USB2;
         }
+
+        device_context_index: int; // Index into the array in the Device_Context_Index struct.
+        device_context: *void; // Doesn't have a type, since the size of the context entries depends on capability flags in the controller.
     }
 
     sockets: [] Socket;
@@ -20,13 +23,20 @@ USB_Controller :: struct {
     using operational_registers:  *XHCI_Operational_Registers;
     using runtime_registers:      *XHCI_Runtime_Registers;
 
+    port_registers:             [] XHCI_Port_Register_Set;
+
     doorbells:  [] u32;
 
     event_ring: [] Transfer_Event_TRB;
     event_ring_tail: int;
     event_ring_cycle: bool;
 
+    command_ring: [] Normal_TRB;
+    command_ring_head: int;
+    command_ring_cycle: bool;
+
     arena: Physical_Memory_Arena;
+    semaphore: Semaphore;
 }
 
 #program_export
@@ -36,34 +46,7 @@ xhci_interrupt :: () #c_call {
 
     xhci := *global.xhci;
 
-    if !xhci.event_ring {
-        log("Got early interrupt.");
-        // Todo: Interrupt should not be enabled yet.
-        return;
-    }
-
-    xhci.IR[0].IMAN__interrupter_management |= .IP__interrupt_pending;
-
-    while true {
-        current_trb := *xhci.event_ring[xhci.event_ring_tail];
-
-        if get_bit(current_trb.dword3, .cycle_bit) != xhci.event_ring_cycle {
-            break;
-        }
-
-        type := get(current_trb.dword3, .trb_type);
-        log("Got TRB of type %.", cast(TRB_Type) type);
-
-        xhci.event_ring_tail += 1;
-
-        if xhci.event_ring_tail == xhci.event_ring.count {
-            xhci.event_ring_tail = 0;
-            xhci.event_ring_cycle = !xhci.event_ring_cycle;
-        }
-
-        erdp_virtual := *xhci.event_ring[xhci.event_ring_tail];
-        xhci.IR[0].ERDP__event_ring_dequeue_pointer = get_physical_address(erdp_virtual);
-    }
+    signal(*xhci.semaphore);
 } @InterruptRoutine
 
 init_usb_controller :: (device: *PCI_Device) {
@@ -84,6 +67,7 @@ init_usb_controller :: (device: *PCI_Device) {
     device.command &= ~.INTERRUPT_DISABLE;
 
     xhci := *global.xhci;
+    simple_create_thread(usb_thread);
 
     bar := read_base_address_register(device, 0);
     xhci.mmio_base = map_base_address_register(bar);
@@ -228,8 +212,9 @@ init_usb_controller :: (device: *PCI_Device) {
     primary_interrupter.ERDP__event_ring_dequeue_pointer = segment_table[0].base_address;
 
 
-
     command_ring_physical := arena_get(*xhci.arena, 0x1_0000, 0x1_0000);
+    xhci.command_ring.data  = cast(*Normal_TRB) (command_ring_physical + DIRECT_MAPPING_BASE);
+    xhci.command_ring.count = 0x1_0000 / size_of(Normal_TRB);
 
     set_bit     (*xhci.CRCR, .RCS__ring_cycle_state);
     set_in_place(*xhci.CRCR, .command_ring_pointer, command_ring_physical);
@@ -238,11 +223,12 @@ init_usb_controller :: (device: *PCI_Device) {
     set(*xhci.CONFIG, .MaxSlotsEn, get(xhci.HCSPARAMS1, .MaxSlots));
 
     xhci.DNCTRL = 0x0002; // Notification type FUNCTION_WAKE. Todo: Magic number.
+
     xhci.USBSTS = .HSE__host_system_error
-               | .EINT__event_interrupt
-               | .PCD__port_change_detected
-               | .HCE__host_controller_error;
-    
+                | .EINT__event_interrupt
+                | .PCD__port_change_detected
+                | .HCE__host_controller_error;
+
     xhci.USBCMD = .RS__run_stop | .INTE__interrupter_enable | .HSEE__host_system_error_enable;
 
     if Timeout(xhci.USBSTS & .HC_Halted == 0) {
@@ -258,17 +244,6 @@ init_usb_controller :: (device: *PCI_Device) {
         log("Resetting socket %. Active protocol: %", it_index+1, it.active_protocol);
     }
 
-
-    for 0..9 {
-        command_ring := cast(*Normal_TRB) (command_ring_physical + DIRECT_MAPPING_BASE);
-        command_ring[it] = {};
-        set(*command_ring[it].dword3, .trb_type, 9);
-        set(*command_ring[it].dword3, .interrupt_on_completion, 1);
-        set(*command_ring[it].dword3, .cycle_bit, 1);
-
-        memory_fence();
-        xhci.doorbells[0] = 0;
-    }
 
     log_stats(xhci.arena);
 
@@ -307,4 +282,76 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Register_Set) -> success: 
     }
 
     return get_bit(port.PORTSC, .PED__enabled_disabled);
+}
+
+usb_thread :: () {
+    xhci := *global.xhci;
+
+    while true {
+        wait_for(*xhci.semaphore);
+
+        current_trb := *xhci.event_ring[xhci.event_ring_tail];
+
+        if get_bit(current_trb.dword3, .cycle_bit) != xhci.event_ring_cycle {
+            continue;
+        }
+
+        type := cast(TRB_Type) get(current_trb.dword3, .trb_type);
+        log("Got TRB of type %.", type);
+
+        if type == {
+          case .PORT_STATUS_CHANGE_EVENT;
+            port := (current_trb.event_data >> 24) & 0xff;
+            log("Status change on port %", port);
+
+            head := xhci.command_ring_head;
+            xhci.command_ring[head] = {};
+            set(*xhci.command_ring[head].dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
+            set(*xhci.command_ring[head].dword3, .interrupt_on_completion, 1);
+            set(*xhci.command_ring[head].dword3, .cycle_bit, 1);
+            xhci.command_ring[head].data_pointer = (current_trb.event_data >> 24) & 0xff; // Store the port in the user data value.
+            xhci.command_ring_head += 1;
+
+            memory_fence();
+            xhci.doorbells[0] = 0;
+
+          case .COMMAND_COMPLETION_EVENT;
+            other_trb  := cast(*Normal_TRB) (current_trb.event_data + DIRECT_MAPPING_BASE);
+            other_type := cast(TRB_Type) get(other_trb.dword3, .trb_type);
+
+            if other_type == .ENABLE_SLOT_COMMAND {
+                // The controller has finished enabling a slot.
+                port    := cast(s64) other_trb.data_pointer;
+                slot_id := get(current_trb.dword3, .slot_id);
+
+                log("Enable slot completed, port: %, slot: %", port, slot_id);
+
+                if port >= xhci.port_registers.count {
+                    // Todo: Error.
+                }
+
+                // Find the USB socket that has been connected-to.
+                // register_set := *xhci.port_registers[port];
+                for xhci.sockets {
+
+                }
+            }
+        }
+
+        xhci.event_ring_tail += 1;
+
+        if xhci.event_ring_tail == xhci.event_ring.count {
+            xhci.event_ring_tail = 0;
+            xhci.event_ring_cycle = !xhci.event_ring_cycle;
+        }
+
+        erdp_virtual := *xhci.event_ring[xhci.event_ring_tail];
+        xhci.IR[0].ERDP__event_ring_dequeue_pointer = get_physical_address(erdp_virtual) | (1 << 3); // Todo: magic number.
+        xhci.IR[0].IMAN__interrupter_management |= .IP__interrupt_pending;
+
+        xhci.USBSTS = .HSE__host_system_error
+            | .EINT__event_interrupt
+            | .PCD__port_change_detected
+            | .HCE__host_controller_error;
+    }
 }
