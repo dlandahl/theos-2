@@ -158,6 +158,17 @@ XHCI_Port_Register_Set :: struct {
     PORTHLPMC: u32;
 }
 
+XHCI_Port_Speed :: enum u16 {
+    UNDEFINED           :: 0;
+    FULL_SPEED          :: 1;
+    LOW_SPEED           :: 2;
+    HIGH_SPEED          :: 3;
+    SUPER_SPEED_GEN1_1X :: 4;
+    SUPER_SPEED_GEN2_1X :: 5;
+    SUPER_SPEED_GEN1_2X :: 6;
+    SUPER_SPEED_GEN2_2X :: 7;
+}
+
 XHCI_Runtime_Registers :: struct {
     // Base address of this register space is (xhci.mmio_base + xhci.RTSOFF) (section 5.3.8).
 
@@ -219,6 +230,13 @@ Device_Context_Index :: struct {
 
 #assert size_of(Device_Context_Index) == 2048;
 
+Control_Context :: struct {
+    drop_flags:   u32;
+    add\_flags:   u32;
+
+    // This may be padded to 32 or 64 bytes depending on HCCPARAMS1.CSZ.
+}
+
 Endpoint_Context :: struct {
     dword0: enum u32 {
         endpoint_state       :: 3;
@@ -237,13 +255,13 @@ Endpoint_Context :: struct {
         _                     :: 1;
         host_initiate_disable :: 1;
         max_burst_size        :: 8;
-        max_packet_size       :: 8;
+        max_packet_size       :: 16;
     }
 
-    dword2_and_dword3 :: enum u64 {
+    dword2_and_dword3: enum u64 {
         dequeue_cycle_state   :: 1;
         _                     :: 3;
-        tr_dequeue_pointer    :: 63;
+        tr_dequeue_pointer    :: 60;
     }
 
     averate_trb_length: u16;

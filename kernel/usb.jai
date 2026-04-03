@@ -11,8 +11,12 @@ USB_Controller :: struct {
             NONE; USB3; USB2;
         }
 
-        device_context_index: int; // Index into the array in the Device_Context_Index struct.
         device_context: *void; // Doesn't have a type, since the size of the context entries depends on capability flags in the controller.
+
+        // Todo: This is really per endpoint within the socket.
+        transfer_ring:   [] Transfer_Event_TRB;
+        transfer_ring_head: int;
+        transfer_ring_cycle: bool;
     }
 
     sockets: [] Socket;
@@ -34,6 +38,8 @@ USB_Controller :: struct {
     command_ring: [] Normal_TRB;
     command_ring_head: int;
     command_ring_cycle: bool;
+
+    device_context_index: *Device_Context_Index;
 
     arena: Physical_Memory_Arena;
     semaphore: Semaphore;
@@ -59,6 +65,7 @@ init_usb_controller :: (device: *PCI_Device) {
     ps.use_newlines_if_long_form = true;
 
     if device.prog_if != 0x30 {
+        // This is not XHCI, but rather UHCI, EHCI, something like that, which don't support USB 3.0. Devices since about 2010 should have XHCI.
         log_error("Unsupported controller type: %.", device.prog_if);
         return;
     }
@@ -86,6 +93,9 @@ init_usb_controller :: (device: *PCI_Device) {
     xhci.doorbells.data          = cast(*u32)                        (xhci.mmio_base + xhci.DBOFF);
     xhci.doorbells.count         = get(xhci.HCSPARAMS1, .MaxSlots) + 1; // Plus one for the command ring doorbell.
 
+    xhci.port_registers.data     = *xhci.port_register_set_base;
+    xhci.port_registers.count    = get(xhci.HCSPARAMS1, .MaxPorts);
+
     xecp := get(xhci.HCCPARAMS1, .xECP__extended_caps_pointer); 
     assert(xecp != 0);
 
@@ -109,14 +119,13 @@ init_usb_controller :: (device: *PCI_Device) {
             port_offset       := get(list.dword2, .compatible_port_offset) - 1; // One-based field, convert to zero-based.
             port_count        := get(list.dword2, .compatible_port_count);
             protocol_version  := get(list.*,      .revision_major);
-
+            
             if port_count > xhci.sockets.count  array_resize(*xhci.sockets, port_count);
 
             // Find the register sets used by each socket for USB2 and USB3.
-            register_set_base := cast(*XHCI_Port_Register_Set) *xhci.port_register_set_base;
 
             for 0..port_count-1 {
-                register_set := register_set_base + port_offset + it;
+                register_set := *xhci.port_registers[port_offset + it];
                 socket       := *xhci.sockets[it];
 
                 if protocol_version == {
@@ -161,8 +170,8 @@ init_usb_controller :: (device: *PCI_Device) {
     {
         // Setup device context array.
 
-        physical             := arena_get(*xhci.arena, size_of(Device_Context_Index), 4096);
-        device_context_index := cast(*Device_Context_Index) (physical + DIRECT_MAPPING_BASE);
+        physical                  := arena_get(*xhci.arena, size_of(Device_Context_Index), 4096);
+        xhci.device_context_index  = cast(*Device_Context_Index) (physical + DIRECT_MAPPING_BASE);
 
         // Allocate scratchpad buffers.
         number_of_scratchpad_buffers := get(xhci.HCSPARAMS2, .Max_Scratchpad_Bufs_Hi) << 5
@@ -172,9 +181,9 @@ init_usb_controller :: (device: *PCI_Device) {
 
         if number_of_scratchpad_buffers != 0 {
             size := align(64, number_of_scratchpad_buffers * size_of(u64));
-            device_context_index.scratchpad_buffers = arena_get(*xhci.arena, size, 4096);
+            xhci.device_context_index.scratchpad_buffers = arena_get(*xhci.arena, size, 4096);
 
-            write_pointer := cast(*u64) (device_context_index.scratchpad_buffers + DIRECT_MAPPING_BASE);
+            write_pointer := cast(*u64) (xhci.device_context_index.scratchpad_buffers + DIRECT_MAPPING_BASE);
 
             for 0..number_of_scratchpad_buffers-1 {
                 write_pointer[it] = arena_get(*xhci.arena, 4096, 4096);
@@ -185,7 +194,8 @@ init_usb_controller :: (device: *PCI_Device) {
         context_size := ifx get_bit(xhci.HCCPARAMS1, .CSZ__context_size) then 2048 else 1024;
 
         for 0..max_slots-1 {
-            device_context_index.device_contexts[it] = arena_get(*xhci.arena, context_size, 4096);
+            // Todo: We don't really need to preallocate all these.
+            xhci.device_context_index.device_contexts[it] = arena_get(*xhci.arena, context_size, 4096);
         }
 
         xhci.DCBAAP = physical;
@@ -301,8 +311,10 @@ usb_thread :: () {
 
         if type == {
           case .PORT_STATUS_CHANGE_EVENT;
+            // Todo: Check the completion code.
+
             port := (current_trb.event_data >> 24) & 0xff;
-            log("Status change on port %", port);
+            log("Status change on port %.", port);
 
             head := xhci.command_ring_head;
             xhci.command_ring[head] = {};
@@ -310,6 +322,7 @@ usb_thread :: () {
             set(*xhci.command_ring[head].dword3, .interrupt_on_completion, 1);
             set(*xhci.command_ring[head].dword3, .cycle_bit, 1);
             xhci.command_ring[head].data_pointer = (current_trb.event_data >> 24) & 0xff; // Store the port in the user data value.
+            xhci.command_ring[head].data_pointer -= 1; // Make port zero indexed.
             xhci.command_ring_head += 1;
 
             memory_fence();
@@ -324,16 +337,70 @@ usb_thread :: () {
                 port    := cast(s64) other_trb.data_pointer;
                 slot_id := get(current_trb.dword3, .slot_id);
 
-                log("Enable slot completed, port: %, slot: %", port, slot_id);
+                log("Enable slot completed, port: %, slot: %.", port, slot_id);
 
                 if port >= xhci.port_registers.count {
                     // Todo: Error.
                 }
 
                 // Find the USB socket that has been connected-to.
-                // register_set := *xhci.port_registers[port];
-                for xhci.sockets {
+                register_set := *xhci.port_registers[port];
+                for* xhci.sockets {
+                    if it.usb3_port != register_set && it.usb2_port != register_set {
+                        continue;
+                    }
 
+                    it.device_context = *xhci.device_context_index.device_contexts[slot_id-1];
+
+                    speed := get(register_set.PORTSC, .PSI__protocol_speed);
+                    log("Device has speed %.", cast(XHCI_Port_Speed) speed);
+
+                    control_context := cast(*Control_Context) it.device_context;
+                    control_context.* = {};
+                    control_context.add_flags = 0b11;
+
+                    context_size := ifx get_bit(xhci.HCCPARAMS1, .CSZ__context_size) then 64 else 32;
+
+                    slot_context := cast(*Slot_Context) (it.device_context + context_size);
+                    slot_context.* = {};
+
+                    set(*slot_context.dword0, .entry_count, 1);
+                    set(*slot_context.dword0, .speed, speed);
+                    slot_context.root_hub_port_number = cast(u8) (port + 1);
+
+                    endpoint_context := cast(*Endpoint_Context) (it.device_context + 2 * context_size);
+                    endpoint_context.* = {};
+
+                    set(*endpoint_context.dword1,            .endpoint_type,       4); // Todo: Magic number.
+                    set(*endpoint_context.dword1,            .error_count,         3); // Todo: Magic number.
+                    set(*endpoint_context.dword2_and_dword3, .dequeue_cycle_state, 1);
+
+                    if cast(XHCI_Port_Speed) speed == {
+                      case .LOW_SPEED;
+                        set(*endpoint_context.dword1, .max_packet_size, 8);
+
+                      case .FULL_SPEED; #through;
+                      case .HIGH_SPEED;
+                        set(*endpoint_context.dword1, .max_packet_size, 64);
+
+                      case .SUPER_SPEED_GEN1_1X; #through;
+                      case .SUPER_SPEED_GEN2_1X; #through;
+                      case .SUPER_SPEED_GEN1_2X; #through;
+                      case .SUPER_SPEED_GEN2_2X;
+                        set(*endpoint_context.dword1, .max_packet_size, 512);
+
+                      case .UNDEFINED; #through;
+                      case;
+                        assert(false); // Todo: Error.
+                    }
+
+                    // Allocate transfer ring and point endpoint dequeue pointer at it.
+                    physical := arena_get(*xhci.arena, 0x1_0000, 0x1_0000);
+                    it.transfer_ring.data = cast(*Transfer_Event_TRB) (physical + DIRECT_MAPPING_BASE);
+                    it.transfer_ring.count = 0x1_0000 / size_of(Transfer_Event_TRB);
+                    it.transfer_ring_cycle = true;
+
+                    set_in_place(*endpoint_context.dword2_and_dword3, .tr_dequeue_pointer, physical);
                 }
             }
         }
