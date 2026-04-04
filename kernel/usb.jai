@@ -4,16 +4,26 @@
 USB_Controller :: struct {
     Socket :: struct {
         // Either of these may be null if the socket does not support that protocol.
-        usb3_port: *XHCI_Port_Register_Set;
-        usb2_port: *XHCI_Port_Register_Set;
+        usb3_port: *XHCI_Port_Registers;
+        usb2_port: *XHCI_Port_Registers;
 
         active_protocol: enum {
             NONE; USB3; USB2;
         }
 
-        device_context: *void; // Doesn't have a type, since the size of the context entries depends on capability flags in the controller.
+        // Doesn't have a type, since the size of the context entries depends on capability
+        // flags in the controller.
+        device_context: *void;
+        slot_id: int;
 
-        // Todo: This is really per endpoint within the socket.
+        state:  enum {
+            DISCONNECTED;
+            FAILED_TO_INITIALIZE;
+            SLOT_ENABLED;
+            CONTEXT_ENABLED;
+            ADDRESS_SET;
+        }
+
         transfer_ring:   [] Transfer_Event_TRB;
         transfer_ring_head: int;
         transfer_ring_cycle: bool;
@@ -27,7 +37,7 @@ USB_Controller :: struct {
     using operational_registers:  *XHCI_Operational_Registers;
     using runtime_registers:      *XHCI_Runtime_Registers;
 
-    port_registers:             [] XHCI_Port_Register_Set;
+    port_registers:             [] XHCI_Port_Registers;
 
     doorbells:  [] u32;
 
@@ -65,7 +75,10 @@ init_usb_controller :: (device: *PCI_Device) {
     ps.use_newlines_if_long_form = true;
 
     if device.prog_if != 0x30 {
-        // This is not XHCI, but rather UHCI, EHCI, something like that, which don't support USB 3.0. Devices since about 2010 should have XHCI.
+        // This is not XHCI, but rather UHCI, EHCI, something like that, which don't support USB 3.0.
+        // Devices since about 2010 should have XHCI. XHCI supports USB 4.0 as well, but the book I have does
+        // not cover it, so will need to research any changes in the newer XHCI specs. May be difficult to
+        // test anyway.
         log_error("Unsupported controller type: %.", device.prog_if);
         return;
     }
@@ -81,9 +94,9 @@ init_usb_controller :: (device: *PCI_Device) {
     
     parse_pci_capability_list(device);
     enabled := enable_msi_or_msi_x(device, isr__xhci_interrupt);
+    
     if enabled != .MSI_X {
         log_error("Controller does not support MSI-X.");
-        return;
     }
 
     xhci.capability_registers    = cast(*XHCI_Capability_Registers)   xhci.mmio_base;
@@ -91,7 +104,8 @@ init_usb_controller :: (device: *PCI_Device) {
     xhci.runtime_registers       = cast(*XHCI_Runtime_Registers)     (xhci.mmio_base + xhci.RTSOFF);
 
     xhci.doorbells.data          = cast(*u32)                        (xhci.mmio_base + xhci.DBOFF);
-    xhci.doorbells.count         = get(xhci.HCSPARAMS1, .MaxSlots) + 1; // Plus one for the command ring doorbell.
+    // Plus one for the command ring doorbell.
+    xhci.doorbells.count         = get(xhci.HCSPARAMS1, .MaxSlots) + 1;
 
     xhci.port_registers.data     = *xhci.port_register_set_base;
     xhci.port_registers.count    = get(xhci.HCSPARAMS1, .MaxPorts);
@@ -148,7 +162,7 @@ init_usb_controller :: (device: *PCI_Device) {
         log_error("Timeout, host controller not halted.");
         return;
     }
-
+    
     xhci.USBCMD |= .HCRST__host_controller_reset;
 
     if Timeout(xhci.USBCMD & .HCRST__host_controller_reset == 0
@@ -225,6 +239,7 @@ init_usb_controller :: (device: *PCI_Device) {
     command_ring_physical := arena_get(*xhci.arena, 0x1_0000, 0x1_0000);
     xhci.command_ring.data  = cast(*Normal_TRB) (command_ring_physical + DIRECT_MAPPING_BASE);
     xhci.command_ring.count = 0x1_0000 / size_of(Normal_TRB);
+    xhci.command_ring_cycle = true;
 
     set_bit     (*xhci.CRCR, .RCS__ring_cycle_state);
     set_in_place(*xhci.CRCR, .command_ring_pointer, command_ring_physical);
@@ -255,12 +270,13 @@ init_usb_controller :: (device: *PCI_Device) {
     }
 
 
+    sleep(5, .seconds);
     log_stats(xhci.arena);
 
     while true #asm { sti; hlt; }
 }
 
-reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Register_Set) -> success: bool {
+reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: bool {
     if !port return false; // Allowed so the caller can treat USB2 and 3 ports on the same socket the same, even if one or the other is not present.
 
     if get(xhci.HCCPARAMS1, .PPC__port_power_control) {
@@ -294,7 +310,51 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Register_Set) -> success: 
     return get_bit(port.PORTSC, .PED__enabled_disabled);
 }
 
+socket_from_port_id :: (xhci: *USB_Controller, port_id: int) -> *USB_Controller.Socket {
+    assert(port_id != 0);
+
+    if port_id == 0                        return null;
+    if port_id > xhci.port_registers.count return null;
+
+    register_set := *xhci.port_registers[port_id - 1];
+
+    for* xhci.sockets {
+        if it.usb3_port != register_set && it.usb2_port != register_set continue;
+
+        return it;
+    }
+
+    return null;
+}
+
+send_command :: (xhci: *USB_Controller, trb: *Normal_TRB) {
+    set_bit(*trb.dword3, .cycle_bit, xhci.command_ring_cycle);
+
+    slot := *xhci.command_ring[xhci.command_ring_head];
+    memcpy(slot, trb, size_of(Normal_TRB));
+
+    xhci.command_ring_head += 1;
+
+    if xhci.command_ring_head == xhci.command_ring.count - 1 {
+        link := cast(*Link_TRB) *xhci.command_ring[xhci.command_ring_head];
+        link.* = {};
+
+        link.ring_segment_pointer = get_physical_address(xhci.command_ring.data);
+        set_bit(*link.dword3, .cycle_bit);
+        set_bit(*link.dword3, .toggle_cycle);
+        set    (*link.dword3, .trb_type, xx TRB_Type.LINK);
+
+        xhci.command_ring_cycle = !xhci.command_ring_cycle;
+        xhci.command_ring_head  = 0;
+    }
+
+    memory_fence();
+    xhci.doorbells[0] = 0;
+}
+
 usb_thread :: () {
+    log_category("USB");
+
     xhci := *global.xhci;
 
     while true {
@@ -311,97 +371,150 @@ usb_thread :: () {
 
         if type == {
           case .PORT_STATUS_CHANGE_EVENT;
-            // Todo: Check the completion code.
-
             port := (current_trb.event_data >> 24) & 0xff;
             log("Status change on port %.", port);
 
-            head := xhci.command_ring_head;
-            xhci.command_ring[head] = {};
-            set(*xhci.command_ring[head].dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
-            set(*xhci.command_ring[head].dword3, .interrupt_on_completion, 1);
-            set(*xhci.command_ring[head].dword3, .cycle_bit, 1);
-            xhci.command_ring[head].data_pointer = (current_trb.event_data >> 24) & 0xff; // Store the port in the user data value.
-            xhci.command_ring[head].data_pointer -= 1; // Make port zero indexed.
-            xhci.command_ring_head += 1;
+            command: Normal_TRB;
+            set(*command.dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
+            set(*command.dword3, .interrupt_on_completion, 1);
+            command.data_pointer = port; // Store the port ID in the user data value.
 
-            memory_fence();
-            xhci.doorbells[0] = 0;
+            send_command(xhci, *command);
 
           case .COMMAND_COMPLETION_EVENT;
+            completed  := cast(*Command_Completion_TRB) current_trb;
+
             other_trb  := cast(*Normal_TRB) (current_trb.event_data + DIRECT_MAPPING_BASE);
             other_type := cast(TRB_Type) get(other_trb.dword3, .trb_type);
 
-            if other_type == .ENABLE_SLOT_COMMAND {
-                // The controller has finished enabling a slot.
-                port    := cast(s64) other_trb.data_pointer;
-                slot_id := get(current_trb.dword3, .slot_id);
+            code       := cast(TRB_Completion_Code) get(completed.dword2, .completion_code);
+            log("Command completed: %. Code: %.", other_type, code);
 
-                log("Enable slot completed, port: %, slot: %.", port, slot_id);
+            if code != .SUCCESS {
+                // Todo.
+                continue;
+            }
 
-                if port >= xhci.port_registers.count {
-                    // Todo: Error.
-                }
+            if other_type == .ADDRESS_DEVICE_COMMAND {
+                // I don't know how to figure out the socket for this command other than looking for the slot ID.
+                slot_id := get(completed.dword3, .slot_id);
 
-                // Find the USB socket that has been connected-to.
-                register_set := *xhci.port_registers[port];
-                for* xhci.sockets {
-                    if it.usb3_port != register_set && it.usb2_port != register_set {
-                        continue;
-                    }
+                socket: *USB_Controller.Socket;
+                for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
+                assert(!!socket);
 
-                    it.device_context = *xhci.device_context_index.device_contexts[slot_id-1];
+                slot_context: *Slot_Context = socket.device_context;
+                slot_state   := cast(Slot_State) get(slot_context.dword3, .slot_state);
 
-                    speed := get(register_set.PORTSC, .PSI__protocol_speed);
-                    log("Device has speed %.", cast(XHCI_Port_Speed) speed);
+                log("Slot is now in state %.", slot_state);
 
-                    control_context := cast(*Control_Context) it.device_context;
-                    control_context.* = {};
-                    control_context.add_flags = 0b11;
-
+                if slot_state == {
+                  case .DEFAULT;
                     context_size := ifx get_bit(xhci.HCCPARAMS1, .CSZ__context_size) then 64 else 32;
 
-                    slot_context := cast(*Slot_Context) (it.device_context + context_size);
-                    slot_context.* = {};
+                    command: Normal_TRB;
+                    set(*command.dword3, .trb_type, cast(s64) TRB_Type.ADDRESS_DEVICE_COMMAND);
+                    set(*command.dword3, .interrupt_on_completion, 1);
+                    command.data_pointer = other_trb.data_pointer;
+                    command.dword3 |= xx (slot_id << 24);
 
-                    set(*slot_context.dword0, .entry_count, 1);
-                    set(*slot_context.dword0, .speed, speed);
-                    slot_context.root_hub_port_number = cast(u8) (port + 1);
-
-                    endpoint_context := cast(*Endpoint_Context) (it.device_context + 2 * context_size);
-                    endpoint_context.* = {};
-
-                    set(*endpoint_context.dword1,            .endpoint_type,       4); // Todo: Magic number.
-                    set(*endpoint_context.dword1,            .error_count,         3); // Todo: Magic number.
-                    set(*endpoint_context.dword2_and_dword3, .dequeue_cycle_state, 1);
-
-                    if cast(XHCI_Port_Speed) speed == {
-                      case .LOW_SPEED;
-                        set(*endpoint_context.dword1, .max_packet_size, 8);
-
-                      case .FULL_SPEED; #through;
-                      case .HIGH_SPEED;
-                        set(*endpoint_context.dword1, .max_packet_size, 64);
-
-                      case .SUPER_SPEED_GEN1_1X; #through;
-                      case .SUPER_SPEED_GEN2_1X; #through;
-                      case .SUPER_SPEED_GEN1_2X; #through;
-                      case .SUPER_SPEED_GEN2_2X;
-                        set(*endpoint_context.dword1, .max_packet_size, 512);
-
-                      case .UNDEFINED; #through;
-                      case;
-                        assert(false); // Todo: Error.
-                    }
-
-                    // Allocate transfer ring and point endpoint dequeue pointer at it.
-                    physical := arena_get(*xhci.arena, 0x1_0000, 0x1_0000);
-                    it.transfer_ring.data = cast(*Transfer_Event_TRB) (physical + DIRECT_MAPPING_BASE);
-                    it.transfer_ring.count = 0x1_0000 / size_of(Transfer_Event_TRB);
-                    it.transfer_ring_cycle = true;
-
-                    set_in_place(*endpoint_context.dword2_and_dword3, .tr_dequeue_pointer, physical);
+                    send_command(xhci, *command);
+                  case .ADDRESSED;
+                    log("Got here.");
+                    // Todo: Clear input context page.
+                  case;
+                    log("State error.");
                 }
+            }
+
+            if other_type == .ENABLE_SLOT_COMMAND {
+                // The controller has finished enabling a slot.
+
+                port_id := cast(s64) other_trb.data_pointer;
+                slot_id := get(completed.dword3, .slot_id);
+
+                log("Enable slot completed, port: %, slot: %.", port_id, slot_id);
+
+                socket := socket_from_port_id(xhci, port_id);
+
+                if !socket {
+                    log_error("Invalid port ID: %", port_id);
+                    socket.state = .FAILED_TO_INITIALIZE;
+                    continue;
+                }
+
+                assert(socket.state == .DISCONNECTED);
+
+                socket.state = .SLOT_ENABLED;
+                socket.slot_id = slot_id;
+                socket.device_context = cast(*void) xhci.device_context_index.device_contexts[slot_id-1] + DIRECT_MAPPING_BASE;
+
+                context_size := ifx get_bit(xhci.HCCPARAMS1, .CSZ__context_size) then 64 else 32;
+
+                input_context_physical := get_4k_page();
+                input_context_base     := cast(*void) input_context_physical + DIRECT_MAPPING_BASE;
+
+                register_set := *xhci.port_registers[port_id - 1];
+
+                speed := get(register_set.PORTSC, .PSI__protocol_speed);
+                log("Device has speed %.", cast(XHCI_Port_Speed) speed);
+
+                control_context: *Control_Context = input_context_base;
+                control_context.* = {};
+                control_context.add_flags = 0b11;
+
+                slot_context: *Slot_Context = input_context_base + context_size;
+                slot_context.* = {};
+
+                set(*slot_context.dword0, .entry_count, 1);
+                set(*slot_context.dword0, .speed, speed);
+                slot_context.root_hub_port_number = cast(u8) (port_id);
+
+                endpoint_context: *Endpoint_Context = input_context_base + 2*context_size;
+                endpoint_context.* = {};
+
+                set(*endpoint_context.dword1, .endpoint_type,  4); // Todo: Magic number.
+                set(*endpoint_context.dword1, .error_count,    3); // Todo: Magic number.
+
+                if cast(XHCI_Port_Speed) speed == {
+                  case .LOW_SPEED;
+                    set(*endpoint_context.dword1, .max_packet_size, 8);
+
+                  case .FULL_SPEED; #through;
+                  case .HIGH_SPEED;
+                    set(*endpoint_context.dword1, .max_packet_size, 64);
+
+                  case .SUPER_SPEED_GEN1_1X; #through;
+                  case .SUPER_SPEED_GEN2_1X; #through;
+                  case .SUPER_SPEED_GEN1_2X; #through;
+                  case .SUPER_SPEED_GEN2_2X;
+                    set(*endpoint_context.dword1, .max_packet_size, 512);
+
+                  case .UNDEFINED; #through;
+                  case;
+                    assert(false); // Todo: Error.
+                }
+
+                // Allocate transfer ring and point endpoint dequeue pointer at it.
+                // We need to make sure to reuse these transfer rings when different devices are added and
+                // removed, because we can't free the memory, as it comes from the arena.
+                transfer_ring_physical := arena_get(*xhci.arena, 0x1_0000, 0x1_0000);
+                socket.transfer_ring.data  = cast(*Transfer_Event_TRB) (transfer_ring_physical + DIRECT_MAPPING_BASE);
+                socket.transfer_ring.count = 0x1_0000 / size_of(Transfer_Event_TRB);
+                socket.transfer_ring_cycle = true;
+
+                set_in_place(*endpoint_context.dword2_and_dword3, .tr_dequeue_pointer, transfer_ring_physical);
+                set_bit     (*endpoint_context.dword2_and_dword3, .dequeue_cycle_state);
+                endpoint_context.averate_trb_length = 8;
+
+                command: Normal_TRB;
+                set(*command.dword3, .trb_type, cast(s64) TRB_Type.ADDRESS_DEVICE_COMMAND);
+                set(*command.dword3, .interrupt_on_completion, 1);
+                set(*command.dword3, .block_event_interrupt, 1);
+                command.data_pointer = input_context_physical;
+                command.dword3 |= xx (slot_id << 24);
+
+                send_command(xhci, *command);
             }
         }
 

@@ -122,11 +122,11 @@ XHCI_Operational_Registers :: struct {
     #overlay(start) using _: struct {
         _: [0x400] u8;
 
-        port_register_set_base: void; // Array of [HCSPARAMS1.MaxPorts] XHCI_Port_Register_Set
+        port_register_set_base: void; // Array of [HCSPARAMS1.MaxPorts] XHCI_Port_Registers
     }
 }
 
-XHCI_Port_Register_Set :: struct {
+XHCI_Port_Registers :: struct {
     PORTSC: enum u32 {
         CCS__current_connect_status     :: 1;
         PED__enabled_disabled           :: 1;
@@ -219,6 +219,7 @@ xHCI_Protocol_List_Entry :: struct {
 }
 
 
+
 // Context stuff (in RAM.)
 
 Device_Context_Index :: struct {
@@ -235,39 +236,6 @@ Control_Context :: struct {
     add\_flags:   u32;
 
     // This may be padded to 32 or 64 bytes depending on HCCPARAMS1.CSZ.
-}
-
-Endpoint_Context :: struct {
-    dword0: enum u32 {
-        endpoint_state       :: 3;
-        _                    :: 5;
-        mult                 :: 2;
-        max_primary_streams  :: 5;
-        linear_stream_array  :: 1;
-        interval             :: 8;
-        max_endpoint_service_time_interval_payload_high :: 8;
-    }
-
-    dword1: enum u32 {
-        _                     :: 1;
-        error_count           :: 2;
-        endpoint_type         :: 3;
-        _                     :: 1;
-        host_initiate_disable :: 1;
-        max_burst_size        :: 8;
-        max_packet_size       :: 16;
-    }
-
-    dword2_and_dword3: enum u64 {
-        dequeue_cycle_state   :: 1;
-        _                     :: 3;
-        tr_dequeue_pointer    :: 60;
-    }
-
-    averate_trb_length: u16;
-    max_endpoint_service_time_interval_payload_low: u16;
-
-    _: [3] u32; // Used by the hardware.
 }
 
 Slot_Context :: struct {
@@ -302,6 +270,39 @@ Slot_Context :: struct {
     }
 
     // There may be four zeroed DWORDS here, depending on HCCPARAMS1.CSZ.
+}
+
+Endpoint_Context :: struct {
+    dword0: enum u32 {
+        endpoint_state       :: 3;
+        _                    :: 5;
+        mult                 :: 2;
+        max_primary_streams  :: 5;
+        linear_stream_array  :: 1;
+        interval             :: 8;
+        max_endpoint_service_time_interval_payload_high :: 8;
+    }
+
+    dword1: enum u32 {
+        _                     :: 1;
+        error_count           :: 2;
+        endpoint_type         :: 3;
+        _                     :: 1;
+        host_initiate_disable :: 1;
+        max_burst_size        :: 8;
+        max_packet_size       :: 16;
+    }
+
+    dword2_and_dword3: enum u64 {
+        dequeue_cycle_state   :: 1;
+        _                     :: 3;
+        tr_dequeue_pointer    :: 60;
+    }
+
+    averate_trb_length: u16;
+    max_endpoint_service_time_interval_payload_low: u16;
+
+    _: [3] u32; // Used by the hardware.
 }
 
 Event_Ring_Segment_Table_Entry :: struct {
@@ -465,7 +466,7 @@ Command_Completion_TRB :: struct {
         _                 :: 9;
         trb_type          :: 6;
         vf_id             :: 8;
-        slod_id           :: 8;
+        slot_id           :: 8;
     }
 }
 
@@ -528,4 +529,50 @@ Transfer_Event_TRB :: struct {
         _                       :: 3;
         slot_id                 :: 8;
     }
+}
+
+TRB_Completion_Code :: enum {
+    INVALID                        :: 0;
+    SUCCESS                        :: 1;
+    DATA_BUFFER_ERROR              :: 2;
+    BABBLE_DETECTED_ERROR          :: 3;
+    USB_TRANSACTION_ERROR          :: 4;
+    TRB_ERROR_ASSERTED             :: 5;
+    STALL_ERROR_ASSERTED           :: 6;
+    RESOURCE_ERROR                 :: 7;
+    BANDWIDTH_ERROR                :: 8;
+    NO_SLOTS_AVAILABLE_ERROR       :: 9;
+    INVALID_STREAM_TYPE_ERROR      :: 10;
+    SLOT_NOT_ENABLED_ERROR         :: 11;
+    ENDPOINT_NOT_ENABLED_ERROR     :: 12;
+    SHORT_PACKET                   :: 13;
+    RING_UNDERRUN                  :: 14;
+    RING_OVERRUN                   :: 15;
+    VF_EVENT_RING_FULL_ERROR       :: 16;
+    PARAMETER_ERROR                :: 17;
+    BANDWIDTH_OVERRUN_ERROR        :: 18;
+    CONTEXT_STATE_ERROR            :: 19;
+    NO_PING_RESPONSE_ERROR         :: 20;
+    EVENT_RING_FULL_ERROR          :: 21;
+    INCOMPATIBLE_DEVICE_ERROR      :: 22;
+    MISSED_SERVICE_ERROR           :: 23;
+    COMMAND_RING_STOPPED           :: 24;
+    COMMAND_ABORTED                :: 25;
+    STOPPED                        :: 26;
+    STOPPED_LENGTH_INVALID         :: 27;
+    STOPPED_SHORT_PACKET           :: 28;
+    MAX_EXIT_LATENCY_TOO_LARGE_ERROR   :: 29;
+    ISOCH_BUFFER_OVERRUN           :: 31;
+    EVENT_LOST_ERROR               :: 32;
+    UNDEFINED_ERROR                :: 33;
+    INVALID_STREAM_ID_ERROR        :: 34;
+    SECONDARY_BANDWIDTH_ERROR      :: 35;
+    SPLIT_TRANSACTION_ERROR        :: 36;
+}
+
+Slot_State :: enum {
+    DISABLED_ENABLED    :: 0;
+    DEFAULT             :: 1;
+    ADDRESSED           :: 2;
+    CONFIGURED          :: 3;
 }
