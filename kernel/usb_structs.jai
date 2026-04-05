@@ -299,7 +299,7 @@ Endpoint_Context :: struct {
         tr_dequeue_pointer    :: 60;
     }
 
-    averate_trb_length: u16;
+    average_trb_length: u16;
     max_endpoint_service_time_interval_payload_low: u16;
 
     _: [3] u32; // Used by the hardware.
@@ -348,7 +348,7 @@ TRB_Type :: enum {
     NO_OP_COMMAND                            :: 23;
     GET_EXTENDED_PROPERTY_COMMAND            :: 24;
     SET_EXTENDED_PROPERTY_COMMAND            :: 25;
-    TRANSFER_EVENT_                          :: 32;
+    TRANSFER_EVENT                           :: 32;
     COMMAND_COMPLETION_EVENT                 :: 33;
     PORT_STATUS_CHANGE_EVENT                 :: 34;
     BANDWIDTH_REQUEST_EVENT                  :: 35;
@@ -357,6 +357,8 @@ TRB_Type :: enum {
     DEVICE_NOTIFICATION_EVENT                :: 38;
     MFINDEX_WRAP_EVENT                       :: 39;
 }
+
+TRB_SIZE :: 16;
 
 Normal_TRB :: struct {
     data_pointer: u64;
@@ -383,12 +385,52 @@ Normal_TRB :: struct {
 }
 
 Setup_Stage_TRB :: struct {
-    bm_request_type: u8;
-    b_request: u8;
-    w_value: u16;
+    request_type: enum u8 {
+        recipient   :: 5; // 0 = Device, 1 = Interface, 2 = Endpoint, 3 = Other.
+        type        :: 2; // 00 = Standard, 01 = Class, 10 = Vendor.
+        direction   :: 1; // 0 = Host to Device, 1 = Device to Host.
+    }
 
-    w_index: u16;
-    w_length: u16;
+    request: enum u8 {
+        GET_STATUS          :: 0;
+        CLEAR_FEATURE       :: 1;
+        _                   :: 2;
+        SET_FEATURE         :: 3;
+        _                   :: 4;
+        SET_ADDRESS         :: 5;
+        GET_DESCRIPTOR      :: 6;
+        SET_DESCRIPTOR      :: 7;
+        GET_CONFIGURATION   :: 8;
+        SET_CONFIGURATION   :: 9;
+        GET_INTERFACE       :: 10;
+        SET_INTERFACE       :: 11;
+        SYNCH_FRAME         :: 12;
+        SET_ENCRYPTION      :: 13; // Not a typo. Earlier GET was always first, now SET is first.
+        GET_ENCRYPTION      :: 14;
+        SET_HANDSHAKE       :: 15;
+        GET_HANDSHAKE       :: 16;
+        SET_CONNECTION      :: 17;
+        SET_SECURITY_DATA   :: 18;
+        GET_SECURITY_DATA   :: 19;
+        SET_WUSB_DATA       :: 20;
+        LOOPBACK_DATA_WRITE :: 21;
+        LOOPBACK_DATA_READ  :: 22;
+        SET_INTERFACE_DS    :: 23;
+
+        SET_ISOCH_DELAY     :: 49;
+    }
+
+    value: enum u16 {
+        DEVICE          :: 0x100;
+        CONFIGURATION   :: 0x200;
+        STRING          :: 0x300;
+        INTERFACE       :: 0x400;
+        ENDPOINT        :: 0x500;
+        // ...
+    }
+
+    index: u16;
+    length: u16;
 
     dword2: enum u32 {
         trb_transfer_length     :: 17;
@@ -570,9 +612,63 @@ TRB_Completion_Code :: enum {
     SPLIT_TRANSACTION_ERROR        :: 36;
 }
 
+#assert size_of(Setup_Stage_TRB)        == TRB_SIZE
+     && size_of(Data_Stage_TRB)         == TRB_SIZE
+     && size_of(Status_Stage_TRB)       == TRB_SIZE
+     && size_of(Command_Completion_TRB) == TRB_SIZE
+     && size_of(Link_TRB)               == TRB_SIZE
+     && size_of(Event_Data_TRB)         == TRB_SIZE
+     && size_of(Transfer_Event_TRB)     == TRB_SIZE
+     && size_of(Normal_TRB)             == TRB_SIZE;
+
 Slot_State :: enum {
     DISABLED_ENABLED    :: 0;
     DEFAULT             :: 1;
     ADDRESSED           :: 2;
     CONFIGURED          :: 3;
+}
+
+Device_Request_Packet :: struct {
+    request_type: enum u8 {
+        recipient          :: 5;
+        type               :: 2;
+        transfer_direction :: 1;
+    }
+
+    request: u8;
+    value:   u16;
+    index:   u16;
+    length:  u16;
+}
+
+Descriptor_Header :: struct {
+    length: u8;
+    type: enum u8 {
+        // Todo: This is the same enum as the high byte in the value of the device request.
+        DEVICE        :: 1;
+        CONFIGURATION :: 2;
+        STRING        :: 3;
+    }
+}
+
+Device_Descriptor :: struct {
+    using header: Descriptor_Header;
+    usb_version:           u16;
+    device_class:          u8;
+    device_sub_class:      u8;
+    device_protocol:       u8;
+    max_packet_size:       u8;
+
+    vendor_id:             u16;
+    product_id:            u16;
+    device_release_number: u16;
+    manufacturer_index:    u8;
+    product_index:         u8;
+    serial_number_index:   u8;
+    num_configurations:    u8;
+}
+
+String_Descriptor :: struct {
+    using header: Descriptor_Header;
+    data: void; // Some number of u16s.
 }
