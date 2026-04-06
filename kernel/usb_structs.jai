@@ -385,52 +385,7 @@ Normal_TRB :: struct {
 }
 
 Setup_Stage_TRB :: struct {
-    request_type: enum u8 {
-        recipient   :: 5; // 0 = Device, 1 = Interface, 2 = Endpoint, 3 = Other.
-        type        :: 2; // 00 = Standard, 01 = Class, 10 = Vendor.
-        direction   :: 1; // 0 = Host to Device, 1 = Device to Host.
-    }
-
-    request: enum u8 {
-        GET_STATUS          :: 0;
-        CLEAR_FEATURE       :: 1;
-        _                   :: 2;
-        SET_FEATURE         :: 3;
-        _                   :: 4;
-        SET_ADDRESS         :: 5;
-        GET_DESCRIPTOR      :: 6;
-        SET_DESCRIPTOR      :: 7;
-        GET_CONFIGURATION   :: 8;
-        SET_CONFIGURATION   :: 9;
-        GET_INTERFACE       :: 10;
-        SET_INTERFACE       :: 11;
-        SYNCH_FRAME         :: 12;
-        SET_ENCRYPTION      :: 13; // Not a typo. Earlier GET was always first, now SET is first.
-        GET_ENCRYPTION      :: 14;
-        SET_HANDSHAKE       :: 15;
-        GET_HANDSHAKE       :: 16;
-        SET_CONNECTION      :: 17;
-        SET_SECURITY_DATA   :: 18;
-        GET_SECURITY_DATA   :: 19;
-        SET_WUSB_DATA       :: 20;
-        LOOPBACK_DATA_WRITE :: 21;
-        LOOPBACK_DATA_READ  :: 22;
-        SET_INTERFACE_DS    :: 23;
-
-        SET_ISOCH_DELAY     :: 49;
-    }
-
-    value: enum u16 {
-        DEVICE          :: 0x100;
-        CONFIGURATION   :: 0x200;
-        STRING          :: 0x300;
-        INTERFACE       :: 0x400;
-        ENDPOINT        :: 0x500;
-        // ...
-    }
-
-    index: u16;
-    length: u16;
+    request: Device_Request_Packet;
 
     dword2: enum u32 {
         trb_transfer_length     :: 17;
@@ -630,24 +585,63 @@ Slot_State :: enum {
 
 Device_Request_Packet :: struct {
     request_type: enum u8 {
-        recipient          :: 5;
-        type               :: 2;
-        transfer_direction :: 1;
+        recipient   :: 5; // 0 = Device, 1 = Interface, 2 = Endpoint, 3 = Other.
+        type        :: 2; // 00 = Standard, 01 = Class, 10 = Vendor.
+        direction   :: 1; // 0 = Host to Device, 1 = Device to Host.
     }
 
-    request: u8;
-    value:   u16;
-    index:   u16;
-    length:  u16;
+    request: enum u8 {
+        GET_STATUS          :: 0;
+        CLEAR_FEATURE       :: 1;
+        _                   :: 2;
+        SET_FEATURE         :: 3;
+        _                   :: 4;
+        SET_ADDRESS         :: 5;
+        GET_DESCRIPTOR      :: 6;
+        SET_DESCRIPTOR      :: 7;
+        GET_CONFIGURATION   :: 8;
+        SET_CONFIGURATION   :: 9;
+        GET_INTERFACE       :: 10;
+        SET_INTERFACE       :: 11;
+        SYNCH_FRAME         :: 12;
+        SET_ENCRYPTION      :: 13; // Not a typo. Earlier GET was always first, now SET is first.
+        GET_ENCRYPTION      :: 14;
+        SET_HANDSHAKE       :: 15;
+        GET_HANDSHAKE       :: 16;
+        SET_CONNECTION      :: 17;
+        SET_SECURITY_DATA   :: 18;
+        GET_SECURITY_DATA   :: 19;
+        SET_WUSB_DATA       :: 20;
+        LOOPBACK_DATA_WRITE :: 21;
+        LOOPBACK_DATA_READ  :: 22;
+        SET_INTERFACE_DS    :: 23;
+
+        SET_ISOCH_DELAY     :: 49;
+    }
+
+    value: enum u16 {
+        DEVICE          :: 0x100;
+        CONFIGURATION   :: 0x200;
+        STRING          :: 0x300;
+        INTERFACE       :: 0x400;
+        ENDPOINT        :: 0x500;
+        // ...
+    }
+
+    index: u16;
+    length: u16;
 }
 
 Descriptor_Header :: struct {
     length: u8;
     type: enum u8 {
         // Todo: This is the same enum as the high byte in the value of the device request.
-        DEVICE        :: 1;
-        CONFIGURATION :: 2;
-        STRING        :: 3;
+        DEVICE          :: 1;
+        CONFIGURATION   :: 2;
+        STRING          :: 3;
+        INTERFACE       :: 4;
+        ENDPOINT        :: 5;
+        SUPER_SPEED_ENDPOINT_COMPANION :: 0x30;
     }
 }
 
@@ -671,4 +665,33 @@ Device_Descriptor :: struct {
 String_Descriptor :: struct {
     using header: Descriptor_Header;
     data: void; // Some number of u16s.
+}
+
+Configuration_Descriptor :: struct {
+    using header: Descriptor_Header;
+    total_length: u16;
+    interface_count: u8;
+    configuration_value: u8;
+    configuration_index: u8;
+    attributes: u8;
+    max_power: u8;
+}
+
+Interface_Descriptor :: struct {
+    using header: Descriptor_Header;
+    interface_count:     u8;
+    alternate_setting:   u8;
+    endpoint_count:      u8;
+    interface_class:     u8;
+    interface_sub_class: u8;
+    interface_protocol:  u8;
+    interface_index:     u8;
+}
+
+Endpoint_Descriptor :: struct {
+    using header: Descriptor_Header;
+    endpoint_address:    u8;
+    attributes:          u8;
+    max_packet_size:     u8;
+    interval:            u8;
 }

@@ -18,7 +18,10 @@ USB_Controller :: struct {
 
         ep0_transfer_ring: Ring;
 
-        descriptor: Device_Descriptor #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
+        device_descriptor: Device_Descriptor #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
+        string_description: string;
+
+        interfaces: [10] *Interface_Descriptor;
     }
 
     Ring :: struct {
@@ -365,13 +368,11 @@ usb_thread :: () {
         }
 
         type := cast(TRB_Type) get(current_trb.dword3, .trb_type);
-        log("Got TRB of type %.", type);
 
         if type == {
           case .PORT_STATUS_CHANGE_EVENT;
             // Todo: Check if it was a detach rather than an attach.
             port := (current_trb.event_data >> 24) & 0xff;
-            log("Status change on port %.", port);
             
             command: Normal_TRB;
             set(*command.dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
@@ -386,8 +387,6 @@ usb_thread :: () {
             code     := cast(TRB_Completion_Code) get(transfer.dword2, .completion_code);
             slot_id  := get(transfer.dword3, .slot_id);
 
-            log("Transfer completed on slot: %. Code: %.", slot_id, code);
-
           case .COMMAND_COMPLETION_EVENT;
             completed  := cast(*Command_Completion_TRB) current_trb;
 
@@ -395,7 +394,6 @@ usb_thread :: () {
             other_type := cast(TRB_Type) get(other_trb.dword3, .trb_type);
 
             code       := cast(TRB_Completion_Code) get(completed.dword2, .completion_code);
-            log("Command completed: %. Code: %.", other_type, code);
 
             if code != .SUCCESS {
                 // Todo.
@@ -413,91 +411,90 @@ usb_thread :: () {
                 slot_context: *Slot_Context = socket.device_context;
                 slot_state   := cast(Slot_State) get(slot_context.dword3, .slot_state);
 
-                log("Slot is now in state %.", slot_state);
-
                 if slot_state == {
                   case .ADDRESSED;
                     using TRB_Type;
 
                     {
                         // Request device descriptor.
+                        request: Device_Request_Packet;
+                        set(*request.request_type, .direction, 1);
+                        request.request      = .GET_DESCRIPTOR;
+                        request.value        = .DEVICE;
+                        request.length       = 18;
 
-                        setup: Setup_Stage_TRB;
-                        set(*setup.request_type, .direction, 1);
-                        setup.request      = .GET_DESCRIPTOR;
-                        setup.value        = .DEVICE;
-                        setup.length       = 18;
-                        set(*setup.dword2, .trb_transfer_length, 8);
-                        set(*setup.dword3, .immediate_data,      1);
-                        set(*setup.dword3, .trb_type,         xx SETUP_STAGE);
-                        set(*setup.dword3, .transfer_type,       3);
-                        
-                        queue_command(*socket.ep0_transfer_ring, setup);
+                        buffer := get_physical_address(*socket.device_descriptor);
+                        execute_device_request(xhci, socket, request, buffer);
 
-                        data: Data_Stage_TRB;
-                        data.data_pointer = get_physical_address(*socket.descriptor);
-                        set(*data.dword2, .trb_transfer_length, 18);
-                        set(*data.dword3, .chain_bit,           1);
-                        set(*data.dword3, .trb_type,         xx DATA_STAGE);
-                        set(*data.dword3, .direction,           1);
-
-                        queue_command(*socket.ep0_transfer_ring, data);
-
-                        status: Status_Stage_TRB;
-                        set(*status.dword3, .evaluate_next_trb,          1);
-                        set(*status.dword3, .interrupt_on_completion,    1);
-                        set(*status.dword3, .trb_type,                xx STATUS_STAGE);
-
-                        queue_command(*socket.ep0_transfer_ring, status);
-
-                        flush_commands(xhci, slot_id, 1);
-                        log("Descriptor: %", socket.descriptor);
+                        log("Descriptor: %", socket.device_descriptor);
                     }
 
                     {
-                        // Request string descriptor(s). Todo: Deduplicate.
+                        // Request product descriptor string.
                         string_buffer := arena_get(*xhci.arena, 64);
 
-                        setup: Setup_Stage_TRB;
-                        set(*setup.request_type, .direction, 1);
-                        setup.request      = .GET_DESCRIPTOR;
-                        setup.value        = .STRING;
-                        setup.length       = 64;
-                        setup.index        = 0x0409;
-                        set(*setup.dword2, .trb_transfer_length, 8);
-                        set(*setup.dword3, .immediate_data,      1);
-                        set(*setup.dword3, .trb_type,         xx SETUP_STAGE);
-                        set(*setup.dword3, .transfer_type,       3);
+                        request: Device_Request_Packet;
+                        set(*request.request_type, .direction, 1);
+                        request.request      = .GET_DESCRIPTOR;
+                        request.value        = .STRING;
+                        request.value       |= xx socket.device_descriptor.product_index;
+                        request.length       = 64;
+                        request.index        = 0x0409; // American English. Todo: Hardcoded, magic number.
 
-                        queue_command(*socket.ep0_transfer_ring, setup);
+                        execute_device_request(xhci, socket, request, string_buffer);
 
-                        data: Data_Stage_TRB;
-                        data.data_pointer = string_buffer;
-                        set(*data.dword2, .trb_transfer_length, 64);
-                        set(*data.dword3, .chain_bit,           1);
-                        set(*data.dword3, .trb_type,         xx DATA_STAGE);
-                        set(*data.dword3, .direction,           1);
-
-                        queue_command(*socket.ep0_transfer_ring, data);
-
-                        status: Status_Stage_TRB;
-                        set(*status.dword3, .evaluate_next_trb,          1);
-                        set(*status.dword3, .interrupt_on_completion,    1);
-                        set(*status.dword3, .trb_type,                xx STATUS_STAGE);
-
-                        queue_command(*socket.ep0_transfer_ring, status);
-
-                        flush_commands(xhci, slot_id, 1);
                         string_descriptor := cast(*String_Descriptor) (string_buffer + DIRECT_MAPPING_BASE);
 
-                        s: string;
-                        s.count = string_descriptor.length - 2;
-                        s.data = *string_descriptor.data;
+                        socket.string_description.count = (string_descriptor.length - 2) / 2;
+                        socket.string_description.data  = *string_descriptor.data;
 
-                        log("String: %, desc: %", cast([]u8)s, string_descriptor.*);
+                        // UTF16 to ASCII.
+                        #no_abc {
+                            for* socket.string_description it.* = socket.string_description[it_index * 2];
+                        }
+
+                        log("String: %", socket.string_description);
                     }
+
+                    {
+                        // Request endpoint descriptor.
+                        buffer := arena_get(*xhci.arena, 64);
+
+                        request: Device_Request_Packet;
+                        set(*request.request_type, .direction, 1);
+                        request.request      = .GET_DESCRIPTOR;
+                        request.value        = .CONFIGURATION;
+                        request.length       = 64;
+
+                        execute_device_request(xhci, socket, request, buffer);
+
+                        // Todo: Handle config descriptors larger than 64 bytes.
+                        // Todo: This should probably be more robust against buggy USB devices.
+
+                        header := cast(*Descriptor_Header) (buffer + DIRECT_MAPPING_BASE);
+
+                        todo_runtime_error(header.type == .CONFIGURATION);
+
+                        config   := cast(*Configuration_Descriptor) header;
+                        end_byte := cast(*void) header + min(config.total_length, 64);
+
+                        interfaces_found: int;
+
+                        while header < end_byte {
+                            if header.type == .INTERFACE {
+                                socket.interfaces[interfaces_found] = cast(*Interface_Descriptor) header;
+                                interfaces_found += 1;
+                            }
+
+                            header = cast(*void) header + header.length;
+                        }
+
+                        log("Found % interfaces.", interfaces_found);
+                    }
+
                   case .DEFAULT;
                     log("Got here.");
+
                   case;
                     log("State error.");
                 }
@@ -606,4 +603,46 @@ usb_thread :: () {
             | .PCD__port_change_detected
             | .HCE__host_controller_error;
     }
+}
+
+execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket, packet: Device_Request_Packet, physical_memory_buffer: u64) {
+    using TRB_Type;
+
+    setup: Setup_Stage_TRB;
+    setup.request = packet;
+    set(*setup.dword2, .trb_transfer_length, 8);
+    set(*setup.dword3, .immediate_data,      1);
+    set(*setup.dword3, .trb_type,         xx SETUP_STAGE);
+    set(*setup.dword3, .transfer_type,       3);
+    
+    queue_command(*socket.ep0_transfer_ring, setup);
+
+    size_per_data_trb := 64; // Todo: Hardcoded. Probably needs to come from the max transfer size of the endpoint.
+    bytes_transmitted := 0;
+
+    trbs_needed := (packet.length + size_per_data_trb-1) / size_per_data_trb;
+    assert(trbs_needed > 0);
+
+    for 0..trbs_needed-1 {
+        data: Data_Stage_TRB;
+        data.data_pointer = physical_memory_buffer + cast(u64) bytes_transmitted;
+
+        set(*data.dword2, .trb_transfer_length, min(packet.length - bytes_transmitted, size_per_data_trb));
+        set(*data.dword3, .chain_bit,           1);
+        set(*data.dword3, .trb_type,         xx DATA_STAGE);
+        set(*data.dword3, .direction,           1);
+
+        bytes_transmitted += size_per_data_trb;
+
+        queue_command(*socket.ep0_transfer_ring, data);
+    }
+
+    status: Status_Stage_TRB;
+    set(*status.dword3, .evaluate_next_trb,          1);
+    set(*status.dword3, .interrupt_on_completion,    1);
+    set(*status.dword3, .trb_type,                xx STATUS_STAGE);
+
+    queue_command(*socket.ep0_transfer_ring, status);
+
+    flush_commands(xhci, socket.slot_id, 1);
 }

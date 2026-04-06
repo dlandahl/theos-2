@@ -2809,6 +2809,11 @@ fill_random :: (buffer: []u8) {
     }
 }
 
+todo_runtime_error :: (condition: bool) {
+    // Calling this means "assert for now but needs to be handled properly in the future".
+    assert(condition, "Error handling not implemented.");
+}
+
 
 
 #import "Basic";
