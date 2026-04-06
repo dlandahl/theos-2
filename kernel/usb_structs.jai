@@ -690,8 +690,25 @@ Interface_Descriptor :: struct {
 
 Endpoint_Descriptor :: struct {
     using header: Descriptor_Header;
-    endpoint_address:    u8;
+
+    address:    enum u8 {
+        endpoint_number    :: 4;
+        _                  :: 3;
+        direction          :: 1;
+    }
+
     attributes:          u8;
     max_packet_size:     u8;
     interval:            u8;
+}
+
+Endpoint_Type :: enum {
+    INVALID          :: 0;
+    ISOCH_OUT        :: 1;
+    BULK_OUT         :: 2;
+    INTERRUPT_OUT    :: 3;
+    CONTROL          :: 4;
+    ISOCH_IN         :: 5;
+    BULK_IN          :: 6;
+    INTERRUPT_IN     :: 7;
 }
