@@ -278,6 +278,12 @@ init_usb_controller :: (device: *PCI_Device) {
 
         log("Resetting socket %. Active protocol: %", it_index+1, it.active_protocol);
     }
+
+
+    sleep(5, .seconds);
+    log_stats(xhci.arena);
+
+    while true #asm { sti; hlt; }
 }
 
 reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: bool {
@@ -375,6 +381,26 @@ usb_thread :: () {
             continue;
         }
 
+        defer {
+            // Maybe this doesn't actually need to be deferred.
+
+            xhci.event_ring_tail += 1;
+
+            if xhci.event_ring_tail == xhci.event_ring.count {
+                xhci.event_ring_tail = 0;
+                xhci.event_ring_cycle = !xhci.event_ring_cycle;
+            }
+
+            erdp_virtual := *xhci.event_ring[xhci.event_ring_tail];
+            xhci.IR[0].ERDP__event_ring_dequeue_pointer = get_physical_address(erdp_virtual) | (1 << 3); // Todo: magic number.
+            xhci.IR[0].IMAN__interrupter_management |= .IP__interrupt_pending;
+
+            xhci.USBSTS = .HSE__host_system_error
+                        | .EINT__event_interrupt
+                        | .PCD__port_change_detected
+                        | .HCE__host_controller_error;
+        }
+
         type := cast(TRB_Type) get(current_trb.dword3, .trb_type);
 
         if type == {
@@ -394,6 +420,22 @@ usb_thread :: () {
             transfer := cast(*Transfer_Event_TRB) current_trb;
             code     := cast(TRB_Completion_Code) get(transfer.dword2, .completion_code);
             slot_id  := get(transfer.dword3, .slot_id);
+            
+            log("% % %", hex(transfer.event_data), to_string(transfer.dword2), to_string(transfer.dword3));
+
+            socket: *USB_Controller.Socket;
+            for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
+            assert(!!socket);
+
+            if code != .SUCCESS && code != .SHORT_PACKET {
+                // Todo.
+                log_error("Transfer failed with code %.", code);
+                continue;
+            }
+
+            if socket.interface_descriptor.class == 3 {
+                update_hid_device(xhci, socket);
+            }
 
           case .COMMAND_COMPLETION_EVENT;
             completed  := cast(*Command_Completion_TRB) current_trb;
@@ -419,8 +461,8 @@ usb_thread :: () {
                 for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
                 assert(!!socket);
 
-                if socket.interface_descriptor.class == 0x3 {
-                    init_hid_device(socket);
+                if socket.interface_descriptor.class == 3 {
+                    init_hid_device(xhci, socket);
                 }
             }
 
@@ -692,22 +734,6 @@ usb_thread :: () {
                 flush_commands(xhci);
             }
         }
-
-        xhci.event_ring_tail += 1;
-
-        if xhci.event_ring_tail == xhci.event_ring.count {
-            xhci.event_ring_tail = 0;
-            xhci.event_ring_cycle = !xhci.event_ring_cycle;
-        }
-
-        erdp_virtual := *xhci.event_ring[xhci.event_ring_tail];
-        xhci.IR[0].ERDP__event_ring_dequeue_pointer = get_physical_address(erdp_virtual) | (1 << 3); // Todo: magic number.
-        xhci.IR[0].IMAN__interrupter_management |= .IP__interrupt_pending;
-
-        xhci.USBSTS = .HSE__host_system_error
-            | .EINT__event_interrupt
-            | .PCD__port_change_detected
-            | .HCE__host_controller_error;
     }
 }
 

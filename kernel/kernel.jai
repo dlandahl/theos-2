@@ -1411,7 +1411,7 @@ get_physical_address :: (virtual_address: *void) -> u64, present: bool {
         if !is_present return 0, false;
         if it.level != 0 && (it.flags & .PAGE_SIZE == 0) continue;
 
-        offset_in_page_mask := 1 << (it.level * 9) - 1;
+        offset_in_page_mask := 1 << (12 + it.level * 9) - 1;
 
         address        := it.value & cast(u64) ~Page_Flags.MASK;
         offset_in_page := cast(u64) virtual_address & offset_in_page_mask;
