@@ -682,10 +682,10 @@ Interface_Descriptor :: struct {
     interface_count:     u8;
     alternate_setting:   u8;
     endpoint_count:      u8;
-    interface_class:     u8;
-    interface_sub_class: u8;
-    interface_protocol:  u8;
-    interface_index:     u8;
+    class:               u8;
+    sub_class:           u8;
+    protocol:            u8;
+    index:               u8;
 }
 
 Endpoint_Descriptor :: struct {

@@ -1,7 +1,9 @@
 
-#load "usb_structs.jai";
+#load "usb_types.jai";
+#load "usb_hid.jai";
 
 USB_Controller :: struct {
+
     Socket :: struct {
         // Either of these may be null if the socket does not support that protocol.
         usb3_port: *XHCI_Port_Registers;
@@ -16,24 +18,28 @@ USB_Controller :: struct {
         device_context: *void;
         slot_id: int;
 
-        ep0_transfer_ring: Ring;
-
         device_descriptor: Device_Descriptor #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
         string_description: string;
 
         // Todo: Support switching multiple interfaces.
         interface_descriptor: *Interface_Descriptor;
 
-        endpoints: [..] struct {
-            descriptor: *Endpoint_Descriptor;
-            transfer_ring: Ring;
-        };
+        endpoints: [32] Endpoint; // Indexed by device context index (DCI).
+        #overlay (endpoints) control_endpoint: Endpoint;
     }
 
     Ring :: struct {
         buffer:   [] Normal_TRB;
         head:        int;
         cycle:       bool;
+    }
+
+    Endpoint :: struct {
+        active: bool;
+
+        descriptor: *Endpoint_Descriptor; // null for control endpoints.
+        transfer_ring: Ring;
+        max_transfer_size: int;
     }
 
     sockets: [] Socket;
@@ -272,12 +278,6 @@ init_usb_controller :: (device: *PCI_Device) {
 
         log("Resetting socket %. Active protocol: %", it_index+1, it.active_protocol);
     }
-
-
-    sleep(5, .seconds);
-    log_stats(xhci.arena);
-
-    while true #asm { sti; hlt; }
 }
 
 reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: bool {
@@ -381,7 +381,7 @@ usb_thread :: () {
           case .PORT_STATUS_CHANGE_EVENT;
             // Todo: Check if it was a detach rather than an attach.
             port := (current_trb.event_data >> 24) & 0xff;
-            
+
             command: Normal_TRB;
             set(*command.dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
             set(*command.dword3, .interrupt_on_completion, 1);
@@ -409,6 +409,21 @@ usb_thread :: () {
                 continue;
             }
 
+            log("Completed command type %.", other_type);
+
+            if other_type == .CONFIGURE_ENDPOINT_COMMAND {
+                slot_id := get(completed.dword3, .slot_id);
+                log("Endpoint configured (Slot %).", slot_id);
+                
+                socket: *USB_Controller.Socket;
+                for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
+                assert(!!socket);
+
+                if socket.interface_descriptor.class == 0x3 {
+                    init_hid_device(socket);
+                }
+            }
+
             if other_type == .ADDRESS_DEVICE_COMMAND {
                 // I don't know how to figure out the socket for this command other than looking for the slot ID.
                 slot_id := get(completed.dword3, .slot_id);
@@ -433,7 +448,7 @@ usb_thread :: () {
                         request.length       = 18;
 
                         buffer := get_physical_address(*socket.device_descriptor);
-                        execute_device_request(xhci, socket, request, buffer);
+                        execute_device_request(xhci, socket, *socket.control_endpoint, request, buffer);
 
                         log("Descriptor: %", socket.device_descriptor);
                     }
@@ -450,7 +465,7 @@ usb_thread :: () {
                         request.length       = 64;
                         request.index        = 0x0409; // American English. Todo: Hardcoded, magic number.
 
-                        execute_device_request(xhci, socket, request, string_buffer);
+                        execute_device_request(xhci, socket, *socket.control_endpoint, request, string_buffer);
 
                         string_descriptor := cast(*String_Descriptor) (string_buffer + DIRECT_MAPPING_BASE);
 
@@ -475,7 +490,7 @@ usb_thread :: () {
                         request.value        = .CONFIGURATION;
                         request.length       = 64;
 
-                        execute_device_request(xhci, socket, request, buffer);
+                        execute_device_request(xhci, socket, *socket.control_endpoint, request, buffer);
 
                         // Todo: Handle config descriptors larger than 64 bytes.
                         // Todo: This should probably be more robust against buggy USB devices.
@@ -487,8 +502,6 @@ usb_thread :: () {
 
                         config   := cast(*Configuration_Descriptor) header;
                         end_byte := cast(*void) header + min(config.total_length, 64);
-
-                        endpoints_found := 0;
 
                         while header < end_byte {
                             if header.type == .INTERFACE {
@@ -502,21 +515,29 @@ usb_thread :: () {
                             if header.type == .ENDPOINT {
                                 assert(!!socket.interface_descriptor);
 
-                                array_add(*socket.endpoints, { cast(*Endpoint_Descriptor) header, {} });
-                                endpoints_found += 1;
+                                desc := cast(*Endpoint_Descriptor) header;
+
+                                direction_bit   := get(desc.address, .direction);
+                                endpoint_number := get(desc.address, .endpoint_number);
+
+                                dci := 2 * endpoint_number + direction_bit;
+
+                                assert(dci > 1 && dci < 32);
+
+                                endpoint := *socket.endpoints[dci];
+                                endpoint.descriptor = desc;
+                                endpoint.max_transfer_size = desc.max_packet_size;
+                                endpoint.active = true;
                             }
 
                             header = cast(*void) header + header.length;
                         }
 
-                        assert(socket.interface_descriptor.endpoint_count == endpoints_found);
-
-                        log("Found % endpoints.", endpoints_found);
+                        log("Interface: %", socket.interface_descriptor.*);
                     }
 
                     {
                         // Now that we know the endpoints, we need to update the context array with new endpoint contexts.
-                        assert(!!socket.endpoints);
 
                         input_context_physical := get_4k_page(); // Todo: Leak.
                         input_context_base     := cast(*void) input_context_physical + DIRECT_MAPPING_BASE;
@@ -531,15 +552,17 @@ usb_thread :: () {
                         slot_context: *Slot_Context = input_context_base + context_size;
                         memcpy(slot_context, socket.device_context, context_size);
 
-                        // Endpoint address to device context index.
-                        highest_dci: int;
+                        highest_dci: int = 1;
 
                         for* socket.endpoints {
+                            if !it.active       continue;
+                            if  it_index < 2    continue; // Skip slot and control. Maybe 0 should be the control endpoint, but right now it's indexed by DCI, which is simpler and less confusing, but means that the first entry is meaningless.
+
                             direction_bit := get_bit(it.descriptor.address, .direction);
                             type          := cast(Endpoint_Type) it.descriptor.attributes & 0b11;
-                            if direction_bit type += 4;
+                            if direction_bit type += 4; // Translate from IN endpoint types to OUT.
 
-                            dci := 2 * get(it.descriptor.address, .endpoint_number) + cast(int) direction_bit;
+                            dci := it_index;
 
                             control_context.add_flags |= cast(u32) (1 << dci);
 
@@ -620,7 +643,7 @@ usb_thread :: () {
                 set(*slot_context.dword0, .speed, speed);
                 slot_context.root_hub_port_number = cast(u8) (port_id);
                 
-                endpoint_context: *Endpoint_Context = input_context_base + 2*context_size;
+                endpoint_context: *Endpoint_Context = input_context_base + 2 * context_size;
                 endpoint_context.* = {};
 
                 set(*endpoint_context.dword1, .endpoint_type,  xx Endpoint_Type.CONTROL);
@@ -649,10 +672,11 @@ usb_thread :: () {
                 // We need to make sure to reuse these transfer rings when different devices are added and
                 // removed, because we can't free the memory, as it comes from the arena.
                 transfer_ring_physical := arena_get(*xhci.arena, 4096, 4096);
-                socket.ep0_transfer_ring.buffer.data  = cast(*Normal_TRB) (transfer_ring_physical + DIRECT_MAPPING_BASE);
-                socket.ep0_transfer_ring.buffer.count = 4096 / TRB_SIZE;
-                socket.ep0_transfer_ring.cycle = true;
-
+                socket.control_endpoint.transfer_ring.buffer.data  = cast(*Normal_TRB) (transfer_ring_physical + DIRECT_MAPPING_BASE);
+                socket.control_endpoint.transfer_ring.buffer.count = 4096 / TRB_SIZE;
+                socket.control_endpoint.transfer_ring.cycle = true;
+                socket.control_endpoint.max_transfer_size = get(endpoint_context.dword1, .max_packet_size);
+                
                 set_in_place(*endpoint_context.dword2_and_dword3, .tr_dequeue_pointer, transfer_ring_physical);
                 set_bit     (*endpoint_context.dword2_and_dword3, .dequeue_cycle_state);
                 endpoint_context.average_trb_length = 8;
@@ -687,7 +711,7 @@ usb_thread :: () {
     }
 }
 
-execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket, packet: Device_Request_Packet, physical_memory_buffer: u64) {
+execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket, endpoint: *USB_Controller.Endpoint, packet: Device_Request_Packet, physical_memory_buffer: u64) {
     // Todo: Does not handle when the command ring is full.
 
     using TRB_Type;
@@ -699,26 +723,26 @@ execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket
     set(*setup.dword3, .trb_type,         xx SETUP_STAGE);
     set(*setup.dword3, .transfer_type,       3);
     
-    queue_command(*socket.ep0_transfer_ring, setup);
+    queue_command(*endpoint.transfer_ring, setup);
 
-    size_per_data_trb := 64; // Todo: Hardcoded. Probably needs to come from the max transfer size of the endpoint.
+    bytes_per_trb     := endpoint.max_transfer_size;
     bytes_transmitted := 0;
 
-    trbs_needed := (packet.length + size_per_data_trb-1) / size_per_data_trb;
+    trbs_needed := (packet.length + bytes_per_trb-1) / bytes_per_trb;
     assert(trbs_needed > 0);
 
     for 0..trbs_needed-1 {
         data: Data_Stage_TRB;
         data.data_pointer = physical_memory_buffer + cast(u64) bytes_transmitted;
 
-        set(*data.dword2, .trb_transfer_length, min(packet.length - bytes_transmitted, size_per_data_trb));
+        set(*data.dword2, .trb_transfer_length, min(packet.length - bytes_transmitted, bytes_per_trb));
         set(*data.dword3, .chain_bit,           1);
         set(*data.dword3, .trb_type,         xx DATA_STAGE);
         set(*data.dword3, .direction,           1);
 
-        bytes_transmitted += size_per_data_trb;
+        bytes_transmitted += bytes_per_trb;
 
-        queue_command(*socket.ep0_transfer_ring, data);
+        queue_command(*endpoint.transfer_ring, data);
     }
 
     status: Status_Stage_TRB;
@@ -726,7 +750,17 @@ execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket
     set(*status.dword3, .interrupt_on_completion,    1);
     set(*status.dword3, .trb_type,                xx STATUS_STAGE);
 
-    queue_command(*socket.ep0_transfer_ring, status);
+    queue_command(*endpoint.transfer_ring, status);
 
-    flush_commands(xhci, socket.slot_id, 1);
+    db_target := 1;
+
+    if endpoint.descriptor {
+        // Maybe we should store the DCI when we enumerate the endpoint, rather than parsing it out each transfer.
+        direction_bit := get_bit(endpoint.descriptor.address, .direction);
+        dci := 2 * get(endpoint.descriptor.address, .endpoint_number) + cast(int) direction_bit;
+
+        db_target = dci;
+    }
+
+    flush_commands(xhci, socket.slot_id, cast(u32) db_target);
 }
