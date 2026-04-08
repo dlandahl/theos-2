@@ -417,11 +417,9 @@ usb_thread :: () {
             flush_commands(xhci);
 
           case .TRANSFER_EVENT;
-            transfer := cast(*Transfer_Event_TRB) current_trb;
-            code     := cast(TRB_Completion_Code) get(transfer.dword2, .completion_code);
-            slot_id  := get(transfer.dword3, .slot_id);
-            
-            log("% % %", hex(transfer.event_data), to_string(transfer.dword2), to_string(transfer.dword3));
+            event    := cast(*Transfer_Event_TRB) current_trb;
+            code     := cast(TRB_Completion_Code) get(event.dword2, .completion_code);
+            slot_id  := get(event.dword3, .slot_id);
 
             socket: *USB_Controller.Socket;
             for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
@@ -434,7 +432,7 @@ usb_thread :: () {
             }
 
             if socket.interface_descriptor.class == 3 {
-                update_hid_device(xhci, socket);
+                hid_transfer_completed(xhci, socket, event);
             }
 
           case .COMMAND_COMPLETION_EVENT;
@@ -450,8 +448,6 @@ usb_thread :: () {
                 log_error("Command of type % failed with code %.", other_type, code);
                 continue;
             }
-
-            log("Completed command type %.", other_type);
 
             if other_type == .CONFIGURE_ENDPOINT_COMMAND {
                 slot_id := get(completed.dword3, .slot_id);
@@ -692,6 +688,7 @@ usb_thread :: () {
                 set(*endpoint_context.dword1, .error_count,    3);
 
                 if cast(XHCI_Port_Speed) speed == {
+                  case .UNDEFINED; #through;
                   case .LOW_SPEED; #through;
                   case .FULL_SPEED;
                     set(*endpoint_context.dword1, .max_packet_size, 8);
@@ -705,7 +702,6 @@ usb_thread :: () {
                   case .SUPER_SPEED_GEN2_2X;
                     set(*endpoint_context.dword1, .max_packet_size, 512);
 
-                  case .UNDEFINED; #through;
                   case;
                     assert(false); // Todo: Error.
                 }

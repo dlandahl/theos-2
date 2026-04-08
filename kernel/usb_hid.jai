@@ -8,10 +8,9 @@ Mouse_Packet :: struct {
 
     x: s8;
     y: s8;
-    wheel: s8;
+    scroll: s8;
 }
 
-cursor: int;
 buffer: [10] Mouse_Packet #align 64;
 
 init_hid_device :: (controller: *USB_Controller, socket: *USB_Controller.Socket) {
@@ -21,7 +20,8 @@ init_hid_device :: (controller: *USB_Controller, socket: *USB_Controller.Socket)
     if socket.interface_descriptor.protocol  != 2 return; // 1 = keyboard, 2 = mouse.
 
     for socket.endpoints {
-        if !it.active continue;
+        if !it.active   continue;
+        if it_index < 2 continue;
 
         push_print_style().base = 16;
         log("Endpoint descriptor: %", it.descriptor.*);
@@ -40,33 +40,34 @@ init_hid_device :: (controller: *USB_Controller, socket: *USB_Controller.Socket)
         }
 
         flush_commands(controller, socket.slot_id, cast(u32) it_index);
-        cursor = 10;
     }
 }
 
-update_hid_device :: (controller: *USB_Controller, socket: *USB_Controller.Socket) {
+hid_transfer_completed :: (controller: *USB_Controller, socket: *USB_Controller.Socket, event: *Transfer_Event_TRB) {
     log_category("HID");
 
     if socket.interface_descriptor.sub_class != 1 return;
     if socket.interface_descriptor.protocol  != 2 return; // 1 = keyboard, 2 = mouse.
 
-    log("%", buffer);
+    endpoint_id := get(event.dword3, .endpoint_id);
+    if endpoint_id < 2 return; // Todo: Transfer events for endpoint 1 are arriving here. But those are control events, so need to be handled differently.
 
-    for socket.endpoints {
-        if !it.active continue;
+    assert(endpoint_id > 1 && endpoint_id < 32);
 
-        slot := cursor % buffer.count;
+    endpoint := *socket.endpoints[endpoint_id];
+    assert(endpoint.active);
 
-        trb: Normal_TRB;
-        trb.data_pointer = get_physical_address(*buffer[slot]);
-        set(*trb.dword2, .transfer_length, size_of(Mouse_Packet));
-        set(*trb.dword3, .interrupt_on_short_packet, 1);
-        set(*trb.dword3, .interrupt_on_completion, 1);
-        set(*trb.dword3, .trb_type, xx TRB_Type.NORMAL);
+    completed_trb          := cast(*Normal_TRB)   (event.event_data           + DIRECT_MAPPING_BASE);
+    completed_mouse_packet := cast(*Mouse_Packet) (completed_trb.data_pointer + DIRECT_MAPPING_BASE);
+    log("Mouse input: %", completed_mouse_packet.*);
 
-        queue_command(*it.transfer_ring, trb);
-        flush_commands(controller, socket.slot_id, cast(u32) it_index);
+    trb: Normal_TRB;
+    trb.data_pointer = completed_trb.data_pointer;
+    set(*trb.dword2, .transfer_length, size_of(Mouse_Packet));
+    set(*trb.dword3, .interrupt_on_short_packet, 1);
+    set(*trb.dword3, .interrupt_on_completion, 1);
+    set(*trb.dword3, .trb_type, xx TRB_Type.NORMAL);
 
-        cursor += 1;
-    }
+    queue_command(*endpoint.transfer_ring, trb);
+    flush_commands(controller, socket.slot_id, endpoint_id);
 }
