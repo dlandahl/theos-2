@@ -641,6 +641,7 @@ Descriptor_Header :: struct {
         STRING          :: 3;
         INTERFACE       :: 4;
         ENDPOINT        :: 5;
+        HID             :: 0x21;
         SUPER_SPEED_ENDPOINT_COMPANION :: 0x30;
     }
 }

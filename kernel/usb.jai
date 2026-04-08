@@ -5,6 +5,8 @@
 USB_Controller :: struct {
 
     Socket :: struct {
+        controller: *USB_Controller;
+
         // Either of these may be null if the socket does not support that protocol.
         usb3_port: *XHCI_Port_Registers;
         usb2_port: *XHCI_Port_Registers;
@@ -26,6 +28,8 @@ USB_Controller :: struct {
 
         endpoints: [32] Endpoint; // Indexed by device context index (DCI).
         #overlay (endpoints) control_endpoint: Endpoint;
+
+        device_specific: *void;
     }
 
     Ring :: struct {
@@ -164,6 +168,8 @@ init_usb_controller :: (device: *PCI_Device) {
         if !next_offset  break;
         list = cast(*void) list + next_offset * size_of(u32);
     }
+
+    for* xhci.sockets it.controller = xhci;
 
     // Reset the controller.
     xhci.USBCMD &= ~.RS__run_stop;
@@ -432,7 +438,7 @@ usb_thread :: () {
             }
 
             if socket.interface_descriptor.class == 3 {
-                hid_transfer_completed(xhci, socket, event);
+                if socket.device_specific hid_transfer_event(socket.device_specific, event);
             }
 
           case .COMMAND_COMPLETION_EVENT;
@@ -458,7 +464,7 @@ usb_thread :: () {
                 assert(!!socket);
 
                 if socket.interface_descriptor.class == 3 {
-                    init_hid_device(xhci, socket);
+                    socket.device_specific = init_hid_device(socket);
                 }
             }
 
