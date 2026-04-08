@@ -3,50 +3,13 @@
 #load "usb_hid.jai";
 
 USB_Controller :: struct {
-
-    Socket :: struct {
-        controller: *USB_Controller;
-
-        // Either of these may be null if the socket does not support that protocol.
-        usb3_port: *XHCI_Port_Registers;
-        usb2_port: *XHCI_Port_Registers;
-
-        active_protocol: enum {
-            NONE; USB3; USB2;
-        }
-
-        // Doesn't have a type, since the size of the context entries depends on capability
-        // flags in the controller.
-        device_context: *void;
-        slot_id: int;
-
-        device_descriptor: Device_Descriptor #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
-        string_description: string;
-
-        // Todo: Support switching multiple interfaces.
-        interface_descriptor: *Interface_Descriptor;
-
-        endpoints: [32] Endpoint; // Indexed by device context index (DCI).
-        #overlay (endpoints) control_endpoint: Endpoint;
-
-        device_specific: *void;
-    }
-
     Ring :: struct {
         buffer:   [] Normal_TRB;
         head:        int;
         cycle:       bool;
     }
 
-    Endpoint :: struct {
-        active: bool;
-
-        descriptor: *Endpoint_Descriptor; // null for control endpoints.
-        transfer_ring: Ring;
-        max_transfer_size: int;
-    }
-
-    sockets: [] Socket;
+    sockets: [] USB_Socket;
 
     mmio_base: *void;
 
@@ -68,6 +31,51 @@ USB_Controller :: struct {
 
     arena: Physical_Memory_Arena;
     semaphore: Semaphore;
+}
+
+USB_Socket :: struct {
+    // This struct also represents the connected device, if one is connected.
+
+    controller: *USB_Controller;
+
+    // Either of these may be null if the socket does not support that protocol.
+    usb3_port: *XHCI_Port_Registers;
+    usb2_port: *XHCI_Port_Registers;
+
+    active_protocol: enum {
+        NONE; USB3; USB2;
+    }
+
+    // Doesn't have a type, since the size of the context entries depends on capability
+    // flags in the controller.
+    device_context: *void;
+    slot_id: int;
+
+    device_descriptor: Device_Descriptor #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
+    string_description: string;
+
+    // Todo: Support switching multiple interfaces.
+    interface_descriptor: *Interface_Descriptor;
+
+
+    Endpoint :: struct {
+        active: bool;
+
+        descriptor: *Endpoint_Descriptor; // null for control endpoints.
+        transfer_ring: USB_Controller.Ring;
+        max_transfer_size: int;
+    }
+
+    endpoints: [32] Endpoint; // Indexed by device context index (DCI). 1 = Control endpoint.
+
+    // Kind of a mess.
+    #overlay (endpoints) using _: struct {
+        _: Endpoint; // The slot context.
+        control_endpoint: Endpoint;
+    }
+
+
+    device_specific: *void;
 }
 
 #program_export
@@ -326,7 +334,7 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: boo
     return get_bit(port.PORTSC, .PED__enabled_disabled);
 }
 
-socket_from_port_id :: (xhci: *USB_Controller, port_id: int) -> *USB_Controller.Socket {
+socket_from_port_id :: (xhci: *USB_Controller, port_id: int) -> *USB_Socket {
     // Todo: Remove this and just make an index table to go from port to socket.
 
     assert(port_id != 0);
@@ -427,7 +435,7 @@ usb_thread :: () {
             code     := cast(TRB_Completion_Code) get(event.dword2, .completion_code);
             slot_id  := get(event.dword3, .slot_id);
 
-            socket: *USB_Controller.Socket;
+            socket: *USB_Socket;
             for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
             assert(!!socket);
 
@@ -459,7 +467,7 @@ usb_thread :: () {
                 slot_id := get(completed.dword3, .slot_id);
                 log("Endpoint configured (Slot %).", slot_id);
                 
-                socket: *USB_Controller.Socket;
+                socket: *USB_Socket;
                 for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
                 assert(!!socket);
 
@@ -472,7 +480,7 @@ usb_thread :: () {
                 // I don't know how to figure out the socket for this command other than looking for the slot ID.
                 slot_id := get(completed.dword3, .slot_id);
 
-                socket: *USB_Controller.Socket;
+                socket: *USB_Socket;
                 for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
                 assert(!!socket);
 
@@ -492,7 +500,7 @@ usb_thread :: () {
                         request.length       = 18;
 
                         buffer := get_physical_address(*socket.device_descriptor);
-                        execute_device_request(xhci, socket, *socket.control_endpoint, request, buffer);
+                        execute_device_request(socket, 1, request, buffer);
 
                         log("Descriptor: %", socket.device_descriptor);
                     }
@@ -509,7 +517,7 @@ usb_thread :: () {
                         request.length       = 64;
                         request.index        = 0x0409; // American English. Todo: Hardcoded, magic number.
 
-                        execute_device_request(xhci, socket, *socket.control_endpoint, request, string_buffer);
+                        execute_device_request(socket, 1, request, string_buffer);
 
                         string_descriptor := cast(*String_Descriptor) (string_buffer + DIRECT_MAPPING_BASE);
 
@@ -534,7 +542,7 @@ usb_thread :: () {
                         request.value        = .CONFIGURATION;
                         request.length       = 64;
 
-                        execute_device_request(xhci, socket, *socket.control_endpoint, request, buffer);
+                        execute_device_request(socket, 1, request, buffer);
 
                         // Todo: Handle config descriptors larger than 64 bytes.
                         // Todo: This should probably be more robust against buggy USB devices.
@@ -739,10 +747,12 @@ usb_thread :: () {
     }
 }
 
-execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket, endpoint: *USB_Controller.Endpoint, packet: Device_Request_Packet, physical_memory_buffer: u64) {
+execute_device_request :: (socket: *USB_Socket, endpoint_id: int, packet: Device_Request_Packet, physical_memory_buffer: u64) {
     // Todo: Does not handle when the command ring is full.
 
     using TRB_Type;
+
+    endpoint := *socket.endpoints[endpoint_id];
 
     setup: Setup_Stage_TRB;
     setup.request = packet;
@@ -780,15 +790,5 @@ execute_device_request :: (xhci: *USB_Controller, socket: *USB_Controller.Socket
 
     queue_command(*endpoint.transfer_ring, status);
 
-    db_target := 1;
-
-    if endpoint.descriptor {
-        // Maybe we should store the DCI when we enumerate the endpoint, rather than parsing it out each transfer.
-        direction_bit := get_bit(endpoint.descriptor.address, .direction);
-        dci := 2 * get(endpoint.descriptor.address, .endpoint_number) + cast(int) direction_bit;
-
-        db_target = dci;
-    }
-
-    flush_commands(xhci, socket.slot_id, cast(u32) db_target);
+    flush_commands(socket.controller, socket.slot_id, cast(u32) endpoint_id);
 }

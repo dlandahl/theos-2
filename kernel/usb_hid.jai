@@ -6,8 +6,8 @@ Mouse_Report :: struct {
         MIDDLE;
     }
 
-    x: s8;
-    y: s8;
+    x:      s8;
+    y:      s8;
     scroll: s8;
 }
 
@@ -40,7 +40,7 @@ HID_Descriptor :: struct {
 }
 
 HID_Device :: struct {
-    socket: *USB_Controller.Socket;
+    socket: *USB_Socket;
 
     type: enum {
         MOUSE; KEYBOARD;
@@ -51,9 +51,12 @@ HID_Device :: struct {
         mouse:    Mouse_Report    #align 16;
         keyboard: Keyboard_Report #align 16;
     };
+
+    REPORT_STRIDE :: size_of(type_of(input_buffer[0]));
+    #assert REPORT_STRIDE == 16;
 }
 
-init_hid_device :: (socket: *USB_Controller.Socket) -> *HID_Device {
+init_hid_device :: (socket: *USB_Socket) -> *HID_Device {
     log_category("HID");
 
     if socket.interface_descriptor.sub_class != 1 return null;
@@ -79,7 +82,7 @@ init_hid_device :: (socket: *USB_Controller.Socket) -> *HID_Device {
         for* b: device.input_buffer {
             trb: Normal_TRB;
             trb.data_pointer = physical_base + cast(u64) it_index * 64;
-            set(*trb.dword2, .transfer_length, 16);
+            set(*trb.dword2, .transfer_length, HID_Device.REPORT_STRIDE);
             set(*trb.dword3, .interrupt_on_short_packet, 1);
             set(*trb.dword3, .interrupt_on_completion, 1);
             set(*trb.dword3, .trb_type, xx TRB_Type.NORMAL);
@@ -108,8 +111,8 @@ hid_transfer_event :: (device: *HID_Device, event: *Transfer_Event_TRB) {
     endpoint := *socket.endpoints[endpoint_id];
     assert(endpoint.active);
 
-    completed_trb      := cast(*Normal_TRB)   (event.event_data           + DIRECT_MAPPING_BASE);
-    completed_report   := cast(*void) (completed_trb.data_pointer + DIRECT_MAPPING_BASE);
+    completed_trb      := cast(*Normal_TRB) (event.event_data           + DIRECT_MAPPING_BASE);
+    completed_report   := cast(*void)       (completed_trb.data_pointer + DIRECT_MAPPING_BASE);
 
     if device.type == .MOUSE {
         log("Mouse input: %",    completed_report.(*Mouse_Report).*);
@@ -119,7 +122,7 @@ hid_transfer_event :: (device: *HID_Device, event: *Transfer_Event_TRB) {
 
     trb: Normal_TRB;
     trb.data_pointer = completed_trb.data_pointer;
-    set(*trb.dword2, .transfer_length, 16);
+    set(*trb.dword2, .transfer_length, HID_Device.REPORT_STRIDE);
     set(*trb.dword3, .interrupt_on_short_packet, 1);
     set(*trb.dword3, .interrupt_on_completion, 1);
     set(*trb.dword3, .trb_type, xx TRB_Type.NORMAL);
