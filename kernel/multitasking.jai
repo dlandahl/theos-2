@@ -666,6 +666,7 @@ Semaphore :: struct {
 wait_for :: (using sema: *Semaphore, timeout := INFINITE_TIMEOUT) -> bool {
 
     acquire(*spinlock);
+    trace(.wait_semaphore, counter);
 
     if counter > 0 {
         counter -= 1;
@@ -731,6 +732,7 @@ try_wait :: (using sem: *Semaphore) -> bool {
 signal :: (using sema: *Semaphore) {
     acquire(*spinlock);
 
+    trace(.signal_semaphore, counter);
     ensure_initialized(*queue);
 
     if is_empty(*queue) {

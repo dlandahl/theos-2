@@ -2338,7 +2338,9 @@ acquire :: (lock: *Spinlock) #no_context {
 release :: (lock: *Spinlock) #no_context {
     #if DEBUG_SPINLOCKS lock.held_by = null;
 
-    lock.now_serving += 1;
+    #no_aoc {
+        lock.now_serving += 1;
+    }
 
     #if lock.lock_type == {
         case .PREEMPT; preempt_restore();
@@ -2666,3 +2668,9 @@ Curve25519 :: #import "Curve25519";
 
 TRACE_INCLUDE_RUNTIME_CODE :: true;
 #load "trace.jai";
+
+// Modules used by the host workspace, we can import them here rather than any random #run,host block.
+#run,host {
+    #import "Compiler";
+    #import "File";
+}

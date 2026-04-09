@@ -24,6 +24,8 @@ Trace_Tag :: enum u16 {
     resched_by_wakeup;
     resched_by_quantum;
     section_break;
+    signal_semaphore;
+    wait_semaphore;
     message;
 }
 

@@ -294,9 +294,6 @@ startup_application_processors :: () {
 }
 
 ap_startup_bin :: #run,host -> [] u8 {
-    #import "Compiler";
-    #import "File";
-
     code := read_entire_file(".build/ap_startup.bin");
     return add_global_data(cast([] u8) code, .WRITABLE);
 }

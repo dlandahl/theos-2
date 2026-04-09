@@ -60,6 +60,8 @@ init_text_display :: () {
     output_buffer.data  = virtual;
     output_buffer.count = pages_needed * 0x20_0000 / size_of(u32);
 
+    memset(output_buffer.data, 0, output_buffer.count * size_of(u32));
+    
     initialized = true;
 }
 
@@ -145,7 +147,7 @@ draw_text :: (text: string) #no_context {
 
         cursor_x += 1;
     }
-    
+
     flush_screen();
 
     release(*spinlock);

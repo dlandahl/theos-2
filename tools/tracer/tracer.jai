@@ -644,6 +644,10 @@ draw_one_frame :: (dt: float) {
 
               case .create_process;
                 text = get_string(cast(Trace_String) it.user[0]);
+
+              case .wait_semaphore; #through;
+              case .signal_semaphore;
+                text = tprint("Counter = %", it.user[0]);
             }
 
             if text label(label_rect, text, lt);
