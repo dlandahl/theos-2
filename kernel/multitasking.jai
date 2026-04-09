@@ -42,6 +42,7 @@ Process_Context :: struct {
     semaphores:  Object_Table(Semaphore);
     mutexes:     Object_Table(Mutex);
     files:       Object_Table(Opened_File);
+    network_connections: Object_Table(*Tcp_Connection); // Todo: Doesn't need to be a pointer.
 
     spinlock: Spinlock;
 

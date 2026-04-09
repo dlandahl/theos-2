@@ -413,7 +413,8 @@ Tcp_Connection :: struct {
     do_close: bool;
 }
 
-blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> []u8 {
+// Todo: This is dumb, too many copies.
+blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> [] u8 {
 
     buffer := talloc(bytes);
     cursor: int;
@@ -431,7 +432,7 @@ blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIME
     return {bytes, buffer};
 }
 
-blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: []u8, timeout := INFINITE_TIMEOUT) -> bool, written: int {
+blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: [] u8, timeout := INFINITE_TIMEOUT) -> bool, written: int {
     cursor: int;
 
     while true {
@@ -2316,6 +2317,7 @@ network_thread :: () #no_context {
         }
     }
 }
+
 
 
 

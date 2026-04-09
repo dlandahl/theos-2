@@ -1,26 +1,16 @@
 
-Text_Drawing_State :: struct {
-    cursor_x: int;
-    cursor_y: int;
+Text_Display :: struct {
+    cursor_x: int; // Character index.
+    cursor_y: int; // Character index.
 
     font: Netpbm_Image;
 
     spinlock: Spinlock(.IRQ);
 
-    font_loaded: bool;
-}
+    output_buffer: [] u32; // Virtual memory ring buffer for rendered pixels. Includes the X margin but not Y.
 
-font_file :: #run,host -> [] u8 {
-    image := read_entire_file("font.pgm");
-    return add_global_data(cast([] u8) image, .READ_ONLY);
-}
+    initialized: bool;
 
-draw_text :: (text: string) #no_context {
-    using global.text_drawing_state;
-
-    if !font_loaded return;
-
-    acquire(*spinlock);
 
     line_spacing :: 5;   // Number of pixels between the bottom of one character cell, and the top of the next one down.
     char_width   :: 9;
@@ -32,13 +22,91 @@ draw_text :: (text: string) #no_context {
     // The lowest and highest ASCII codes that are included in the font bitmap.
     first_code   :: #char " ";
     last_code    :: #char "~";
+}
+
+init_text_display :: () {
+    using global.text_display_state;
+
+    font = parse_netpbm(font_file);
+
+    fb := *global.framebuffer;
+
+    frame_buffer_size := fb.y_resolution * fb.stride * size_of(u32);
+    frame_buffer_size  = align(0x20_0000, frame_buffer_size);
+
+    virtual := cast(*void) alloc_block(*global.virtual_large_page_allocator, frame_buffer_size * 2);
+
+    pages_needed     := frame_buffer_size / 0x20_0000;
+    pages            := NewArray(pages_needed, u64,, temp);
+
+    for* pages it.* = allocate_large_page();
+
+    for VM_Iterator.{virtual, pages_needed * 1024} {
+        if it.level == 1 {
+            page_index := it_index / 512;
+
+            it.value  = pages[page_index % pages_needed];
+            it.flags |= .PRESENT | .READ_WRITE | .PAGE_SIZE;
+
+            continue;
+        }
+
+        if it.flags & .PRESENT == 0 {
+            it.value  = get_4k_page();
+            it.flags |= .PRESENT | .READ_WRITE;
+        }
+    }
+
+    output_buffer.data  = virtual;
+    output_buffer.count = pages_needed * 0x20_0000 / size_of(u32);
+
+    initialized = true;
+}
+
+font_file :: #run,host -> [] u8 {
+    image := read_entire_file("font.pgm");
+    return add_global_data(cast([] u8) image, .READ_ONLY);
+}
+
+go_to_next_row :: () #no_context {
+    using global.text_display_state;
+
+    defer {
+        cursor_y += 1;
+        cursor_x = 0;
+    }
+
+    // If a row scrolled off the top of the screen, clear it to black, for when the buffer wraps around.
+    // Maybe this is inefficient, and we should detect at what point to do a larger clear, rather than
+    // clearing per line. But this will need to be changed anyway when we have manual user scrolling. In the
+    // future we'll keep one screen above and below the current scroll position alive, for fast scrolling.
+
+    fb := global.framebuffer;
+    rows_on_the_screen := (fb.y_resolution - 2 * margin) / (line_height);
+
+    if cursor_y <= rows_on_the_screen return;
+
+    row_to_clear         := cursor_y - rows_on_the_screen;
+    first_pixel_to_clear := row_to_clear * line_height * fb.stride;
+    first_pixel_to_clear &= (output_buffer.count - 1);
+
+    pixels_per_row       := line_height * fb.stride;
+
+    memset(output_buffer.data + first_pixel_to_clear, 0, pixels_per_row * size_of(u32));
+}
+
+draw_text :: (text: string) #no_context {
+    using global.text_display_state;
+
+    if !initialized return;
+
+    acquire(*spinlock); // Todo: Don't do it this way.
 
     framebuffer := global.framebuffer;
 
     for text {
         if it == #char "\n" {
-            cursor_y += 1;
-            cursor_x = 0;
+            go_to_next_row();
             continue;
         }
 
@@ -48,34 +116,14 @@ draw_text :: (text: string) #no_context {
             it = #char "?";
         }
 
-        max_x := (cursor_x + 1) * char_width + margin * 2;
+        max_x := (cursor_x + 1) * char_width + 2 * margin;
 
         if max_x >= framebuffer.x_resolution {
-            cursor_y += 1;
-            cursor_x = 0;
+            go_to_next_row();
         }
 
         screen_x := cursor_x * char_width  + margin;
-        screen_y := cursor_y * line_height + margin;
-
-        while screen_y + line_height + margin > framebuffer.y_resolution {
-            source := (line_height + margin) * framebuffer.stride;
-            target := margin * framebuffer.stride;
-
-            count := cursor_y * line_height * framebuffer.stride;
-
-            // Inefficient when printing strings with many newlines. Todo: Circular buffer.
-            memcpy(framebuffer.software_buffer + target, framebuffer.software_buffer + source, count * size_of(u32));
-
-            if global.bluescreen_occurred {
-                for 0..count-1 {
-                    framebuffer.software_buffer[target + it] |= 0xff;
-                }
-            }
-
-            cursor_y -= 1;
-            screen_y -= line_height;
-        }
+        screen_y := cursor_y * line_height; // No Y margin because it would mess up the ring buffer. It is added when blitting to the frame buffer.
 
         source_top_left := char_width * (cast(int) it - first_code);
         target_top_left := screen_x + screen_y * framebuffer.stride;
@@ -91,26 +139,37 @@ draw_text :: (text: string) #no_context {
                 pixel_color := value | (value << 8) | (value << 16) | (value << 24);
                 if global.bluescreen_occurred pixel_color |= 0xff;
 
-                red   := cast(int) (0xa0 * (1.0 / framebuffer.y_resolution) * (screen_y + char_y));
-                green := cast(int) (0xa0 * (1.0 / framebuffer.x_resolution) * (screen_x + char_x));
-
-                framebuffer.software_buffer[pixel_on_screen] = pixel_color;
+                output_buffer[pixel_on_screen & (output_buffer.count - 1)] = pixel_color;
             }
         }
 
         cursor_x += 1;
     }
-
+    
     flush_screen();
 
     release(*spinlock);
 }
 
 flush_screen :: () #no_context {
+    using global.text_display_state;
     fb := global.framebuffer;
-    size_bytes := fb.y_resolution * fb.stride * size_of(u32);
 
-    memcpy(fb.hardware_buffer, fb.software_buffer, size_bytes);
+    // Copy the text buffer to the hardware buffer.
+
+    pixels_per_character_row := line_height * fb.stride;
+
+    // First pixel index to copy.
+    copy_start := cursor_y * pixels_per_character_row;         // End of the buffer is the current row x pixels per row.
+    copy_start -= fb.stride * (fb.y_resolution - 2 * margin);  // Start one screen before the end of the buffer.
+
+    if copy_start < 0 then copy_start = 0;
+    copy_start %= output_buffer.count;
+
+    copy_count       := fb.stride * (fb.y_resolution - 2 * margin);
+    copy_destination := fb.hardware_buffer + margin * fb.stride;
+
+    memcpy(copy_destination, output_buffer.data + copy_start, copy_count * size_of(u32));
 }
 
 Netpbm_Image :: struct {

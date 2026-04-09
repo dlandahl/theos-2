@@ -115,7 +115,7 @@ hid_transfer_event :: (device: *HID_Device, event: *Transfer_Event_TRB) {
     completed_report   := cast(*void)       (completed_trb.data_pointer + DIRECT_MAPPING_BASE);
 
     if device.type == .MOUSE {
-        log("Mouse input: %",    completed_report.(*Mouse_Report).*);
+        log("Mouse input:    %", completed_report.(*Mouse_Report).*);
     } else {
         log("Keyboard input: %", completed_report.(*Keyboard_Report).*);
     }

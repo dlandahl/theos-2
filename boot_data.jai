@@ -3,7 +3,6 @@
 
 Framebuffer :: struct {
     hardware_buffer: *u32;
-    software_buffer: *u32;
     x_resolution: int;
     y_resolution: int;
     stride: int;

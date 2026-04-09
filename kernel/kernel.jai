@@ -87,7 +87,7 @@ Kernel_Globals :: struct {
     // said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
     tsc_deadline_support: bool;
 
-    text_drawing_state: Text_Drawing_State;
+    text_display_state: Text_Display;
 
     COM1: Serial_Port(0x3f8); // Used for writing to log files and the host console on VirtualBox and QEMU.
     COM2: Serial_Port(0x2f8); // Used for writing trace data.
@@ -254,30 +254,18 @@ kernel_entry :: () #no_context {
         }
 
         {
-            // Initialize the software framebuffer.
-            using global.framebuffer;
-
-            size_bytes := y_resolution * stride * size_of(u32);
-            size_bytes += 0x10_0000; // We copy black pixels from outside the framebuffer for convenience when doing text line-scrolling.
-
-            software_buffer = alloc(size_bytes);
-            memset(software_buffer, 0, size_bytes);
-        }
-
-        {
             // Sequentially allocating interrupt gates, starting after the ISA exceptions
             memset(global.interrupt_descriptor_table.data, 0, size_of(type_of(global.interrupt_descriptor_table)));
             global.next_free_interrupt_gate = 32;
         }
-
-        global.text_drawing_state.font = parse_netpbm(font_file);
-        global.text_drawing_state.font_loaded = true;
 
         {
             ts: Temporary_Storage;
             set_initial_data(*ts, TEMPORARY_STORAGE_SIZE, alloc(TEMPORARY_STORAGE_SIZE));
             context.temporary_storage = *ts;
         }
+
+        init_text_display();
 
         read_debug_info();
 
@@ -742,20 +730,17 @@ bluescreen :: () #no_context {
         // Stop other CPU cores using IPI. Todo: hardcoded.
         command: Apic_Interrupt_Command;
         command.command = 0xc00a1;
+
         apic_execute_ipi(command);
     }
 
     write_string("Bluescreen!\n");
 
-    using global.framebuffer;
+    fb := global.framebuffer;
 
-    for y: 0..y_resolution-1 {
-        for x: 0..x_resolution-1 {
-            software_buffer[x + y * stride] |= 0xff;
-        }
+    for 0..(fb.y_resolution * fb.stride) {
+        fb.hardware_buffer[it] |= 0xff;
     }
-
-    flush_screen();
 
     while true #asm {
         cli;
