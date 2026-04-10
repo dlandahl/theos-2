@@ -292,11 +292,7 @@ init_usb_controller :: (device: *PCI_Device) {
         log("Resetting socket %. Active protocol: %", it_index+1, it.active_protocol);
     }
 
-
-    sleep(5, .seconds);
     log_stats(xhci.arena);
-
-    while true #asm { sti; hlt; }
 }
 
 reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: bool {

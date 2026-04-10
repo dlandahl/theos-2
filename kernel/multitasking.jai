@@ -37,12 +37,12 @@ Process_Context :: struct {
     root_page_table: u64;
 
     // Object_Table is a Bucket_Array with generational indices added on. Maybe all types of objects should be in a tagged union and we just have one big table.
+    // Todo: These should probably either be lock free thread safe, or have locking built in, because there's a lot of taking the per-process-context lock to read/write them.
 
     page_frames: Object_Table(s32);
     semaphores:  Object_Table(Semaphore);
     mutexes:     Object_Table(Mutex);
     files:       Object_Table(Opened_File);
-    network_connections: Object_Table(*Tcp_Connection); // Todo: Doesn't need to be a pointer.
 
     spinlock: Spinlock;
 
@@ -960,7 +960,7 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
     reset_temporary_storage();
 
-    maybe_reschedule();
+    maybe_reschedule(); // Todo: I think this doesn't do anything.
 
     trace(.sysret, data.rax, data.r12);
 }
@@ -976,16 +976,21 @@ scope_lock_process_context :: () -> *Process_Context #expand {
     return pc;
 }
 
-memory_is_not_userspace :: (base: *void, size: int) -> bool {
+check_user_address :: (base: *void, size: int) -> invalid: bool {
     USER_LIMIT :: 0x7fff_ffff_ffff;
+    invalid: bool;
 
-    if size > USER_LIMIT return false;
-    if size < 0          return false;
+    invalid ||= size > USER_LIMIT;
+    invalid ||= size < 0;
 
-    if  base         > cast(*void) USER_LIMIT return false;
-    if (base + size) > cast(*void) USER_LIMIT return false;
+    invalid ||=  base         > cast(*void) USER_LIMIT;
+    invalid ||= (base + size) > cast(*void) USER_LIMIT;
 
-    return false;
+    if invalid {
+        set_syscall_failed();
+    }
+
+    return invalid;
 }
 
 set_syscall_failed :: () {
@@ -995,8 +1000,7 @@ set_syscall_failed :: () {
 
 
 display_string :: (data: *u8, count: s64) {
-    if memory_is_not_userspace(data, count) {
-        set_syscall_failed();
+    if check_user_address(data, count) {
         return;
     }
 
@@ -1012,8 +1016,7 @@ Thread_Settings :: struct @SyscallAPI {
     _: void;
     version := 1;
 
-    stack_memory: *void; // Points to the lowest memory address in the stack. The initial stack pointer is stack_memory + stack_size.
-    stack_size: int; // Todo: Unecessary.
+    stack_memory: *void; // Initial value of the stack pointer.
 
     priority := 50;
     name: string;
@@ -1024,33 +1027,28 @@ Thread_Settings :: struct @SyscallAPI {
 
 create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> thread_id: s64 {
 
-    if memory_is_not_userspace(settings, size_of(Thread_Settings)) {
+    if check_user_address(settings, size_of(Thread_Settings)) {
+        return 0;
+    }
+
+    if check_user_address(settings.name.data, settings.name.count) {
+        return 0;
+    }
+
+    if (settings.cpu_core < 0) || (settings.cpu_core >= global.processor_cores.count) {
         set_syscall_failed();
         return 0;
     }
 
-    using settings;
-
-    if memory_is_not_userspace(name.data, name.count) {
-        set_syscall_failed();
-        return 0;
-    }
-
-    if (cpu_core < 0) || (cpu_core >= global.processor_cores.count) {
-        set_syscall_failed();
-        return 0;
-    }
-
-    if memory_is_not_userspace(stack_memory, stack_size) {
-        set_syscall_failed();
+    if check_user_address(settings.stack_memory - 4096, 4096) {
         return 0;
     }
 
     old_task       := get_current_task();
     parent_process := old_task.process_context;
 
-    if process_id {
-        parent_process = lookup_object(*global.pc_storage, process_id);
+    if settings.process_id {
+        parent_process = lookup_object(*global.pc_storage, settings.process_id);
     }
 
     if !parent_process {
@@ -1070,18 +1068,18 @@ create_thread :: (entry_point: () #no_context, settings: *Thread_Settings) -> th
 
     new_task := create_task(
         entry_point       = forward_to_usermode,
-        name              = ifx name then copy_string(name) else "Unnamed user thread",
+        name              = ifx settings.name then copy_string(settings.name) else "Unnamed user thread",
         user_data         = cast(*void) entry_point,
         process_context   = parent_process
     );
 
-    if       priority >= 75 new_task.priority = .High;
-    else if  priority <= 25 new_task.priority = .Low;
+    if       settings.priority >= 75 new_task.priority = .High;
+    else if  settings.priority <= 25 new_task.priority = .Low;
     else                    new_task.priority = .Normal;
 
-    new_task.user_stack = stack_memory + stack_size;
+    new_task.user_stack = settings.stack_memory;
 
-    put_task_on_core(new_task, *global.processor_cores[cpu_core]);
+    put_task_on_core(new_task, *global.processor_cores[settings.cpu_core]);
 
     return new_task.id;
 } @Syscall(3)
@@ -1116,8 +1114,7 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
         return;
     }
 
-    if memory_is_not_userspace(virtual_address, 0x20_0000) {
-        set_syscall_failed();
+    if check_user_address(virtual_address, 0x20_0000) {
         return;
     }
 
@@ -1159,8 +1156,7 @@ map_subpage :: (page_id: u64, start: u64, count: u64, virtual_address: *void) {
         return;
     }
 
-    if memory_is_not_userspace(virtual_address, 0x20_0000) {
-        set_syscall_failed();
+    if check_user_address(virtual_address, 0x20_0000) {
         return;
     }
 
@@ -1190,14 +1186,12 @@ quit_process :: () {
     set_flag(.stopped, get_current_task());
 
     // Todo: Here we need to figure out when other threads of the same process have stopped running so we can free resources.
-    // Probably just put a counter on the process struct and spin. Or have a separate thread check the counter.
 } @Syscall(10)
 
 read_variable :: (name_bytes: *u8, name_length: int, output: *void) {
     // Temporary system.
 
-    if memory_is_not_userspace(name_bytes, name_length) { // Could make this always set an error that says memory address invalid.
-        set_syscall_failed();
+    if check_user_address(name_bytes, name_length) {
         return;
     }
 
@@ -1207,8 +1201,7 @@ read_variable :: (name_bytes: *u8, name_length: int, output: *void) {
     if equal_nocase(s, "tsc_frequency") variable = global.tsc_frequency;
     if equal_nocase(s, "boot_time")     variable = global.boot_time;
 
-    if memory_is_not_userspace(output, variable.type.runtime_size) {
-        set_syscall_failed();
+    if check_user_address(output, variable.type.runtime_size) {
         return;
     }
 
@@ -1222,12 +1215,13 @@ Process_Settings :: struct @SyscallAPI {
 }
 
 start_process :: (settings: *Process_Settings) -> id: int {
-    if memory_is_not_userspace(settings, size_of(Process_Settings)) {
-        set_syscall_failed();
+    if check_user_address(settings, size_of(Process_Settings)) {
         return 0;
     }
 
-    return 0; // Todo.
+    new := create_process_context(settings.name);
+
+    return new.id;
 } @Syscall(12)
 
 

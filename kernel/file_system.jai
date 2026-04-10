@@ -136,7 +136,7 @@ unmap_file :: (fs: File_System, id: s64, mapping: *void) {
         assert(it.flags & .PRESENT > 0);
 
         if it.level != 1 {
-            continue; // Just leave the higher level mappings where they are for now, we don't track them yet.
+            continue;
         }
 
         unpin_disk_block(fs.user_data, it.virtual);
@@ -202,8 +202,7 @@ Opened_File :: struct {
 
 
 open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_not_existent := false) -> id: u64 {
-    if memory_is_not_userspace(path_bytes, path_length) {
-        set_syscall_failed();
+    if check_user_address(path_bytes, path_length) {
         return 0;
     }
 
@@ -267,8 +266,7 @@ File_Stats :: struct @SyscallAPI {
 stat_file :: (id: u64, stats: *File_Stats) {
     // Todo: Validate parameters.
 
-    if memory_is_not_userspace(stats, size_of(File_Stats)) {
-        set_syscall_failed();
+    if check_user_address(stats, size_of(File_Stats)) {
         return;
     }
 
@@ -308,8 +306,7 @@ create_file_mapping :: (id: u64, virtual_address: *void) {
 
     inode := lookup_inode(file.file_system, file.inode_id);
 
-    if memory_is_not_userspace(virtual_address, inode.file_size) {
-        set_syscall_failed();
+    if check_user_address(virtual_address, inode.file_size) {
         return;
     }
 
@@ -341,8 +338,7 @@ read_file :: (id: u64, buffer: *void, bytes: int, offset: int) -> bytes_read: in
 
 write_to_file :: (id: u64, buffer: *void, bytes: int, offset: int) {
 
-    if memory_is_not_userspace(buffer, bytes) {
-        set_syscall_failed();
+    if check_user_address(buffer, bytes) {
         return;
     }
 

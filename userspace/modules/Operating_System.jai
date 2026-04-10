@@ -21,8 +21,7 @@ create_thread :: (entry_point: (*void) -> int, parameter := null, name := "", pr
 
     settings: Syscall.Thread_Settings;
     settings.priority     = priority;
-    settings.stack_memory = alloc(0x1_0000);
-    settings.stack_size   = 0x1_0000;
+    settings.stack_memory = alloc(0x1_0000) + 0x1_0000;
     settings.name         = name;
     settings.cpu_core     = cpu_core;
 
