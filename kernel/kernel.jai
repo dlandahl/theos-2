@@ -356,7 +356,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        file_system_test(nvme_sd);
+        // file_system_test(nvme_sd);
 
         // start_network();
         //
@@ -739,7 +739,7 @@ bluescreen :: () #no_context {
     fb := global.framebuffer;
 
     for 0..(fb.y_resolution * fb.stride) {
-        fb.hardware_buffer[it] |= 0xff;
+        fb.hardware_buffer[it] |= 0xff; // Todo: RMW on the hardware framebuffer.
     }
 
     while true #asm {
@@ -944,10 +944,8 @@ allocate_large_page :: () -> u64 {
     if lru_least != LRU_TAIL {
         desc := *global.large_pages[lru_least];
 
-        if (desc.state != .DISK_CACHE) bluescreen();
-        if desc.pinned > 0 {
-            // Todo.
-        }
+        assert(desc.state  == .DISK_CACHE);
+        assert(desc.pinned == 0);
 
         desc.state = .ALLOCATED;
 
@@ -1277,6 +1275,7 @@ for_expansion :: (vm_it: *VM_Iterator, body: Code, flags: For_Flags) #expand {
 }
 
 map_pages :: (virtual_start: *void, physical_start: u64, page_count: int, page_flags := Page_Flags.PRESENT | .READ_WRITE) {
+    // Todo: We want to get rid of this and use physical memory arenas more, where you don't need a contiguous block of physical memory.
     assert(physical_start & 0xfff == 0);
     assert(virtual_start  & 0xfff == null);
 
@@ -1581,7 +1580,6 @@ find_block :: (using allocator: *Block_Allocator, address: u64) -> *Block_Desc, 
 }
 
 alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: int) -> address: u64 {
-
     bytes_wanted := cast(u64) align(alignment, unaligned_bytes_wanted);
 
     Scoped_Acquire(*spinlock);
@@ -1711,8 +1709,8 @@ Small_Objects_Allocator :: struct {
 
     Page_Metadata :: struct {
         page_freelist: *Page_Metadata;
-        objects_size: s16;
-        freelist: s16;
+        objects_size:  s16;
+        freelist:      s16;
         total_objects: s16;
     }
 

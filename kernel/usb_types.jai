@@ -81,7 +81,7 @@ XHCI_Operational_Registers :: struct {
     }
 
     USBSTS: enum_flags u32 {
-        HC_Halted;
+        HCH__host_controller_halted;
         _;
         HSE__host_system_error;
         EINT__event_interrupt;

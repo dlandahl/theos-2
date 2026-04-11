@@ -849,7 +849,7 @@ fulfill_condition :: (var: *Implicit_Lock_Condition_Variable, $state_change: Cod
 
 
 
-simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: ..Any, core_id := 2, process_context: *Process_Context = null) {
+simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", format: .. Any, core_id := 2, process_context: *Process_Context = null) {
     simple_thread_entry :: () #no_context {
         kernel_thread_entry();
 
@@ -862,7 +862,10 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     data := alloc(size_of(T));
     memcpy(data, *user_data, size_of(T));
 
-    task := create_task(simple_thread_entry, name = tprint(name, .. format), user_data = data, process_context = process_context);
+    formatted_name := sprint(name, .. format);
+    log("Creating Thread %", formatted_name);
+
+    task := create_task(simple_thread_entry, name = formatted_name, user_data = data, process_context = process_context);
 
     core := *global.processor_cores[core_id];
     assert(core.online);
@@ -870,13 +873,13 @@ simple_create_thread :: ($proc: (param: $T), user_data: T, name := "Simple", for
     put_task_on_core(task, core);
 }
 
-simple_create_thread :: ($proc: (), name := "Simple", format: ..Any, core_id := 2, process_context: *Process_Context = null) {
+simple_create_thread :: ($proc: (), name := "Simple", format: .. Any, core_id := 2, process_context: *Process_Context = null) {
     wrapper :: (param: void) {
         inline proc();
     }
-
+    
     x: void;
-    simple_create_thread(wrapper, x, name, format, core_id, process_context);
+    simple_create_thread(wrapper, x, name, .. format, core_id, process_context);
 }
 
 

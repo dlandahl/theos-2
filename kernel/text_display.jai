@@ -34,6 +34,7 @@ init_text_display :: () {
     frame_buffer_size := fb.y_resolution * fb.stride * size_of(u32);
     frame_buffer_size  = align(0x20_0000, frame_buffer_size);
 
+    // Create a circular virtual mapping for the text rendering buffer.
     virtual := cast(*void) alloc_block(*global.virtual_large_page_allocator, frame_buffer_size * 2);
 
     pages_needed     := frame_buffer_size / 0x20_0000;
@@ -86,7 +87,7 @@ go_to_next_row :: () #no_context {
     fb := global.framebuffer;
     rows_on_the_screen := (fb.y_resolution - 2 * margin) / (line_height);
 
-    if cursor_y <= rows_on_the_screen return;
+    if cursor_y < rows_on_the_screen return;
 
     row_to_clear         := cursor_y - rows_on_the_screen;
     first_pixel_to_clear := row_to_clear * line_height * fb.stride;
@@ -105,6 +106,8 @@ draw_text :: (text: string) #no_context {
     acquire(*spinlock); // Todo: Don't do it this way.
 
     framebuffer := global.framebuffer;
+
+    ringbuffer_modulo_mask := output_buffer.count - 1;
 
     for text {
         if it == #char "\n" {
@@ -127,21 +130,26 @@ draw_text :: (text: string) #no_context {
         screen_x := cursor_x * char_width  + margin;
         screen_y := cursor_y * line_height; // No Y margin because it would mess up the ring buffer. It is added when blitting to the frame buffer.
 
-        source_top_left := char_width * (cast(int) it - first_code);
-        target_top_left := screen_x + screen_y * framebuffer.stride;
+        source_top_left := char_width * (cast(int) it - first_code);  // First pixel index into the font bitmap for this character.
+        target_top_left := screen_x + screen_y * framebuffer.stride;  // First pixel index into the output ringbuffer for this X/Y character cell.
 
         for char_y: 0..char_height-1 {
+
+            // Start pixel of the current pixel row of the current character, in the font bitmap and output ringbuffer.
+            current_row_font    := source_top_left + char_y * font.width;
+            current_row_screen  := target_top_left + char_y * framebuffer.stride;
+
             for char_x: 0..char_width-1 {
 
-                pixel_in_font   := source_top_left + char_x + char_y * font.width;
-                pixel_on_screen := target_top_left + char_x + char_y * framebuffer.stride;
+                pixel_in_font   := current_row_font   + char_x;
+                pixel_on_screen := current_row_screen + char_x;
 
                 value := cast(u32) font.data[pixel_in_font];
 
                 pixel_color := value | (value << 8) | (value << 16) | (value << 24);
-                if global.bluescreen_occurred pixel_color |= 0xff;
+                pixel_color |= 0xff * cast(u32) global.bluescreen_occurred;
 
-                output_buffer[pixel_on_screen & (output_buffer.count - 1)] = pixel_color;
+                output_buffer[pixel_on_screen & ringbuffer_modulo_mask] = pixel_color;
             }
         }
 
@@ -171,7 +179,7 @@ flush_screen :: () #no_context {
     copy_count       := fb.stride * (fb.y_resolution - 2 * margin);
     copy_destination := fb.hardware_buffer + margin * fb.stride;
 
-    memcpy(copy_destination, output_buffer.data + copy_start, copy_count * size_of(u32));
+    memcpy(copy_destination, output_buffer.data + copy_start, copy_count * size_of(u32)); // Todo: non-temporal stores might be faster.
 }
 
 Netpbm_Image :: struct {
