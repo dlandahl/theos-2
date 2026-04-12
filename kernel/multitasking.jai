@@ -1616,7 +1616,7 @@ Generational_Bucket_Array :: struct (type: Type) {
         generation: u32;
     }
 
-    lock: Spinlock; // Todo: Read-write lock.
+    lock: RW_Lock;
 }
 
 check_generation :: (using array: *Generational_Bucket_Array, locator: Bucket_Locator, generation: u32) -> *array.Tagged {

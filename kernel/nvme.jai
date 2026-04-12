@@ -159,10 +159,10 @@ init_nvme_controller :: (device: *PCI_Device) -> Storage_Device {
         identify_page := get_4k_page();
 
         admin_command: Nvme_Submission_Queue_Entry;
-        admin_command.OPC__opcode = .IDENTIFY;
+        admin_command.OPC__opcode                  = .IDENTIFY;
         admin_command.CNS__controller_or_namespace = .IDENTIFY_NAMESPACE;
-        admin_command.NSID__namespace_id = nvme.nsid;
-        admin_command.DPTR__data_pointer[0] = identify_page;
+        admin_command.NSID__namespace_id           = nvme.nsid;
+        admin_command.DPTR__data_pointer[0]        = identify_page;
 
         send_command_synchronous(*nvme.admin_queue, admin_command);
         identify := cast(*Nvme_Identify_Namespace_Structure) (identify_page + DIRECT_MAPPING_BASE);
@@ -188,27 +188,26 @@ init_nvme_controller :: (device: *PCI_Device) -> Storage_Device {
 
         {
             admin_command: Nvme_Submission_Queue_Entry;
-            admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
-            admin_command.DPTR__data_pointer[0] = io_cq_base;
-            admin_command.NSID__namespace_id = nvme.nsid;
-            admin_command.QSIZE__queue_size = cast(u16) queue_size-1;
-            admin_command.QID__queue_identifier = 1;
-            admin_command.flags |= .PC__physically_contiguous;
-            admin_command.flags |= .IEN__interrupts_enabled;
-            admin_command.IV__interrupt_vector = 1;
+            admin_command.OPC__opcode                       = .CREATE_IO_COMPLETION_QUEUE;
+            admin_command.DPTR__data_pointer[0]             = io_cq_base;
+            admin_command.NSID__namespace_id                = nvme.nsid;
+            admin_command.QSIZE__queue_size                 = cast(u16) queue_size-1;
+            admin_command.QID__queue_identifier             = 1;
+            admin_command.IV__interrupt_vector              = 1;
+            admin_command.flags                             = .PC__physically_contiguous | .IEN__interrupts_enabled;
 
             send_command_synchronous(*nvme.admin_queue, admin_command);
         }
 
         {
             admin_command: Nvme_Submission_Queue_Entry;
-            admin_command.OPC__opcode = .CREATE_IO_SUBMISSION_QUEUE;
-            admin_command.DPTR__data_pointer[0] = io_sq_base;
-            admin_command.NSID__namespace_id = nvme.nsid;
-            admin_command.QSIZE__queue_size = cast(u16) queue_size-1;
-            admin_command.QID__queue_identifier = 1;
+            admin_command.OPC__opcode                       = .CREATE_IO_SUBMISSION_QUEUE;
+            admin_command.DPTR__data_pointer[0]             = io_sq_base;
+            admin_command.NSID__namespace_id                = nvme.nsid;
+            admin_command.QSIZE__queue_size                 = cast(u16) queue_size-1;
+            admin_command.QID__queue_identifier             = 1;
             admin_command.CQID__completion_queue_identifier = 1;
-            admin_command.flags |= .PC__physically_contiguous;
+            admin_command.flags                             = .PC__physically_contiguous;
 
             send_command_synchronous(*nvme.admin_queue, admin_command);
         }

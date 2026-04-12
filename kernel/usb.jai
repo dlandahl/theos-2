@@ -706,11 +706,10 @@ usb_thread :: () {
                             continue;
                         }
 
-                      case .DEFAULT;
-                        log("Got here.");
-
+                      case .DEFAULT; #through;
                       case;
-                        log("State error.");
+                        log_error("State error."); // Todo.
+                        continue;
                     }
                 }
 

@@ -1870,7 +1870,7 @@ Id_Based_Storage :: struct (T: Type) { // The type is only used for pointers tha
     // Todo: For expansion. It should automatically do a binary search if the number of objects is very large.
     // Todo: Maybe hash table is better.
 
-    spinlock: Spinlock; // Could be made a RW lock once we have them.
+    spinlock: RW_Lock;
     next_id:  int;
 
     lookup_table: [..] struct {
@@ -1881,43 +1881,43 @@ Id_Based_Storage :: struct (T: Type) { // The type is only used for pointers tha
 }
 
 add_object :: (storage: *Id_Based_Storage, pointer: *storage.T) -> id: int {
-    acquire(*storage.spinlock);
+    lock_for_writing(*storage.spinlock);
 
     storage.next_id += 1; // 0 means invalid.
     array_add(*storage.lookup_table, {storage.next_id, pointer});
 
     new_id := storage.next_id;
-    release(*storage.spinlock);
+    unlock_for_writing(*storage.spinlock);
 
     return new_id;
 }
 
 lookup_object :: (storage: *Id_Based_Storage, id: int) -> *storage.T {
-    acquire(*storage.spinlock);
+    lock_for_reading(*storage.spinlock);
 
     for storage.lookup_table {
         if it.id == id {
             result := it.pointer;
 
-            release(*storage.spinlock);
+            unlock_for_reading(*storage.spinlock);
             return result;
         }
 
         if it.id > id break;
     }
 
-    release(*storage.spinlock);
+    unlock_for_reading(*storage.spinlock);
     return null;
 }
 
 remove_object :: (storage: *Id_Based_Storage, id: int) {
-    acquire(*storage.spinlock);
+    lock_for_writing(*storage.spinlock);
 
     for storage.lookup_table {
         if it.id == id {
             array_ordered_remove_by_index(*storage.lookup_table, it_index);
 
-            release(*storage.spinlock);
+            unlock_for_writing(*storage.spinlock);
             return;
         }
 
@@ -1925,7 +1925,7 @@ remove_object :: (storage: *Id_Based_Storage, id: int) {
     }
 
     assert(false);
-    release(*storage.spinlock);
+    unlock_for_writing(*storage.spinlock);
 }
 
 
@@ -2292,6 +2292,7 @@ Any_Lock :: Type.[MCS_Spinlock, Spinlock(.RAW), Spinlock(.PREEMPT), Spinlock(.IR
 
 
 
+
 // Lock type (like "irqsave") is a static property of the spinlock type and IRQ/preempt state is stored in CPU local data. Other operating systems don't do this, they make the caller do everything. Not sure which is better.
 Lock_Type :: enum {
     RAW     :: 1;
@@ -2326,9 +2327,7 @@ acquire :: (lock: *Spinlock) #no_context {
 
     profile_lock_contention();
 
-    while lock.now_serving != my_ticket {
-        #asm { pause; }
-    }
+    spin_with_exponential_backoff(lock.now_serving == my_ticket);
 
     #if DEBUG_SPINLOCKS lock.held_by = get_current_core();
 }
@@ -2363,16 +2362,63 @@ profile_lock_contention :: () #expand {
     }
 }
 
+spin_with_exponential_backoff :: ($condition: Code) #expand {
+    SPIN_BUDGET :: 14;
+    loop_count  := 0;
+
+    while true {
+        if #insert condition return;
+
+        loop_count += cast(int) (loop_count < SPIN_BUDGET);
+
+        for 0..1 << loop_count {
+            #asm { pause; pause; pause; pause; }
+        }
+    }
+}
+
 DEBUG_SPINLOCKS :: true;
 
 
 
-// Todo: Read-write spinlocks.
+RW_Lock :: struct {
+    writer_lock: Spinlock;
+    reader_counter: int;
+}
 
-lock_for_reading :: acquire;
-lock_for_writing :: acquire;
-unlock_for_reading :: release;
-unlock_for_writing :: release;
+lock_for_writing :: (lock: *RW_Lock) {
+    acquire(*lock.writer_lock);
+
+    spin_with_exponential_backoff(!lock.reader_counter);
+}
+
+unlock_for_writing :: (lock: *RW_Lock) {
+    release(*lock.writer_lock);
+}
+
+lock_for_reading :: (lock: *RW_Lock) {
+    preempt_disable();
+
+    while true {
+        // Wait until the lock might be free.
+        spin_with_exponential_backoff(lock.writer_lock.now_serving == lock.writer_lock.next_ticket);
+
+        atomic_increment(*lock.reader_counter);
+
+        if lock.writer_lock.now_serving == lock.writer_lock.next_ticket {
+            // We got the lock.
+            return;
+        }
+
+        // If we get here, we raced with a writer, and don't actually have the read side lock.
+        atomic_decrement(*lock.reader_counter);
+    }
+}
+
+unlock_for_reading :: (lock: *RW_Lock) {
+    atomic_decrement(*lock.reader_counter);
+    preempt_restore();
+}
 
 
 
@@ -2624,6 +2670,7 @@ using,except(byte_swap_in_place) _ :: #import "Bit_Operations"; // We have our o
 #import "String";
 #import "Random";
 #import "Hash";
+#import "Atomics";
 
 #import "debug_info";
 #import "executable_formats";
