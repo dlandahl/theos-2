@@ -85,7 +85,7 @@ go_to_next_row :: () #no_context {
     // future we'll keep one screen above and below the current scroll position alive, for fast scrolling.
 
     fb := global.framebuffer;
-    rows_on_the_screen := (fb.y_resolution - 2 * margin) / (line_height);
+    rows_on_the_screen := (fb.y_resolution - 2 * margin) / line_height;
 
     if cursor_y < rows_on_the_screen return;
 

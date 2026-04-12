@@ -36,13 +36,12 @@ Process_Context :: struct {
     id: int;
     root_page_table: u64;
 
-    // Object_Table is a Bucket_Array with generational indices added on. Maybe all types of objects should be in a tagged union and we just have one big table.
-    // Todo: These should probably either be lock free thread safe, or have locking built in, because there's a lot of taking the per-process-context lock to read/write them.
+    // Generational_Bucket_Array is a Bucket_Array with generational indices added on. Maybe all types of objects should be in a tagged union and we just have one big table.
 
-    page_frames: Object_Table(s32);
-    semaphores:  Object_Table(Semaphore);
-    mutexes:     Object_Table(Mutex);
-    files:       Object_Table(Opened_File);
+    page_frames: Generational_Bucket_Array(s32);
+    semaphores:  Generational_Bucket_Array(Semaphore);
+    mutexes:     Generational_Bucket_Array(Mutex);
+    files:       Generational_Bucket_Array(Opened_File);
 
     spinlock: Spinlock;
 
@@ -1096,9 +1095,8 @@ this_thread_id :: () -> s64 {
 get_new_page_frame :: () -> u64 {
     new_page := allocate_large_page();
 
-    process := scope_lock_process_context();
-
-    page, id := add_object(*process.page_frames);
+    process  := get_current_task().process_context;
+    page, id := array_add(*process.page_frames);
 
     if !page {
         set_syscall_failed();
@@ -1121,7 +1119,7 @@ map_page :: (page_id: u64, virtual_address: *void) { // Todo: Page permissions.
         return;
     }
 
-    process := scope_lock_process_context();
+    process := get_current_task().process_context;
 
     page_index := lookup(*process.page_frames, page_id).*;
     page_frame := cast(u64) page_index * 0x20_0000;
@@ -1163,7 +1161,7 @@ map_subpage :: (page_id: u64, start: u64, count: u64, virtual_address: *void) {
         return;
     }
 
-    process := scope_lock_process_context();
+    process := get_current_task().process_context;
 
     page_index := lookup(*process.page_frames, page_id).*;
     page_frame := cast(u64) page_index * 0x20_0000;
@@ -1177,7 +1175,7 @@ map_subpage :: (page_id: u64, start: u64, count: u64, virtual_address: *void) {
 
 quit_process :: () {
 
-    process := scope_lock_process_context();
+    process := get_current_task().process_context;
 
     if !process.stopped { // Prevent unecessary IPIs in case of a race.
         process.stopped = true;
@@ -1252,9 +1250,9 @@ apollo_sleep :: (low: u64, high: s64) {
 
 
 create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> u64 {
-    process := scope_lock_process_context();
+    process := get_current_task().process_context;
 
-    sema, id := add_object(*process.semaphores);
+    sema, id := array_add(*process.semaphores);
 
     sema.counter_max = counter_max;
     sema.counter     = counter_start;
@@ -1263,12 +1261,8 @@ create_semaphore :: (counter_max: int = 0, counter_start: int = 0) -> u64 {
 } @Syscall(30)
 
 signal_semaphore :: (id: u64) {
-    sema: *Semaphore;
-
-    {
-        process := scope_lock_process_context();
-        sema = lookup(*process.semaphores, id);
-    }
+    process := get_current_task().process_context;
+    sema    := lookup(*process.semaphores, id);
 
     if sema == null {
         set_syscall_failed();
@@ -1279,12 +1273,8 @@ signal_semaphore :: (id: u64) {
 } @Syscall(31)
 
 wait_semaphore :: (id: u64) { // Todo: Timeout.
-    sema: *Semaphore;
-
-    {
-        process := scope_lock_process_context();
-        sema = lookup(*process.semaphores, id);
-    }
+    process := get_current_task().process_context;
+    sema    := lookup(*process.semaphores, id);
 
     if sema == null {
         set_syscall_failed();
@@ -1295,20 +1285,16 @@ wait_semaphore :: (id: u64) { // Todo: Timeout.
 } @Syscall(32)
 
 create_mutex :: () -> u64 {
-    process := scope_lock_process_context();
+    process := get_current_task().process_context;
 
-    mutex, id := add_object(*process.mutexes);
+    mutex, id := array_add(*process.mutexes);
 
     return id;
 } @Syscall(33)
 
 lock_mutex :: (id: u64) {
-    mutex: *Mutex;
-
-    {
-        process := scope_lock_process_context();
-        mutex = lookup(*process.mutexes, id);
-    }
+    process := get_current_task().process_context;
+    mutex   := lookup(*process.mutexes, id);
 
     if mutex == null {
         set_syscall_failed();
@@ -1319,12 +1305,8 @@ lock_mutex :: (id: u64) {
 } @Syscall(34)
 
 unlock_mutex :: (id: u64) {
-    mutex: *Mutex;
-
-    {
-        process := scope_lock_process_context();
-        mutex = lookup(*process.mutexes, id);
-    }
+    process := get_current_task().process_context;
+    mutex   := lookup(*process.mutexes, id);
 
     if mutex == null {
         set_syscall_failed();
@@ -1616,4 +1598,104 @@ DEBUG :: (a: *List_Node, b: *List_Node) #expand {
 
 DEBUG :: (a: *List_Node) #expand { // Can't use a default null argument because of crazy polymorphism.
     DEBUG(a, cast(type_of(a)) null);
+}
+
+
+
+
+
+
+// Like Bucket_Array with generational IDs added on.
+// We also format the bucket index, slot index, and generation into a 64-bit integer that can fit in a register.
+
+Generational_Bucket_Array :: struct (type: Type) {
+    inner_array: Bucket_Array(Tagged, 256);
+
+    Tagged :: struct {
+        #as item: type;
+        generation: u32;
+    }
+
+    lock: Spinlock; // Todo: Read-write lock.
+}
+
+check_generation :: (using array: *Generational_Bucket_Array, locator: Bucket_Locator, generation: u32) -> *array.Tagged {
+    if locator.slot_index > 256 {
+        return null;
+    }
+
+    if locator.bucket_index >= inner_array.all_buckets.count  {
+        return null;
+    }
+
+    bucket := inner_array.all_buckets[locator.bucket_index];
+
+    if !bucket.occupied[locator.slot_index] {
+        return null;
+    }
+
+    slot := *bucket.data[locator.slot_index];
+
+    return ifx slot.generation == generation then slot else null;
+}
+
+// 8 bits for the slot index, leaves 24 for the bucket index and 32 for generation.
+Handle :: enum u64 {
+    slot_index     :: 8;
+    bucket_index   :: 24;
+    generation     :: 32;
+}
+
+array_add :: (array: *Generational_Bucket_Array) -> *array.type, id: u64 {
+    lock_for_writing(*array.lock);
+
+    slot, locator := find_and_occupy_empty_slot(*array.inner_array, false); // Don't initialize, so the generation value stays around.
+
+    unlock_for_writing(*array.lock);
+
+    handle: Handle = ---;
+    set(*handle, .slot_index,   locator.slot_index);
+    set(*handle, .bucket_index, locator.bucket_index);
+    set(*handle, .generation,   slot.generation);
+
+    return slot, cast(u64) handle;
+}
+
+array_remove :: (array: *Generational_Bucket_Array, id: u64) -> bool {
+
+    lock_for_writing(*array.lock);
+
+    slot, locator := lookup_unlocked(array, id);
+    if slot == null return false; // The slot isn't occupied, or the generation doesn't match.
+
+    bucket_array_remove(*array.inner_array, locator);
+    slot.generation += 1;
+
+    unlock_for_writing(*array.lock);
+
+    return true;
+}
+
+lookup :: (array: *Generational_Bucket_Array, id: u64) -> *array.type, Bucket_Locator {
+    handle := cast(Handle) id;
+
+    lock_for_reading(*array.lock);
+
+    slot, locator := lookup_unlocked(array, id);
+
+    unlock_for_reading(*array.lock);
+
+    return slot, locator;
+}
+
+lookup_unlocked :: (array: *Generational_Bucket_Array, id: u64) -> *array.type, Bucket_Locator {
+    handle := cast(Handle) id;
+
+    locator: Bucket_Locator;
+    locator.slot_index    = cast(s32) get(handle, .slot_index);
+    locator.bucket_index  = cast(u32) get(handle, .bucket_index);
+    generation           := cast(u32) get(handle, .generation);
+
+    slot := check_generation(array, locator, generation);
+    return slot, locator;
 }

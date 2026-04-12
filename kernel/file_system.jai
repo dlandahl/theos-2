@@ -153,7 +153,7 @@ my_pin_disk_block :: (fs: *Mounted_File_System, block_index: u32, overwrite := f
     assert(fs.disk_offset_in_bytes & 0x1f_ffff == 0);
 
     disk_block_index  := disk_byte_address / 0x20_0000;
-    block_hash        := disk_block_index % cast(u64) global.large_pages.count; // Nice meaningless cast.
+    block_hash        := disk_block_index % cast(u64) global.large_pages.count;
 
     array_add_if_unique(*fs.maybe_dirty, block_hash); // Todo: Temporary.
 
@@ -234,9 +234,9 @@ open_file :: (path_bytes: *u8, path_length: int, writable := false, create_if_no
         return 0;
     }
 
-    process := scope_lock_process_context();
-
-    new_file, id := add_object(*process.files);
+    process := get_current_task().process_context;
+    // Todo: Race.
+    new_file, id := array_add(*process.files);
     new_file.opened_for  = ifx writable then .WRITING else .READING;
     new_file.file_system = global.file_system; // There's always just one file system at the moment.
     new_file.inode_id    = file_inode_id;
@@ -264,15 +264,13 @@ File_Stats :: struct @SyscallAPI {
 }
 
 stat_file :: (id: u64, stats: *File_Stats) {
-    // Todo: Validate parameters.
 
     if check_user_address(stats, size_of(File_Stats)) {
         return;
     }
 
-    process := scope_lock_process_context();
-
-    file := lookup(*process.files, id);
+    process := get_current_task().process_context;
+    file    := lookup(*process.files, id);
 
     if file == null {
         set_syscall_failed();
@@ -295,9 +293,8 @@ stat_file :: (id: u64, stats: *File_Stats) {
 
 create_file_mapping :: (id: u64, virtual_address: *void) {
 
-    process := scope_lock_process_context();
-
-    file := lookup(*process.files, id);
+    process := get_current_task().process_context;
+    file    := lookup(*process.files, id);
 
     if file == null {
         set_syscall_failed();
@@ -314,19 +311,15 @@ create_file_mapping :: (id: u64, virtual_address: *void) {
 } @Syscall(42)
 
 flush_file :: (id: u64) {
-
-    file: *Opened_File;
-
-    {
-        process := scope_lock_process_context();
-        file = lookup(*process.files, id);
-    }
+    process := get_current_task().process_context;
+    file    := lookup(*process.files, id);
 
     if file == null {
         set_syscall_failed();
         return;
     }
 
+    // Todo: Race.
     flush_file_system(file.file_system);
 } @Syscall(43)
 
@@ -342,7 +335,7 @@ write_to_file :: (id: u64, buffer: *void, bytes: int, offset: int) {
         return;
     }
 
-    process := scope_lock_process_context(); // Todo: Holding this lock much longer than needed.
+    process := get_current_task().process_context;
     file    := lookup(*process.files, id);
 
     if file == null {

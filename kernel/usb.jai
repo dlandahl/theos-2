@@ -343,7 +343,7 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: boo
     set_bit(*port.PORTSC, .PLC__link_change);
     set_bit(*port.PORTSC, .CEC__config_error_change);
 
-    if get(port.PORTSC, .PED__enabled_disabled) return true; // If port status change is already pending, don't generate another one and cause races on the handler thread. Todo: This needs to be handled more generally and robustly, because what if a USB device is unplugged and replugged really fast?
+    // if get(port.PORTSC, .PED__enabled_disabled) return true; // If port status change is already pending, don't generate another one and cause races on the handler thread. Todo: This needs to be handled more generally and robustly, because what if a USB device is unplugged and replugged really fast?
 
     set_bit(*port.PORTSC, .WPR__warm_port_reset);
 
@@ -473,8 +473,6 @@ usb_thread :: () {
                 for* xhci.sockets if it.slot_id == slot_id { socket = it; break; }
                 assert(!!socket);
 
-                log("Transfer event slot %, initialization phase '%'.", slot_id, socket.initialization_phase);
-
                 if code != .SUCCESS && code != .SHORT_PACKET {
                     // Todo.
                     log_error("Transfer failed with code %.", code);
@@ -536,6 +534,7 @@ usb_thread :: () {
                 }
 
                 if socket.initialization_phase == .WAITING_FOR_CONFIG_DESCRIPTOR {
+
                     // Todo: Handle config descriptors larger than 64 bytes.
                     // Todo: This should probably be more robust against buggy USB devices.
                     // Todo: For now just use interface 0, even though for mouse it sometimes doesn't give you the scroll wheel.
@@ -690,7 +689,6 @@ usb_thread :: () {
 
                     if slot_state == {
                       case .ADDRESSED;
-                        log("Addressed.");
 
                         if socket.initialization_phase == .START {
                             // Request device descriptor.

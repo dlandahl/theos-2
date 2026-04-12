@@ -343,7 +343,7 @@ kernel_entry :: () #no_context {
                 // init_high_definition_audio_controller(it);
 
               case .UNIVERSAL_SERIAL_BUS;
-                init_usb_controller(it);
+                // init_usb_controller(it);
             }
         }
 
@@ -356,7 +356,7 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        // file_system_test(nvme_sd);
+        file_system_test(nvme_sd);
 
         // start_network();
         //
@@ -2367,6 +2367,15 @@ DEBUG_SPINLOCKS :: true;
 
 
 
+// Todo: Read-write spinlocks.
+
+lock_for_reading :: acquire;
+lock_for_writing :: acquire;
+unlock_for_reading :: release;
+unlock_for_writing :: release;
+
+
+
 // MCS lock based on https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf
 
 MCS_Node :: struct {
@@ -2628,7 +2637,6 @@ array_add :: (array: *Bucket_Array) -> *array.type {
 }
 
 #import "Bitfield"(true);
-#import "Object_Table";
 
 set          :: bitfield_set;
 get          :: bitfield_get;
