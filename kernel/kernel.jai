@@ -343,9 +343,11 @@ kernel_entry :: () #no_context {
                 // init_high_definition_audio_controller(it);
 
               case .UNIVERSAL_SERIAL_BUS;
-                // init_usb_controller(it);
+                init_usb_controller(it);
             }
         }
+
+        assert(false);
 
         simple_create_thread(() {
             get_current_task().priority = .High;
@@ -750,22 +752,22 @@ bluescreen :: () #no_context {
 
 
 
-get_rbp :: () -> *void #foreign Assembly;
+get_frame_pointer :: () -> *void #foreign Assembly;
 
 Call_Stack_Frame :: struct {
-    rbp: *Call_Stack_Frame;
+    frame_pointer: *Call_Stack_Frame;
     return_address: u64;
 }
 
 set_stack_trace_sentinel :: inline () #no_context {
-    // We rely on this being inlined so it sees the correct rbp.
-    stack_frame := cast(*Call_Stack_Frame) get_rbp();
-    stack_frame.rbp = null;
+    // We rely on this being inlined so it sees the correct frame pointer.
+    stack_frame := cast(*Call_Stack_Frame) get_frame_pointer();
+    stack_frame.frame_pointer = null;
 }
 
-do_stack_trace :: (output: [] u32, rbp := null) #no_context {
+do_stack_trace :: (output: [] u32, start_frame_pointer := null) #no_context {
 
-    stack_frame := cast(*Call_Stack_Frame) ifx rbp else get_rbp();
+    stack_frame := cast(*Call_Stack_Frame) ifx start_frame_pointer else get_frame_pointer();
 
     for 0..output.count-1 {
         if cast(u64) stack_frame < DIRECT_MAPPING_BASE {
@@ -773,7 +775,7 @@ do_stack_trace :: (output: [] u32, rbp := null) #no_context {
             break;
         }
 
-        if !stack_frame.rbp {
+        if !stack_frame.frame_pointer {
             // Found the stack trace sentinel.
             break;
         }
@@ -784,7 +786,7 @@ do_stack_trace :: (output: [] u32, rbp := null) #no_context {
         }
 
         output[it] = cast,trunc(u32) stack_frame.return_address;
-        stack_frame = stack_frame.rbp;
+        stack_frame = stack_frame.frame_pointer;
     }
 }
 
@@ -2199,8 +2201,8 @@ write_string_builder_to_serial_port :: (using builder: *String_Builder, serial_p
 
 
 kernel_write_string :: (text: string) #no_context {
-    serial_out(text, *global.COM1);
     draw_text(text);
+    serial_out(text, *global.COM1);
 
     s: string;
     s.data = text.data;
@@ -2325,11 +2327,21 @@ acquire :: (lock: *Spinlock) #no_context {
 
     my_ticket := fetch_add(*lock.next_ticket, 1);
 
-    profile_lock_contention();
+    #if DEBUG_SPINLOCKS {
+        contention_level := my_ticket - lock.now_serving;
+        spin_start       := rdtsc();
+    }
 
     spin_with_exponential_backoff(lock.now_serving == my_ticket);
 
-    #if DEBUG_SPINLOCKS lock.held_by = get_current_core();
+    #if DEBUG_SPINLOCKS {
+        lock.held_by = get_current_core();
+
+        if contention_level {
+            spin_end := rdtsc();
+            trace(.contended_spinlock, contention_level, spin_end - spin_start);
+        }
+    }
 }
 
 release :: (lock: *Spinlock) #no_context {
@@ -2348,18 +2360,6 @@ release :: (lock: *Spinlock) #no_context {
 Scoped_Acquire :: (lock: *Spinlock) #expand {
     acquire(lock);
     `defer release(lock);
-}
-
-profile_lock_contention :: () #expand {
-    contention_level := `my_ticket - `lock.now_serving;
-    if contention_level == 0 return;
-
-    start := rdtsc();
-
-    `defer if contention_level != 0 {
-        end := rdtsc();
-        trace(.contended_spinlock, contention_level, end - start);
-    }
 }
 
 spin_with_exponential_backoff :: ($condition: Code) #expand {

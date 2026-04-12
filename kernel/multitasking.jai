@@ -43,8 +43,6 @@ Process_Context :: struct {
     mutexes:     Generational_Bucket_Array(Mutex);
     files:       Generational_Bucket_Array(Opened_File);
 
-    spinlock: Spinlock;
-
     name: string;
     trace_name: Trace_String;
 
@@ -962,21 +960,12 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
     reset_temporary_storage();
 
-    maybe_reschedule(); // Todo: I think this doesn't do anything.
+    maybe_reschedule();
 
     trace(.sysret, data.rax, data.r12);
 }
 
 
-
-scope_lock_process_context :: () -> *Process_Context #expand {
-    pc := get_current_task().process_context;
-
-    acquire(*pc.spinlock);
-    defer release(*pc.spinlock);
-
-    return pc;
-}
 
 check_user_address :: (base: *void, size: int) -> invalid: bool {
     USER_LIMIT :: 0x7fff_ffff_ffff;
@@ -1605,7 +1594,7 @@ DEBUG :: (a: *List_Node) #expand { // Can't use a default null argument because 
 
 
 
-// Like Bucket_Array with generational IDs added on.
+// Like Bucket_Array but with generational IDs and built-in read-write locking.
 // We also format the bucket index, slot index, and generation into a 64-bit integer that can fit in a register.
 
 Generational_Bucket_Array :: struct (type: Type) {
@@ -1669,7 +1658,7 @@ array_remove :: (array: *Generational_Bucket_Array, id: u64) -> bool {
     if slot == null return false; // The slot isn't occupied, or the generation doesn't match.
 
     bucket_array_remove(*array.inner_array, locator);
-    slot.generation += 1;
+    #no_aoc { slot.generation += 1; }
 
     unlock_for_writing(*array.lock);
 

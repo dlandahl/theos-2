@@ -138,9 +138,9 @@ get_rflags:
     ret
 
 
-global get_rbp
+global get_frame_pointer
 align 16
-get_rbp:
+get_frame_pointer:
     mov rax, rbp
     ret
 
