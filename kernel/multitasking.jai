@@ -234,12 +234,12 @@ create_task :: (entry_point: () #no_context, kernel_stack_size := 0x1_0000, name
     stack.return_address     = xx entry_point;
     stack.irq_disable_count  = 1; // The entry point will release the scheduler spinlock. Setting this to 1 will cause that to enable IRQs on that core.
 
-    new_task.rsp         = stack;
-    new_task.xsave.mxcsr = .MASK_ALL;
-    new_task.name        = name;
-    new_task.user_data   = user_data;
-    new_task.priority    = .Normal;
-    new_task.trace_name  = add_trace_string(name);
+    new_task.rsp             = stack;
+    new_task.xsave.mxcsr     = .MASK_ALL;
+    new_task.name            = name;
+    new_task.user_data       = user_data;
+    new_task.priority        = .Normal;
+    new_task.trace_name      = add_trace_string(name);
     new_task.process_context = process_context;
 
     if process_context {
@@ -967,6 +967,11 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 
 
 
+Virtual_Memory_Area :: struct {
+    start:  int;
+    end:    int;
+}
+
 check_user_address :: (base: *void, size: int) -> invalid: bool {
     USER_LIMIT :: 0x7fff_ffff_ffff;
     invalid: bool;
@@ -1213,7 +1218,6 @@ start_process :: (settings: *Process_Settings) -> id: int {
 
     return new.id;
 } @Syscall(12)
-
 
 thread_cpu_time :: () -> apollo_low: u64, apollo_high: s64 {
     task := get_current_task();

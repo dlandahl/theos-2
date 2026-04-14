@@ -47,8 +47,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             EFI_CHECK(boot_services.LocateProtocol(*EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, null, cast(**void) *gop));
 
             // It will try to get as close as possible to this resolution, without exceeding it.
-            preferred_horizontal_resolution :: 640;
-            preferred_vertical\ _resolution :: 480;
+            preferred_horizontal_resolution :: 1920;
+            preferred_vertical\ _resolution :: 1080;
 
             best_horizontal_resolution: u32;
             best_vertical\ _resolution: u32;

@@ -34,7 +34,7 @@ init_text_display :: () {
     frame_buffer_size := fb.y_resolution * fb.stride * size_of(u32);
     frame_buffer_size  = align(0x20_0000, frame_buffer_size);
 
-    // Create a circular virtual mapping for the text rendering buffer.
+    // Create a circular virtual mapping for the text rendering buffer. That way we don't need to re-render all the text when scrolling.
     virtual := cast(*void) alloc_block(*global.virtual_large_page_allocator, frame_buffer_size * 2);
 
     pages_needed     := frame_buffer_size / 0x20_0000;

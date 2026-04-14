@@ -67,7 +67,7 @@ USB_Socket :: struct {
     device_context: *void;
     slot_id: int;
 
-    device_descriptor: Device_Descriptor #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
+    device_descriptor: Device_Descriptor  #align 64; // 64 byte aligned because we DMA the descriptor into here directly.
     string_descriptor: [64]  u8           #align 64;
     config_descriptor: [256] u8           #align 64;
 
@@ -343,7 +343,7 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: boo
     set_bit(*port.PORTSC, .PLC__link_change);
     set_bit(*port.PORTSC, .CEC__config_error_change);
 
-    // if get(port.PORTSC, .PED__enabled_disabled) return true; // If port status change is already pending, don't generate another one and cause races on the handler thread. Todo: This needs to be handled more generally and robustly, because what if a USB device is unplugged and replugged really fast?
+    if get(port.PORTSC, .PED__enabled_disabled) return true; // If port status change is already pending, don't generate another one and cause races on the handler thread. Todo: This needs to be handled more generally and robustly, because what if a USB device is unplugged and replugged really fast?
 
     set_bit(*port.PORTSC, .WPR__warm_port_reset);
 
@@ -439,27 +439,18 @@ usb_thread :: () {
             }
 
             type := cast(TRB_Type) get(current_trb.dword3, .trb_type);
+            log("Got TRB of type %.", type);
 
             if type == {
               case .PORT_STATUS_CHANGE_EVENT;
                 // Todo: Check if it was a detach rather than an attach.
                 port := (current_trb.event_data >> 24) & 0xff;
                 log("Got port status change.");
-
-                register_set := *xhci.port_registers[cast(int) port - 1];
-
-                set_bit(*register_set.PORTSC, .CSC__connect_status_change);
-                set_bit(*register_set.PORTSC, .PEC__enabled_disabled_change);
-                set_bit(*register_set.PORTSC, .WRC__warm_port_reset_change);
-                set_bit(*register_set.PORTSC, .OCC__over_current_change);
-                set_bit(*register_set.PORTSC, .PRC__reset_change);
-                set_bit(*register_set.PORTSC, .PLC__link_change);
-                set_bit(*register_set.PORTSC, .CEC__config_error_change);
-
+                
                 command: Normal_TRB;
                 set(*command.dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
                 set(*command.dword3, .interrupt_on_completion, 1);
-                command.data_pointer = port; // Store the port ID in the user data value.
+                command.data_pointer = port; // Todo: This is not technically allowed. But doing it this way seems much less messy.
 
                 queue_command(*xhci.command_ring, command);
                 flush_commands(xhci);
@@ -476,7 +467,7 @@ usb_thread :: () {
                 if code != .SUCCESS && code != .SHORT_PACKET {
                     // Todo.
                     log_error("Transfer failed with code %.", code);
-                    continue;
+                    // continue;
                 }
 
                 if socket.initialization_phase == .START {
@@ -689,7 +680,6 @@ usb_thread :: () {
 
                     if slot_state == {
                       case .ADDRESSED;
-
                         if socket.initialization_phase == .START {
                             // Request device descriptor.
                             
@@ -697,7 +687,7 @@ usb_thread :: () {
                             set(*request.request_type, .direction, 1);
                             request.request      = .GET_DESCRIPTOR;
                             request.value        = .DEVICE;
-                            request.length       = 18;
+                            request.length       = 8;
 
                             buffer := get_physical_address(*socket.device_descriptor);
                             execute_device_request(socket, 1, request, buffer);
@@ -709,7 +699,6 @@ usb_thread :: () {
                       case .DEFAULT; #through;
                       case;
                         log_error("State error."); // Todo.
-                        continue;
                     }
                 }
 
@@ -728,14 +717,12 @@ usb_thread :: () {
                     }
 
                     socket.slot_id = slot_id;
-                    socket.device_context = cast(*void) xhci.device_context_index.device_contexts[slot_id-1] + DIRECT_MAPPING_BASE;
+                    socket.device_context = cast(*void) xhci.device_context_index.device_contexts[slot_id - 1] + DIRECT_MAPPING_BASE;
 
                     context_size := ifx get_bit(xhci.HCCPARAMS1, .CSZ__context_size) then 64 else 32;
 
                     input_context_physical := get_4k_page(); // Todo: Leak.
                     input_context_base     := cast(*void) input_context_physical + DIRECT_MAPPING_BASE;
-
-                    register_set := *xhci.port_registers[port_id - 1];
 
                     control_context: *Control_Context = input_context_base;
                     control_context.* = {};
@@ -744,13 +731,15 @@ usb_thread :: () {
                     slot_context: *Slot_Context = input_context_base + context_size;
                     slot_context.* = {};
 
+                    register_set := *xhci.port_registers[port_id - 1];
+
                     speed := get(register_set.PORTSC, .PSI__protocol_speed);
                     log("Device has speed %.", cast(XHCI_Port_Speed) speed);
 
                     set(*slot_context.dword0, .entry_count, 1);
                     set(*slot_context.dword0, .speed, speed);
                     slot_context.root_hub_port_number = cast(u8) (port_id);
-                    
+
                     endpoint_context: *Endpoint_Context = input_context_base + 2 * context_size;
                     endpoint_context.* = {};
 
@@ -760,10 +749,10 @@ usb_thread :: () {
                     if cast(XHCI_Port_Speed) speed == {
                       case .UNDEFINED; #through;
                       case .LOW_SPEED; #through;
-                      case .FULL_SPEED;
+                      case .HIGH_SPEED;
                         set(*endpoint_context.dword1, .max_packet_size, 8);
 
-                      case .HIGH_SPEED;
+                      case .FULL_SPEED;
                         set(*endpoint_context.dword1, .max_packet_size, 64);
 
                       case .SUPER_SPEED_GEN1_1X; #through;
@@ -784,7 +773,7 @@ usb_thread :: () {
                     socket.control_endpoint.transfer_ring.buffer.count = 4096 / TRB_SIZE;
                     socket.control_endpoint.transfer_ring.cycle = true;
                     socket.control_endpoint.max_transfer_size = get(endpoint_context.dword1, .max_packet_size);
-                    
+
                     set_in_place(*endpoint_context.dword2_and_dword3, .tr_dequeue_pointer, transfer_ring_physical);
                     set_bit     (*endpoint_context.dword2_and_dword3, .dequeue_cycle_state);
                     endpoint_context.average_trb_length = 8;
@@ -805,8 +794,6 @@ usb_thread :: () {
 }
 
 execute_device_request :: (socket: *USB_Socket, endpoint_id: int, packet: Device_Request_Packet, physical_memory_buffer: u64) {
-    // Todo: Does not handle when the command ring is full.
-
     using TRB_Type;
 
     endpoint := *socket.endpoints[endpoint_id];
@@ -824,28 +811,30 @@ execute_device_request :: (socket: *USB_Socket, endpoint_id: int, packet: Device
     bytes_transmitted := 0;
 
     trbs_needed := (packet.length + bytes_per_trb-1) / bytes_per_trb;
-    assert(trbs_needed > 0);
 
     for 0..trbs_needed-1 {
+        remaining_trbs := trbs_needed - it - 1;
+        bytes_this_trb := min(packet.length - bytes_transmitted, bytes_per_trb);
+
         data: Data_Stage_TRB;
         data.data_pointer = physical_memory_buffer + cast(u64) bytes_transmitted;
 
-        set(*data.dword2, .trb_transfer_length, min(packet.length - bytes_transmitted, bytes_per_trb));
-        set(*data.dword3, .chain_bit,           1);
+        set(*data.dword2, .trb_transfer_length, bytes_this_trb);
+        set(*data.dword2, .td_size,             remaining_trbs);
         set(*data.dword3, .trb_type,         xx DATA_STAGE);
         set(*data.dword3, .direction,           1);
-
-        bytes_transmitted += bytes_per_trb;
+        set(*data.dword3, .chain_bit, cast(int) (remaining_trbs > 0));
 
         queue_command(*endpoint.transfer_ring, data);
+
+        bytes_transmitted += bytes_this_trb;
     }
 
     status: Status_Stage_TRB;
-    set(*status.dword3, .evaluate_next_trb,          1);
     set(*status.dword3, .interrupt_on_completion,    1);
     set(*status.dword3, .trb_type,                xx STATUS_STAGE);
 
     queue_command(*endpoint.transfer_ring, status);
-
+    
     flush_commands(socket.controller, socket.slot_id, cast(u32) endpoint_id);
 }

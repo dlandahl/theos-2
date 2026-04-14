@@ -202,7 +202,6 @@ kernel_entry :: () #no_context {
         }
 
         if global.physical_block_allocator.base_address == 0 {
-            // Can't really assert here because font and debug info (for stack trace) is not available yet. Maybe assert should just detect that.
             write_string("Could not find enough memory for the kernel.\n");
             while true #asm { cli; hlt; }
         }
@@ -343,11 +342,9 @@ kernel_entry :: () #no_context {
                 // init_high_definition_audio_controller(it);
 
               case .UNIVERSAL_SERIAL_BUS;
-                init_usb_controller(it);
+                // init_usb_controller(it);
             }
         }
-
-        assert(false);
 
         simple_create_thread(() {
             get_current_task().priority = .High;
@@ -403,61 +400,6 @@ file_system_test :: (sd: Storage_Device) {
     flush_file_system(fs);
 
     log("Wrote trace buffers to file.");
-}
-
-disk_test :: (sd: Storage_Device) -> Fat16_File_System {
-
-    buffer_base, physical := allocate_page_aligned_physical_memory(0xa0_0000);
-
-    buffer: string;
-    buffer.data  = cast(*u8) physical + DIRECT_MAPPING_BASE;
-    buffer.count = 0xa0_0000;
-
-    transfer: Transfer_Request;
-    transfer_done: Semaphore;
-
-    file_system: Fat16_File_System;
-
-    start := get_monotonic_time();
-
-    {
-        transfer.start_lba = 2048;
-        transfer.count_lba = buffer.count / 512;
-        transfer.direction = .READ;
-        transfer.semaphore = *transfer_done;
-        transfer.physical_memory_address = get_physical_address(buffer.data);
-
-        do_storage_transfer(sd, transfer);
-        wait_for(*transfer_done);
-    }
-
-    {
-        // Do some stuff with the loaded file system.
-        file_system  = fat16_parse_file_system(buffer);
-        root        := fat16_get_root_directory(*file_system);
-
-        fat16_create_directory(root, "THEOS");
-
-        text := "The old gentleman's undoubting, unquestioning simplicity has a rare freshness about it in these matter-of-fact railroading and telegraphing days.";
-        fat16_write_file(root, "THEOS/TEST", text);
-
-        fat16_report_space(file_system);
-        fat16_print_directory_tree(root);
-        fat16_copy_fat_table(*file_system);
-    }
-
-    {
-        // It's the exact same transfer parameters, but in the other direction.
-        transfer.direction = .WRITE;
-
-        do_storage_transfer(sd, transfer);
-        wait_for(*transfer_done);
-    }
-
-    end   := get_monotonic_time();
-    log("Elapsed: %ms", to_milliseconds(end - start));
-
-    return file_system;
 }
 
 
@@ -2366,9 +2308,7 @@ spin_with_exponential_backoff :: ($condition: Code) #expand {
     SPIN_BUDGET :: 14;
     loop_count  := 0;
 
-    while true {
-        if #insert condition return;
-
+    while !#insert condition {
         loop_count += cast(int) (loop_count < SPIN_BUDGET);
 
         for 0..1 << loop_count {
@@ -2403,6 +2343,7 @@ lock_for_reading :: (lock: *RW_Lock) {
         // Wait until the lock might be free.
         spin_with_exponential_backoff(lock.writer_lock.now_serving == lock.writer_lock.next_ticket);
 
+        // Take the lock speculatively.
         atomic_increment(*lock.reader_counter);
 
         if lock.writer_lock.now_serving == lock.writer_lock.next_ticket {
