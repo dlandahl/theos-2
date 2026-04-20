@@ -683,7 +683,7 @@ Interface_Descriptor :: struct {
     interface_count:     u8;
     alternate_setting:   u8;
     endpoint_count:      u8;
-    class:               u8;
+    class:               USB_Device_Class;
     sub_class:           u8;
     protocol:            u8;
     index:               u8;

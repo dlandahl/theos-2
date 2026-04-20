@@ -320,6 +320,8 @@ init_usb_controller :: (device: *PCI_Device) {
 }
 
 reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: bool {
+    // Todo: This procedure should probably be removed because we now reset ports asynchronously on port status change.
+
     if !port return false; // Allowed so the caller can treat USB2 and 3 ports on the same socket the same, even if one or the other is not present.
 
     if get(xhci.HCCPARAMS1, .PPC__port_power_control) {
@@ -332,9 +334,10 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: boo
             return false;
         }
     }
-
+    
     // Clear status change flags.
     // Todo: Bitfields don't have a good way to set multiple fields at once.
+    // Todo: Think about whether it can cause issues to RMW this. Maybe the bitfield module should be made to work well with W1C and read as 0 fields.
     set_bit(*port.PORTSC, .CSC__connect_status_change);
     set_bit(*port.PORTSC, .PEC__enabled_disabled_change);
     set_bit(*port.PORTSC, .WRC__warm_port_reset_change);
@@ -345,9 +348,10 @@ reset_port :: (xhci: USB_Controller, port: *XHCI_Port_Registers) -> success: boo
 
     if get(port.PORTSC, .PED__enabled_disabled) return true; // If port status change is already pending, don't generate another one and cause races on the handler thread. Todo: This needs to be handled more generally and robustly, because what if a USB device is unplugged and replugged really fast?
 
-    set_bit(*port.PORTSC, .WPR__warm_port_reset);
+    // Todo: Detect if warm port reset is available which may be faster.
+    set_bit(*port.PORTSC, .PR__reset);
 
-    if Timeout(get_bit(port.PORTSC, .WRC__warm_port_reset_change), time_ms = 1) {
+    if Timeout(get_bit(port.PORTSC, .PRC__reset_change), time_ms = 5) {
         // Not an error, there's just no device connected.
         return false;
     }
@@ -443,14 +447,25 @@ usb_thread :: () {
 
             if type == {
               case .PORT_STATUS_CHANGE_EVENT;
-                // Todo: Check if it was a detach rather than an attach.
-                port := (current_trb.event_data >> 24) & 0xff;
+                port_id := (current_trb.event_data >> 24) & 0xff;
                 log("Got port status change.");
                 
+                register_set := *xhci.port_registers[port_id-1];
+
+                if !get_bit(register_set.PORTSC, .CCS__current_connect_status) {
+                    // Todo: Device detach.
+                    continue;
+                }
+
+                if !get_bit(register_set.PORTSC, .PED__enabled_disabled) {
+                    set_bit(*register_set.PORTSC, .PR__reset);
+                    continue;
+                }
+
                 command: Normal_TRB;
                 set(*command.dword3, .trb_type, cast(s64) TRB_Type.ENABLE_SLOT_COMMAND);
                 set(*command.dword3, .interrupt_on_completion, 1);
-                command.data_pointer = port; // Todo: This is not technically allowed. But doing it this way seems much less messy.
+                command.data_pointer = port_id; // Todo: This is not technically allowed. But doing it this way seems much less messy.
 
                 queue_command(*xhci.command_ring, command);
                 flush_commands(xhci);
@@ -507,7 +522,7 @@ usb_thread :: () {
                         for* socket.string_description it.* = socket.string_description[it_index * 2];
                     }
 
-                    log("String: %", socket.string_description);
+                    log("String: %", string_descriptor.*);
 
                     // Request configuration descriptor.
 
@@ -632,7 +647,7 @@ usb_thread :: () {
                     continue;
                 }
 
-                if socket.interface_descriptor.class == 3 {
+                if socket.interface_descriptor.class == .HID {
                     if socket.device_specific hid_transfer_event(socket.device_specific, event);
                 }
 
@@ -660,7 +675,7 @@ usb_thread :: () {
 
                     assert(socket.initialization_phase == .WAITING_FOR_CONFIGURE_ENDPOINT);
 
-                    if socket.interface_descriptor.class == 3 {
+                    if socket.interface_descriptor.class == .HID {
                         socket.device_specific = init_hid_device(socket);
                     }
 
@@ -687,7 +702,7 @@ usb_thread :: () {
                             set(*request.request_type, .direction, 1);
                             request.request      = .GET_DESCRIPTOR;
                             request.value        = .DEVICE;
-                            request.length       = 8;
+                            request.length       = 18;
 
                             buffer := get_physical_address(*socket.device_descriptor);
                             execute_device_request(socket, 1, request, buffer);
@@ -749,10 +764,10 @@ usb_thread :: () {
                     if cast(XHCI_Port_Speed) speed == {
                       case .UNDEFINED; #through;
                       case .LOW_SPEED; #through;
-                      case .HIGH_SPEED;
+                      case .FULL_SPEED;
                         set(*endpoint_context.dword1, .max_packet_size, 8);
 
-                      case .FULL_SPEED;
+                      case .HIGH_SPEED;
                         set(*endpoint_context.dword1, .max_packet_size, 64);
 
                       case .SUPER_SPEED_GEN1_1X; #through;
@@ -837,4 +852,34 @@ execute_device_request :: (socket: *USB_Socket, endpoint_id: int, packet: Device
     queue_command(*endpoint.transfer_ring, status);
     
     flush_commands(socket.controller, socket.slot_id, cast(u32) endpoint_id);
+}
+
+
+
+USB_Device_Class :: enum u8 {
+    LOOK_AT_INTERFACE_DESCRIPTOR :: 0x00;
+    AUDIO                        :: 0x01;
+    COMMUNICATIONS               :: 0x02;
+    HID                          :: 0x03;
+    PHYSICAL                     :: 0x05;
+    IMAGE                        :: 0x06;
+    PRINTER                      :: 0x07;
+    MASS_STORAGE                 :: 0x08;
+    HUB                          :: 0x09;
+    CDC_DATA                     :: 0x0A;
+    SMART_CARD                   :: 0x0B;
+    CONTENT_SECURITY             :: 0x0D;
+    VIDEO                        :: 0x0E;
+    PERSONAL_HEALTHCARE          :: 0x0F;
+    AV_DEVICES                   :: 0x10;
+    BILLBOARD                    :: 0x11;
+    USB_C_BRIDGE                 :: 0x12;
+    BULK_DISPLAY                 :: 0x13;
+    MCTP_OVER_USB                :: 0x14;
+    I3C                          :: 0x3C;
+    DIAGNOSTIC_DEVICE            :: 0xDC;
+    WIRELESS                     :: 0xE0;
+    MISCELLANEOUS                :: 0xEF;
+    APPLICATION_SPECIFIC         :: 0xFE;
+    VENDOR_SPECIFIC              :: 0xFF;
 }

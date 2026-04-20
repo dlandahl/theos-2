@@ -354,7 +354,7 @@ ghash :: (hash_key: i128, ciphertext: []u8, additional_authenticated_data: []u8)
     length_block.high = cast(u64) additional_authenticated_data.count * 8;
 
     accumulator ^= length_block;
-    accumulator = galois_multiply(accumulator, hash_key);
+    accumulator  = galois_multiply(accumulator, hash_key);
 
     return byteswap_i128(accumulator);
 }

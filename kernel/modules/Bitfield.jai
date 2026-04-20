@@ -319,7 +319,7 @@ validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
         total_width += it;
     }
 
-    expected_width := bitfield.runtime_size*8;
+    expected_width := bitfield.runtime_size * 8;
 
     if total_width != expected_width {
         name := ifx ti.name else "(anonymous type)";
