@@ -336,7 +336,7 @@ kernel_entry :: () #no_context {
                 global.nvme = nvme_sd.data_pointer;
 
               case .I8254X_ETHERNET;
-                // global.network_connection.adapter = init_i8254x(it);
+                global.network_connection.adapter = init_i8254x(it);
 
               case .HIGH_DEFINITION_AUDIO;
                 // init_high_definition_audio_controller(it);
@@ -355,13 +355,14 @@ kernel_entry :: () #no_context {
             log("\n=== Wrote % trace events. ===\n\n", trace_event_count);
         });
 
-        file_system_test(nvme_sd);
+        // file_system_test(nvme_sd);
 
-        // start_network();
-        //
+        assert(start_network());
+        get_ntp_consensus_time(*global.network_connection);
+
         // success, network_time := get_nist_network_time(*global.network_connection);
         // assert(success);
-        //
+        // // This is sometimes off by 3600000 milliseconds because of daylight savings.
         // log("Time delta: %ms", to_milliseconds(get_system_time() - network_time));
 
         {

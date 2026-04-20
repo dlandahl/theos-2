@@ -885,7 +885,7 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
     return packets_received;
 }
 
-i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet, loc := #caller_location) {
+i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet) {
     log_category("8254x");
 
     desc := *nic.tx_queue[nic.tx_queue_tail];

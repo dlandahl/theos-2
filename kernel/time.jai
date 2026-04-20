@@ -1,4 +1,6 @@
 
+FEMTOSECONDS_PER_SECOND :: 1_000_000_000_000_000;
+
 get_kernel_timestamp :: () -> Apollo_Time {
     // It's less optimal to eagerly convert timer ticks to real (apollo) time since the caller might only want to store and compare the value. But this keeps the user code simpler for now.
 
@@ -11,7 +13,6 @@ get_kernel_timestamp :: () -> Apollo_Time {
     timestamp: Apollo_Time;
     timestamp.low = rdtsc();
 
-    FEMTOSECONDS_PER_SECOND :: 1_000_000_000_000_000;
     timestamp *= FEMTOSECONDS_PER_SECOND;
     timestamp /= cast(s64) global.tsc_frequency;
 
@@ -784,30 +785,135 @@ operator > :: (a: S128, b: s64) -> bool {
 
 
 
-get_nist_network_time :: (net: *Network_Connection) -> success: bool, time: Apollo_Time = APOLLO_TIME_INVALID {
-    // Be careful not to spam the server when modifying and running this code, they don't like it.
-    // The time value also rolls over in 2036. https://tf.nist.gov/tf-cgi/servers.cgi
+// Description of NTP algorithms:
+// https://www.rfc-editor.org/rfc/rfc5905#section-8
 
-    log_category("NIST TIME");
+NTP_Timestamp :: struct {
+    seconds:   u32;
+    fraction:  u32; // Each increment is 233 picoseconds.
+}
+
+NTP_Packet :: struct {
+    #as flags: enum u8 {
+        mode           ::  3;
+        version_number ::  3;
+        leap_indicator ::  2;
+    }
+
+    CLIENT_MODE :: 3;
+    SERVER_MODE :: 4;
+
+    VERSION     :: 4;
+
+    stratum:              u8;
+    poll_interval:        u8;
+    precision:            u8;
+
+    root_delay:           u32;
+    proot_dispersion:     u32;
+    reference_id:         u32;
+    reference_timestamp:  NTP_Timestamp;
+    originate_timestamp:  NTP_Timestamp;
+    receive_timestamp:    NTP_Timestamp;
+    transmit_timestamp:   NTP_Timestamp;
+}
+
+#assert size_of(NTP_Packet) == 48;
+
+get_ntp_consensus_time :: (net: *Network_Connection) -> success: bool, time := APOLLO_TIME_INVALID {
+    log_category("NTP");
+
+    HOST_NAME   :: "pool.ntp.org";
+    SERVER_PORT :: 123;
 
     if net.dhcp_handshake_state != .COMPLETED {
         log_error("No network.");
         return success = false;
     }
 
-    dns_query := transmit_dns_query(net, "time.nist.gov");
+    success, ip_address := resolve_host_name(net, HOST_NAME);
 
-    if Timeout(dns_query.complete, 5000) {
-        log_error("Failed to resolve host.");
+    if !success {
+        log_error("Failed to resolve host '%'.", HOST_NAME);
+        return success = false;
+    }
+
+    udp := initiate_udp_connection(net, ip_address, remote_port=SERVER_PORT);
+
+    ntp: NTP_Packet;
+    set(*ntp, .mode,           NTP_Packet.CLIENT_MODE);
+    set(*ntp, .version_number, NTP_Packet.VERSION);
+    ntp.transmit_timestamp = apollo_to_ntp(get_monotonic_time());
+
+    byte_swap_struct(*ntp);
+
+    send_udp(udp, ntp);
+
+    wait_for(*udp.semaphore);
+
+    received := cast(*NTP_Packet) ring_buffer_start_read(*udp.received, size_of(NTP_Packet));
+    byte_swap_struct(received);
+
+    apollo := ntp_to_apollo(received.transmit_timestamp);
+    return true, apollo;
+}
+
+NTP_EPOCH    : Apollo_Time : #run calendar_to_apollo({ year = 1900 });
+NTP_FRACTION : Apollo_Time : {233_000, 0}; // The apollo time delta represented by each step of the NTP timestamp fractional component.
+
+ntp_to_apollo :: (ts: NTP_Timestamp) -> Apollo_Time {
+    apollo := NTP_EPOCH;
+    apollo += seconds_to_apollo(ts.seconds);
+    apollo += NTP_FRACTION * ts.fraction;
+    return apollo;
+}
+
+apollo_to_ntp :: (apollo: Apollo_Time) -> NTP_Timestamp {
+    relative_to_epoch := apollo - NTP_EPOCH;
+
+    ts: NTP_Timestamp;
+    ts.seconds = cast(u32) to_seconds(relative_to_epoch);
+
+    quotient, remainder, error := signed_divide_with_remainder(relative_to_epoch, to_s128(FEMTOSECONDS_PER_SECOND));
+    assert(!error);
+
+    // 'remainder' is now the fractional part of the apollo time, anything less than a second.
+
+    fraction := (remainder / NTP_FRACTION); // Todo: Do we really need to do two divides?
+    assert(!fraction.high);
+
+    ts.fraction = cast(u32) fraction.low;
+    return ts;
+}
+
+
+
+get_nist_network_time :: (net: *Network_Connection) -> success: bool, time := APOLLO_TIME_INVALID {
+    // Be careful not to spam the server when modifying and running this code, they don't like it.
+    // The time value also rolls over in 2036. https://tf.nist.gov/tf-cgi/servers.cgi
+
+    log_category("NIST TIME");
+
+    HOST_NAME   :: "time.nist.gov";
+    SERVER_PORT :: 37;
+
+    if net.dhcp_handshake_state != .COMPLETED {
+        log_error("No network.");
+        return success = false;
+    }
+
+    success, ip_address := resolve_host_name(net, HOST_NAME);
+
+    if !success {
+        log_error("Failed to resolve host '%'.", HOST_NAME);
         return success = false;
     }
 
     // Todo: Ping the server so we can adjust the timing.
-    tcp := initiate_tcp_connection(net, dns_query.answer, remote_port=37);
+    tcp := initiate_tcp_and_wait_for_handshake(net, ip_address, remote_port=SERVER_PORT);
 
-    if Timeout(tcp.handshake_state == .ESTABLISHED, 10_000) {
+    if !tcp {
         log_error("Failed to establish connection.");
-        tcp_close(tcp);
         return success = false;
     }
 

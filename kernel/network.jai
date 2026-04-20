@@ -46,6 +46,9 @@ byte_swap_struct :: (header: *$T) #modify {
 
                 print(*builder, "    for* header.%1 it.* = byte_swap(it.*);\n", it.name);
 
+              case .STRUCT;
+                print(*builder, "    byte_swap_struct(*header.%1);\n", it.name);
+
               case;
                 assert(false, "Auto-byteswapping field of type % is not implemented. Field: %.", it.type.type, it.name);
             }
@@ -80,8 +83,8 @@ Ethertype :: enum u16 {
 init_ethernet_header :: (net: *Network_Connection) -> Ethernet_Header {
     eth: Ethernet_Header;
     eth.destination_mac = net.router_mac_address;
-    eth.source_mac = net.adapter.mac_address;
-    eth.ethertype = .IPv4;
+    eth.source_mac      = net.adapter.mac_address;
+    eth.ethertype       = .IPv4;
 
     byte_swap_struct(*eth);
 
@@ -90,7 +93,7 @@ init_ethernet_header :: (net: *Network_Connection) -> Ethernet_Header {
 
 
 
-Ipv4_Header :: struct {
+IPv4_Header :: struct {
 
     #as bitfield: enum u64 {
         ihl             :: 4;
@@ -148,21 +151,21 @@ internet_checksum :: (bytes: *u8, count: int) -> u16 {
 
 init_ip_header :: (
     net: *Network_Connection,
-    protocol: type_of(Ipv4_Header.protocol),
+    protocol: type_of(IPv4_Header.protocol),
     destination_ip: u32,
     total_length: int
-) -> Ipv4_Header {
+) -> IPv4_Header {
 
-    assert(total_length >= size_of(Ipv4_Header) && total_length < 0xffff);
+    assert(total_length >= size_of(IPv4_Header) && total_length < 0xffff);
 
-    ip: Ipv4_Header;
+    ip: IPv4_Header;
     set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
+    set(*ip, .ihl,     5);
     set(*ip, .total_length, byte_swap(cast(u16) total_length));
 
-    ip.time_to_live = 128;
-    ip.protocol = protocol;
-    ip.source_address = net.our_ip;
+    ip.time_to_live        = 128;
+    ip.protocol            = protocol;
+    ip.source_address      = net.our_ip;
     ip.destination_address = destination_ip;
 
     byte_swap_struct(*ip);
@@ -173,7 +176,7 @@ init_ip_header :: (
 
 
 
-Arp_Packet :: struct {
+ARP_Packet :: struct {
     HTYPE__hardware_type: enum u16 {
         ethernet :: 0x0001;
     }
@@ -195,13 +198,13 @@ Arp_Packet :: struct {
     TPA__target_protocol_address: u32 #align 1;  @DontByteswap
 }
 
-#assert size_of(Arp_Packet) == 28;
+#assert size_of(ARP_Packet) == 28;
 
 transmit_arp_probe :: (net: *Network_Connection) {
 
     Probe :: struct {
         using eth: Ethernet_Header;
-        using arp: Arp_Packet;
+        using arp: ARP_Packet;
     }
     probe: Probe;
 
@@ -214,8 +217,8 @@ transmit_arp_probe :: (net: *Network_Connection) {
 
     byte_swap_struct(*probe.eth);
 
-    probe.HTYPE__hardware_type = .ethernet;
-    probe.PTYPE__protocol_type = .IPv4;
+    probe.HTYPE__hardware_type  = .ethernet;
+    probe.PTYPE__protocol_type  = .IPv4;
     probe.HLEN__hardware_length = 6;
     probe.PLEN__protocol_length = 4;
     probe.OPER__operation       = .request;
@@ -228,15 +231,13 @@ transmit_arp_probe :: (net: *Network_Connection) {
     byte_swap_struct(*probe.arp);
 
     add_to_packet(*packet, probe);
-    i8254x_transmit_packet(*net.adapter, packet);
-
-    // Todo: actually respond to IP address conflicts
+    transmit_packet(net, packet);
 }
 
 handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
     assert(eth.ethertype == .ARP);
 
-    arp := cast(*Arp_Packet) (eth + 1);
+    arp := cast(*ARP_Packet) (eth + 1);
 
     byte_swap_struct(arp);
 
@@ -258,14 +259,14 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
         return;
     }
 
-    Arp_Reply :: struct {
+    ARP_Reply :: struct {
         using eth: Ethernet_Header;
-        using arp: Arp_Packet;
+        using arp: ARP_Packet;
     }
-    reply: Arp_Reply;
+    reply: ARP_Reply;
 
     packet: Network_Packet;
-    packet.data = New(Arp_Reply,, temp);
+    packet.data = New(ARP_Reply,, temp);
 
     reply.destination_mac = arp.SHA__sender_hardware_address;
     reply.source_mac      = net.adapter.mac_address;
@@ -273,8 +274,8 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
 
     byte_swap_struct(*reply.eth);
 
-    reply.HTYPE__hardware_type = .ethernet;
-    reply.PTYPE__protocol_type = .IPv4;
+    reply.HTYPE__hardware_type  = .ethernet;
+    reply.PTYPE__protocol_type  = .IPv4;
     reply.HLEN__hardware_length = 6;
     reply.PLEN__protocol_length = 4;
     reply.OPER__operation       = .reply;
@@ -287,7 +288,7 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
     byte_swap_struct(*reply.arp);
 
     add_to_packet(*packet, reply);
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
     log("ARP reply sent");
 
     return;
@@ -295,19 +296,115 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
 
 
 
-Udp_Header :: struct {
-    source_port: u16;
+UDP_Header :: struct {
+    source_port:      u16;
     destination_port: u16;
 
-    length: u16;
-    checksum: u16;
+    length:           u16;
+    checksum:         u16;
+}
+
+UDP_Connection :: struct {
+    // UDP doesn't have connections, but this tells the network packet receive thread how to route incoming UDP packets.
+    net: *Network_Connection;
+
+    local_port:  u16;
+
+    remote_port: u16;
+    remote_ip:   u32;
+
+    received:    Ring_Buffer;
+    semaphore:   Semaphore;
+}
+
+initiate_udp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *UDP_Connection {
+    local_port := cast,trunc(u16) random_get(); // Todo
+
+    // Todo: This gets called from the user thread, but this array is owned by the network thread.
+    udp := array_add(*net.udp_connections);
+
+    udp.net         = net;
+    udp.remote_port = remote_port;
+    udp.remote_ip   = remote_ip;
+    udp.local_port  = local_port;
+
+    allocate_ring_buffer(*udp.received, 0x1000);
+    udp.semaphore.counter_max = 1;
+
+    return udp;
+}
+
+send_udp :: (connection: *UDP_Connection, to_send: Any) { // We could remove the extra copy of 'to_send'
+    assert(to_send.type.type != .ARRAY); // Todo: Support sending just an array of bytes.
+
+    packet: Network_Packet;
+    packet.data = talloc(MAX_PACKET_SIZE);
+
+    eth := add_to_packet(*packet, Ethernet_Header);
+    eth.destination_mac = connection.net.router_mac_address;
+    eth.source_mac      = connection.net.adapter.mac_address;
+    eth.ethertype       = .IPv4;
+
+    byte_swap_struct(eth);
+
+    ip_length := size_of(IPv4_Header) + size_of(UDP_Header) + to_send.type.runtime_size;
+
+    ip        := add_to_packet(*packet, IPv4_Header);
+    ip.*       = init_ip_header(connection.net, .UDP, connection.remote_ip, ip_length);
+
+    udp := add_to_packet(*packet, UDP_Header);
+    udp.source_port      = connection.local_port;
+    udp.destination_port = connection.remote_port;
+    udp.length           = cast(u16) (size_of(UDP_Header) + to_send.type.runtime_size);
+
+    byte_swap_struct(udp);
+
+    payload: string;
+    payload.count = to_send.type.runtime_size;
+    payload.data  = xx to_send.value_pointer;
+    udp.checksum  = udp_checksum(udp, ip.source_address, ip.destination_address, payload);
+
+    add_to_packet(*packet, to_send);
+
+    transmit_packet(connection.net, packet);
+}
+
+udp_checksum :: (udp: UDP_Header, source: u32, dest: u32, payload := "") -> u16 {
+    // Todo: Deduplicate this with TCP checksum calculation.
+    auto_release_temp();
+
+    Pseudo_Header :: struct {
+        source_address: u32;
+        destination_address: u32;
+        zeroes: u8;
+        protocol: type_of(IPv4_Header.protocol);
+        udp_length: u16;
+
+        udp: UDP_Header;
+
+        payload: [MAX_PACKET_SIZE-40] u8;
+    }
+
+    pseudo := New(Pseudo_Header,, temp);
+    pseudo.udp = udp;
+    pseudo.source_address = source;
+    pseudo.destination_address = dest;
+    pseudo.protocol = .UDP;
+    pseudo.udp_length = byte_swap(cast(u16) (size_of(UDP_Header) + payload.count));
+
+    memcpy(pseudo.payload.data, payload.data, payload.count);
+
+    count := payload.count;
+    if count % 2 count += 1;
+
+    return internet_checksum(cast(*u8) pseudo, size_of(Pseudo_Header) + count - pseudo.payload.count);
 }
 
 FIRST_EPHEMERAL_PORT :: 0xc000;
 
 
 
-Tcp_Header :: struct {
+TCP_Header :: struct {
     source_port: u16;
     destination_port: u16;
 
@@ -334,8 +431,8 @@ Tcp_Header :: struct {
     urgent_pointer: u16;
 }
 
-init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
-    h: Tcp_Header;
+init_tcp_header :: (tcp: *TCP_Connection, flags: TCP_Header.Flags, payload := "") -> TCP_Header {
+    h: TCP_Header;
     h.source_port = tcp.port;
     h.destination_port = tcp.remote_port;
     h.sequence_number = tcp.sequence_number;
@@ -350,17 +447,17 @@ init_tcp_header :: (tcp: *Tcp_Connection, flags: Tcp_Header.Flags, payload := ""
     return h;
 }
 
-tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 {
+tcp_checksum :: (tcp: TCP_Header, source: u32, dest: u32, payload := "") -> u16 {
     auto_release_temp();
 
     Pseudo_Header :: struct {
         source_address: u32;
         destination_address: u32;
         zeroes: u8;
-        protocol: type_of(Ipv4_Header.protocol);
+        protocol: type_of(IPv4_Header.protocol);
         tcp_length: u16;
 
-        tcp: Tcp_Header;
+        tcp: TCP_Header;
 
         payload: [MAX_PACKET_SIZE-40] u8;
     }
@@ -370,7 +467,7 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
     pseudo.source_address = source;
     pseudo.destination_address = dest;
     pseudo.protocol = .TCP;
-    pseudo.tcp_length = byte_swap(cast(u16) (size_of(Tcp_Header) + payload.count));
+    pseudo.tcp_length = byte_swap(cast(u16) (size_of(TCP_Header) + payload.count));
 
     memcpy(pseudo.payload.data, payload.data, payload.count);
 
@@ -380,7 +477,7 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 
     return internet_checksum(cast(*u8) pseudo, size_of(Pseudo_Header) + count - pseudo.payload.count);
 }
 
-Tcp_Connection :: struct {
+TCP_Connection :: struct {
     net: *Network_Connection;
 
     port: u16;
@@ -398,10 +495,12 @@ Tcp_Connection :: struct {
         CLOSED;
     }
 
+    handshake_done: Semaphore;
+
     sequence_number: u32;
     ack_number: u32;
 
-    in_flight: [..] Tcp_Transmission_Info;
+    in_flight: [..] TCP_Transmission_Info;
 
     in_stream: Ring_Buffer;
     in_data: Semaphore;
@@ -414,7 +513,7 @@ Tcp_Connection :: struct {
 }
 
 // Todo: This is dumb, too many copies.
-blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> [] u8 {
+blocking_read_tcp :: (tcp: *TCP_Connection, bytes: int, timeout := INFINITE_TIMEOUT) -> [] u8 {
 
     buffer := talloc(bytes);
     cursor: int;
@@ -432,7 +531,7 @@ blocking_read_tcp :: (tcp: *Tcp_Connection, bytes: int, timeout := INFINITE_TIME
     return {bytes, buffer};
 }
 
-blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: [] u8, timeout := INFINITE_TIMEOUT) -> bool, written: int {
+blocking_write_tcp :: (tcp: *TCP_Connection, bytes: [] u8, timeout := INFINITE_TIMEOUT) -> bool, written: int {
     cursor: int;
 
     while true {
@@ -450,19 +549,19 @@ blocking_write_tcp :: (tcp: *Tcp_Connection, bytes: [] u8, timeout := INFINITE_T
     return true, cursor;
 }
 
-tcp_flush :: (tcp: *Tcp_Connection) {
+tcp_flush :: (tcp: *TCP_Connection) {
     tcp.do_flush = true;
     signal(*tcp.net.work_to_do);
 }
 
-tcp_close :: (tcp: *Tcp_Connection) {
+tcp_close :: (tcp: *TCP_Connection) {
     tcp.do_close = true;
     signal(*tcp.net.work_to_do);
 }
 
 
 
-Tcp_Transmission_Info :: struct {
+TCP_Transmission_Info :: struct {
     // There should be an instance of this for each unacknowledged transmitted packet in a connection.
     // Except for ACKs sent by us, as we don't expect to receive an ACK for those.
 
@@ -470,15 +569,15 @@ Tcp_Transmission_Info :: struct {
     sequence: u32;
 
     // This value is stored in the packet header, but it seems cleaner to keep a separate copy of it rather than parsing it out of the packet.
-    flags: Tcp_Header.Flags;
+    flags: TCP_Header.Flags;
 
     last_sent_at: Apollo_Time; // To detect if we need to retransmit
     attempts: int;
 }
 
-record_tcp_packet_for_potential_retransmission :: (tcp: *Tcp_Connection, packet: Network_Packet, flags: Tcp_Header.Flags) {
+record_tcp_packet_for_potential_retransmission :: (tcp: *TCP_Connection, packet: Network_Packet, flags: TCP_Header.Flags) {
 
-    bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(Ipv4_Header) + size_of(Tcp_Header));
+    bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(IPv4_Header) + size_of(TCP_Header));
     if bytes_to_transmit == 0 bytes_to_transmit = 1;
     tcp.sequence_number += cast(u32) bytes_to_transmit;
 
@@ -492,7 +591,7 @@ record_tcp_packet_for_potential_retransmission :: (tcp: *Tcp_Connection, packet:
     info.flags = flags;
 }
 
-transmit_tcp_segment :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", loc := #caller_location) {
+transmit_tcp_segment :: (tcp: *TCP_Connection, header_flags: TCP_Header.Flags, payload := "") {
 
     if tcp.handshake_state == .CLOSED {
         log_error("Trying to transmit TCP packet over a connection that has already been closed.");
@@ -505,7 +604,7 @@ transmit_tcp_segment :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, p
     eth := init_ethernet_header(tcp.net);
     add_to_packet(*packet, eth);
 
-    datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header) + payload.count;
+    datagram_length := size_of(IPv4_Header) + size_of(TCP_Header) + payload.count;
     ip := init_ip_header(tcp.net, .TCP, tcp.remote_ip, datagram_length);
     add_to_packet(*packet, ip);
 
@@ -518,14 +617,14 @@ transmit_tcp_segment :: (tcp: *Tcp_Connection, header_flags: Tcp_Header.Flags, p
         record_tcp_packet_for_potential_retransmission(tcp, packet, header_flags);
     }
 
-    i8254x_transmit_packet(*tcp.net.adapter, packet);
+    transmit_packet(tcp.net, packet);
 }
 
-initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *Tcp_Connection {
+initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *TCP_Connection {
 
     log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
 
-    port := cast,trunc(u16)random_get(); // Todo
+    local_port := cast,trunc(u16) random_get(); // Todo
 
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
@@ -533,7 +632,7 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     // Todo: This gets called from the user thread, but this array is owned by the network thread.
     tcp := array_add(*net.tcp_connections);
     tcp.net = net;
-    tcp.port = port;
+    tcp.port = local_port;
     tcp.remote_port = remote_port;
     tcp.remote_ip = remote_ip;
     tcp.handshake_state = .NOT_STARTED;
@@ -551,7 +650,18 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     return tcp;
 }
 
-update_tcp_connection :: (tcp: *Tcp_Connection) {
+initiate_tcp_and_wait_for_handshake :: (net: *Network_Connection, remote_ip: u32, remote_port: u16, timeout_ms := 10_0000) -> *TCP_Connection {
+    tcp := initiate_tcp_connection(net, remote_ip, remote_port);
+
+    if !wait_for(*tcp.handshake_done, milliseconds_to_apollo(timeout_ms)) {
+        log("TCP handshake timeout.");
+        return null;
+    }
+
+    return tcp;
+}
+
+update_tcp_connection :: (tcp: *TCP_Connection) {
     // Todo: FIN, SYN, ACK should also be retransmitted if necessary.
 
     if tcp.handshake_state == .NOT_STARTED {
@@ -571,7 +681,7 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
     for* tcp.in_flight {
         if time_now - it.last_sent_at > retransmission_period {
             log("TCP retransmit %", it.sequence);
-            i8254x_transmit_packet(*tcp.net.adapter, it.packet);
+            transmit_packet(tcp.net, it.packet);
 
             it.last_sent_at = time_now;
             it.attempts += 1;
@@ -612,7 +722,7 @@ update_tcp_connection :: (tcp: *Tcp_Connection) {
     }
 }
 
-update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
+update_tcp_handshake :: (tcp: *TCP_Connection, segment: *TCP_Header) {
     // Maybe it would be easier to write this simply, by doing a switch statement over the current handshake state, and responding to the flags in each case statement.
 
     if segment.flags == .SYN | .ACK {
@@ -632,6 +742,8 @@ update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
 
         tcp.handshake_state = .ESTABLISHED;
         log("TCP connection with %:% successfully established.", format_ip(tcp.remote_ip), tcp.remote_port);
+
+        signal(*tcp.handshake_done);
 
         return;
     }
@@ -672,7 +784,7 @@ update_tcp_handshake :: (tcp: *Tcp_Connection, segment: *Tcp_Header) {
     tcp.handshake_state = .CLOSED;
 }
 
-receive_tcp_segment :: (tcp: *Tcp_Connection, segment: *Tcp_Header, bytes: int) {
+receive_tcp_segment :: (tcp: *TCP_Connection, segment: *TCP_Header, bytes: int) {
 
     update_tcp_handshake(tcp, segment);
 
@@ -755,25 +867,25 @@ byte_swap :: (u24: tls_u24) -> tls_u24 {
 
 
 
-Tls_Record_Header :: struct {
-    content_type: Tls_Content_Type;
-    version: Tls_Version #align 1;
+TLS_Record_Header :: struct {
+    content_type: TLS_Content_Type;
+    version: TLS_Version #align 1;
     length: u16 #align 1;
 }
 
-Tls_Content_Type :: enum u8 {
+TLS_Content_Type :: enum u8 {
     CHANGE_CIPHER_SPEC :: 20;
     ALERT              :: 21;
     HANDSHAKE          :: 22;
     APPLICATION_DATA   :: 23;
 }
 
-Tls_Handshake_Header :: struct {
-    type: Tls_Handshake_Type;
+TLS_Handshake_Header :: struct {
+    type: TLS_Handshake_Type;
     length: tls_u24;
 }
 
-Tls_Handshake_Type :: enum u8 {
+TLS_Handshake_Type :: enum u8 {
     HELLO_REQUEST          :: 0;
     CLIENT_HELLO           :: 1;
     SERVER_HELLO           :: 2;
@@ -786,7 +898,7 @@ Tls_Handshake_Type :: enum u8 {
     FINISHED               :: 20;
 }
 
-Tls_Named_Curve :: enum u16 {
+TLS_Named_Curve :: enum u16 {
     SECP256R1  :: 23;
     SECP384R1  :: 24;
     SECP521R1  :: 25;
@@ -794,7 +906,7 @@ Tls_Named_Curve :: enum u16 {
     X448       :: 30;
 }
 
-Tls_Extension :: enum u16 {
+TLS_Extension :: enum u16 {
     server_name :: 0x00_00;
     status_request :: 0x00_05;
     supported_groups :: 0x00_0a;
@@ -804,7 +916,7 @@ Tls_Extension :: enum u16 {
     signed_certificate_timestamp :: 0x00_12;
 }
 
-Tls_Cipher_Suite :: enum u16 {
+TLS_Cipher_Suite :: enum u16 {
     ECDHE_RSA_\ WITH_CHACHA20_POLY1305_SHA256 :: 0xcc_a8;
     ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 :: 0xcc_a9;
     ECDHE_RSA_\ WITH_AES128_GCM_SHA256        :: 0xc0_2f;
@@ -824,12 +936,12 @@ Tls_Cipher_Suite :: enum u16 {
     RSA_\       WITH_3DES_EDE_CBC_SHA         :: 0x00_0a;
 }
 
-Tls_Version :: enum u16 {
+TLS_Version :: enum u16 {
     TLS_1_0 :: 0x0301;
     TLS_1_2 :: 0x0303;
 }
 
-Tls_Random :: struct {
+TLS_Random :: struct {
     qwords: [4] u64; @DontByteswap
 
 #overlay(qwords)
@@ -838,7 +950,7 @@ Tls_Random :: struct {
     // Some implementations/RFCs put a unix timestamp in the low bits of random, but apparently this is not recommended anymore.
 }
 
-Tls_Alert :: struct {
+TLS_Alert :: struct {
     level: enum u8 {
         WARNING :: 1;
         FATAL   :: 2;
@@ -873,8 +985,8 @@ Tls_Alert :: struct {
     }
 }
 
-Tls_Connection :: struct {
-    tcp: *Tcp_Connection;
+TLS_Connection :: struct {
+    tcp: *TCP_Connection;
 
     using encryption_keys: struct {
         client_write_key: i128;
@@ -887,14 +999,14 @@ Tls_Connection :: struct {
     server_sequence_number: u64;
 }
 
-Tls_Client_Hello :: struct {
-    client_version: Tls_Version;
-    random: Tls_Random #align 1;  @DontByteswap
+TLS_Client_Hello :: struct {
+    client_version: TLS_Version;
+    random: TLS_Random #align 1;  @DontByteswap
 
     session_id: u8;
 
     num_cipher_suites: u16 #align 1;
-    cipher_suites: [1] Tls_Cipher_Suite #align 1;
+    cipher_suites: [1] TLS_Cipher_Suite #align 1;
 
     num_compression_methods: u8;
     compression_method: u8;
@@ -911,7 +1023,7 @@ Tls_Client_Hello :: struct {
     } @DontByteswap
 }
 
-establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
+establish_tls_connection :: (tcp: *TCP_Connection) -> TLS_Connection {
     push_print_style().base = 16;
 
     if tcp.handshake_state != .ESTABLISHED {
@@ -941,7 +1053,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         blocking_write_tcp(tls.tcp, buffer);
 
         // Todo: The way they probably expect you to structure the code is to have a function that adds the record header to an already constructed message, which would make hashing and length calculation easier.
-        if hashing_enabled && T != Tls_Record_Header {
+        if hashing_enabled && T != TLS_Record_Header {
             append(*all_handshake_payload, cast(string)buffer);
         }
     }
@@ -949,7 +1061,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     receive :: ($ type: Type) -> type #expand {
         buffer := blocking_read_tcp(tls.tcp, size_of(type));
 
-        if hashing_enabled && type != Tls_Record_Header {
+        if hashing_enabled && type != TLS_Record_Header {
             append(*all_handshake_payload, cast(string)buffer);
         }
 
@@ -976,34 +1088,34 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
     server_public_key: [32] u8;
 
-    client_random: Tls_Random;
-    server_random: Tls_Random;
+    client_random: TLS_Random;
+    server_random: TLS_Random;
 
     Master_Secret: [48] u8;
 
 
-    tls: Tls_Connection;
+    tls: TLS_Connection;
     tls.tcp = tcp;
 
     {
         // Send ClientHello.
 
-        record: Tls_Record_Header;
+        record: TLS_Record_Header;
         record.content_type = .HANDSHAKE;
         record.version      = .TLS_1_0;
-        record.length       = size_of(Tls_Client_Hello) + size_of(Tls_Handshake_Header);
+        record.length       = size_of(TLS_Client_Hello) + size_of(TLS_Handshake_Header);
         send(record);
 
-        handshake: Tls_Handshake_Header;
+        handshake: TLS_Handshake_Header;
         handshake.type = .CLIENT_HELLO;
-        set(*handshake.length, size_of(Tls_Client_Hello));
+        set(*handshake.length, size_of(TLS_Client_Hello));
         send(handshake);
 
         {
-            using hello: Tls_Client_Hello;
+            using hello: TLS_Client_Hello;
 
             client_version           = .TLS_1_2;
-            num_cipher_suites        = size_of(Tls_Cipher_Suite);
+            num_cipher_suites        = size_of(TLS_Cipher_Suite);
             cipher_suites[0]         = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
             num_compression_methods  = 1;
             extensions_length        = size_of(type_of(extensions));
@@ -1028,11 +1140,11 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         // Receive ServerHello.
 
         // Todo: Should detect TLS alerts wherever record headers are received.
-        record    := receive(Tls_Record_Header);
-        handshake := receive(Tls_Handshake_Header);
+        record    := receive(TLS_Record_Header);
+        handshake := receive(TLS_Handshake_Header);
 
-        version := receive(Tls_Version);
-        random  := receive(Tls_Random);
+        version := receive(TLS_Version);
+        random  := receive(TLS_Random);
 
         server_random = random;
 
@@ -1042,7 +1154,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         push_print_style().base = 16;
         log("Got session ID: %", session_id);
 
-        cipher_suite := receive(Tls_Cipher_Suite);
+        cipher_suite := receive(TLS_Cipher_Suite);
         log("Requested cipher suite: %", cipher_suite);
 
         compression_method := receive(u8);
@@ -1051,15 +1163,15 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         extensions_length := receive(u16);
 
         while extensions_length > 0 {
-            extension_type := receive(Tls_Extension);
-            extensions_length -= size_of(Tls_Extension);
+            extension_type    := receive(TLS_Extension);
+            extensions_length -= size_of(TLS_Extension);
 
             log("Server hello provided extension %", extension_type);
 
-            extension_size := receive(u16);
+            extension_size    := receive(u16);
             extensions_length -= size_of(u16);
 
-            extension_bytes := receive(extension_size);
+            extension_bytes   := receive(extension_size);
             extensions_length -= extension_size;
         }
     }
@@ -1067,8 +1179,8 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Receive security certificate.
 
-        receive(Tls_Record_Header);
-        receive(Tls_Handshake_Header);
+        receive(TLS_Record_Header);
+        receive(TLS_Handshake_Header);
 
         all_certificates_length := get(*receive(tls_u24));
 
@@ -1096,14 +1208,14 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Server Key Exchange.
 
-        record := receive(Tls_Record_Header);
-        header := receive(Tls_Handshake_Header);
+        record := receive(TLS_Record_Header);
+        header := receive(TLS_Handshake_Header);
 
         assert(record.content_type == .HANDSHAKE);
         assert(header.type == .SERVER_KEY_EXCHANGE);
 
         assert(receive(u8) == 3); // named_curve
-        assert(receive(Tls_Named_Curve) == .X25519);
+        assert(receive(TLS_Named_Curve) == .X25519);
 
         key_length := receive(u8);
         assert(key_length == 32);
@@ -1115,7 +1227,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         // Todo: validate key against security certificate.
 
-        signature_type := receive(u16);
+        signature_type   := receive(u16);
         signature_length := receive(u16);
 
         signature := receive(signature_length);
@@ -1124,8 +1236,8 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Server Hello Done.
 
-        receive(Tls_Record_Header);
-        receive(Tls_Handshake_Header);
+        receive(TLS_Record_Header);
+        receive(TLS_Handshake_Header);
 
         // Generate our secret key.
         random_bytes: [32]u8;
@@ -1142,13 +1254,13 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
 
         KEY_EXCHANGE_SIZE :: size_of([32]u8) + size_of(u8);
 
-        record: Tls_Record_Header;
+        record: TLS_Record_Header;
         record.content_type = .HANDSHAKE;
-        record.version = .TLS_1_2;
-        record.length = KEY_EXCHANGE_SIZE + size_of(Tls_Handshake_Header);
+        record.version      = .TLS_1_2;
+        record.length       = KEY_EXCHANGE_SIZE + size_of(TLS_Handshake_Header);
         send(record);
 
-        cke: Tls_Handshake_Header;
+        cke: TLS_Handshake_Header;
         cke.type = .CLIENT_KEY_EXCHANGE;
         set(*cke.length, KEY_EXCHANGE_SIZE);
         send(cke);
@@ -1209,10 +1321,10 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Client Change Cipher Spec.
 
-        record: Tls_Record_Header;
+        record: TLS_Record_Header;
         record.content_type = .CHANGE_CIPHER_SPEC;
-        record.version = .TLS_1_2;
-        record.length = 1;
+        record.version      = .TLS_1_2;
+        record.length       = 1;
 
         send(record);
         send(cast(u8) 0x1);
@@ -1224,7 +1336,7 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         // Client Handshake Finished.
 
         message: struct {
-            header: Tls_Handshake_Header;
+            header: TLS_Handshake_Header;
             verify_data: [12]u8;
         }
 
@@ -1246,12 +1358,12 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
         }
 
         text: []u8;
-        text.data = cast(*u8) *message;
+        text.data  = cast(*u8) *message;
         text.count = size_of(type_of(message));
 
         ciphertext := tls_encrypt_message(*tls, text, .HANDSHAKE);
 
-        record: Tls_Record_Header;
+        record: TLS_Record_Header;
         record.content_type = .HANDSHAKE;
         record.version = .TLS_1_2;
         record.length = cast(u16) ciphertext.count;
@@ -1264,14 +1376,14 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     {
         // Server Change Cipher Spec.
 
-        receive(Tls_Record_Header);
+        receive(TLS_Record_Header);
         assert(receive(u8) == 1);
     }
 
     {
         // Server Hanshake Finished.
 
-        record := receive(Tls_Record_Header);
+        record := receive(TLS_Record_Header);
         text   := receive(record.length);
 
         success, plaintext := tls_decrypt_message(*tls, text, .HANDSHAKE);
@@ -1283,31 +1395,31 @@ establish_tls_connection :: (tcp: *Tcp_Connection) -> Tls_Connection {
     return tls;
 }
 
-tls_transmit_application_data :: (tls: *Tls_Connection, plaintext: string) {
+tls_transmit_application_data :: (tls: *TLS_Connection, plaintext: string) {
 
     ciphertext := tls_encrypt_message(tls, cast([]u8)plaintext, .APPLICATION_DATA);
 
-    buffer := NewArray(ciphertext.count + size_of(Tls_Record_Header), u8,, temp);
+    buffer := NewArray(ciphertext.count + size_of(TLS_Record_Header), u8,, temp);
 
-    record: Tls_Record_Header;
+    record: TLS_Record_Header;
     record.content_type = .APPLICATION_DATA;
     record.version = .TLS_1_2;
     record.length = cast(u16) ciphertext.count;
     byte_swap_in_place(*record);
 
-    memcpy(buffer.data, *record, size_of(Tls_Record_Header));
-    memcpy(buffer.data + size_of(Tls_Record_Header), ciphertext.data, ciphertext.count);
+    memcpy(buffer.data, *record, size_of(TLS_Record_Header));
+    memcpy(buffer.data + size_of(TLS_Record_Header), ciphertext.data, ciphertext.count);
 
     blocking_write_tcp(tls.tcp, buffer); // Todo: Timeout.
     tcp_flush(tls.tcp);
 }
 
-tls_receive_application_data :: (tls: *Tls_Connection, timeout := INFINITE_TIMEOUT) -> string {
-    buffer := blocking_read_tcp(tls.tcp, size_of(Tls_Record_Header), timeout);
+tls_receive_application_data :: (tls: *TLS_Connection, timeout := INFINITE_TIMEOUT) -> string {
+    buffer := blocking_read_tcp(tls.tcp, size_of(TLS_Record_Header), timeout);
 
     if !buffer return ""; // Timeout hit.
 
-    record := cast(*Tls_Record_Header) buffer.data;
+    record := cast(*TLS_Record_Header) buffer.data;
     byte_swap_in_place(record);
 
     assert(record.content_type == .APPLICATION_DATA);
@@ -1319,7 +1431,7 @@ tls_receive_application_data :: (tls: *Tls_Connection, timeout := INFINITE_TIMEO
     return cast(string)plaintext;
 }
 
-tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Content_Type) -> []u8 {
+tls_encrypt_message :: (tls: *TLS_Connection, text: []u8, content_type: TLS_Content_Type) -> []u8 {
 
     bytes := text.count + 8 + size_of(i128); // Add room for explicit IV and auth tag.
 
@@ -1361,7 +1473,7 @@ tls_encrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
     return result;
 }
 
-tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Content_Type) -> bool, []u8 {
+tls_decrypt_message :: (tls: *TLS_Connection, text: []u8, content_type: TLS_Content_Type) -> bool, []u8 {
     // Note this destructively modifies 'text'. 
 
     aad: [13]u8;
@@ -1399,7 +1511,7 @@ tls_decrypt_message :: (tls: *Tls_Connection, text: []u8, content_type: Tls_Cont
 
 
 
-Dhcp_Message :: struct {
+DHCP_Message :: struct {
     opcode:            u8;
     hardware_type:     u8;
     mac_length:        u8;
@@ -1422,7 +1534,7 @@ Dhcp_Message :: struct {
     MAGIC :: 0x63825363;
 }
 
-Dhcp_Message_Type :: enum u8 {
+DHCP_Message_Type :: enum u8 {
     DISCOVER           :: 1;
     OFFER              :: 2;
     REQUEST            :: 3;
@@ -1443,28 +1555,28 @@ Dhcp_Message_Type :: enum u8 {
     TLS                :: 18;
 }
 
-get_dhcp_message_type :: (dhcp: *Dhcp_Message) -> Dhcp_Message_Type {
+get_dhcp_message_type :: (dhcp: *DHCP_Message) -> DHCP_Message_Type {
     // Todo: Make a general options parser.
-    options := cast(*Dhcp_Option_Code, dhcp + 1);
+    options := cast(*DHCP_Option_Code, dhcp + 1);
 
     while options.* != .TERMINATOR {
         if options.* != .MESSAGE_TYPE {
             options += cast(u8) options[1] + 2;
         }
 
-        return cast(Dhcp_Message_Type) options[2];
+        return cast(DHCP_Message_Type) options[2];
     }
 }
 
-init_dhcp_message :: (net: *Network_Connection) -> Dhcp_Message {
-    dhcp: Dhcp_Message;
+init_dhcp_message :: (net: *Network_Connection) -> DHCP_Message {
+    dhcp: DHCP_Message;
     dhcp.opcode        = 0x1;
     dhcp.hardware_type = 0x1;
     dhcp.mac_length    = 0x6;
     dhcp.xid           = net.dhcp_xid;
     dhcp.client_mac    = net.adapter.mac_address;
     dhcp.server_ip     = net.router_ip;
-    dhcp.magic         = Dhcp_Message.MAGIC;
+    dhcp.magic         = DHCP_Message.MAGIC;
 
     byte_swap_struct(*dhcp);
 
@@ -1536,24 +1648,24 @@ update_dhcp :: (using net: *Network_Connection) {
     }
 }
 
-Dhcp_Packet :: struct {
+DHCP_Packet :: struct {
     eth: Ethernet_Header;
-    ip: Ipv4_Header #align 1;
-    udp: Udp_Header #align 1;
-    dhcp: Dhcp_Message #align 1;
+    ip: IPv4_Header #align 1;
+    udp: UDP_Header #align 1;
+    dhcp: DHCP_Message #align 1;
 }
 
 handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
-    using packet := cast(*Dhcp_Packet) eth_;
+    using packet := cast(*DHCP_Packet) eth_;
 
-    if udp.length < size_of(Dhcp_Message) + size_of(Udp_Header) {
+    if udp.length < size_of(DHCP_Message) + size_of(UDP_Header) {
         log_error("DHCP packet too small.");
         return;
     }
 
     byte_swap_struct(*dhcp);
 
-    if dhcp.magic != Dhcp_Message.MAGIC {
+    if dhcp.magic != DHCP_Message.MAGIC {
         log_error("DHCP packet magic doesn't match.");
         return;
     }
@@ -1600,7 +1712,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 }
 
-Dhcp_Option_Code :: enum u8 {
+DHCP_Option_Code :: enum u8 {
     PADDING      :: 0x0;
     SUBNET_MASK  :: 0x01;
     ROUTER       :: 0x03;
@@ -1615,11 +1727,11 @@ Dhcp_Option_Code :: enum u8 {
     TERMINATOR   :: 0xff;
 }
 
-Dhcp_Options_Builder :: struct {
+DHCP_Options_Builder :: struct {
     buffer: [..] u8;
 }
 
-add_option :: (options: *Dhcp_Options_Builder, code: Dhcp_Option_Code, data: Any) {
+add_option :: (options: *DHCP_Options_Builder, code: DHCP_Option_Code, data: Any) {
     if !options.buffer.allocator.proc {
         options.buffer.allocator = temp;
     }
@@ -1641,12 +1753,12 @@ add_option :: (options: *Dhcp_Options_Builder, code: Dhcp_Option_Code, data: Any
     array_add(*options.buffer, ..bytes);
 }
 
-get_size :: (options: Dhcp_Options_Builder) -> u16 {
+get_size :: (options: DHCP_Options_Builder) -> u16 {
     // +1 because we add the terminator when we commit.
     return cast(u16) options.buffer.count + 1;
 }
 
-commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Options_Builder) {
+commit_dhcp_options :: (packet: *Network_Packet, options: DHCP_Options_Builder) {
     array_add(*options.buffer, 0xff);
     add_to_packet(packet, cast(string) options.buffer);
 }
@@ -1665,9 +1777,9 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
     byte_swap_struct(*eth);
     add_to_packet(*packet, eth);
 
-    options: Dhcp_Options_Builder;
-    add_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DISCOVER);
-    add_option(*options, .PRL, Dhcp_Option_Code.[
+    options: DHCP_Options_Builder;
+    add_option(*options, .MESSAGE_TYPE, DHCP_Message_Type.DISCOVER);
+    add_option(*options, .PRL, DHCP_Option_Code.[
         .SUBNET_MASK,
         .ROUTER,
         .TIME_SERVER,
@@ -1675,19 +1787,19 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
         .DOMAIN_NAME
     ]);
 
-    ip_length := size_of(Ipv4_Header)
-        + size_of(Udp_Header)
-        + size_of(Dhcp_Message)
+    ip_length := size_of(IPv4_Header)
+        + size_of(UDP_Header)
+        + size_of(DHCP_Message)
         + get_size(options);
 
     ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
 
-    udp: Udp_Header;
+    udp: UDP_Header;
     udp.source_port = DHCP_CLIENT_PORT;
     udp.destination_port = DHCP_SERVER_PORT;
-    udp.length = size_of(Udp_Header)
-        + size_of(Dhcp_Message)
+    udp.length = size_of(UDP_Header)
+        + size_of(DHCP_Message)
         + get_size(options);
 
     byte_swap_struct(*udp);
@@ -1698,7 +1810,7 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
 
     commit_dhcp_options(*packet, options);
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
 }
 
 transmit_dhcp_decline :: (net: *Network_Connection) {
@@ -1713,22 +1825,22 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
     byte_swap_struct(*eth);
     add_to_packet(*packet, eth);
 
-    options: Dhcp_Options_Builder;
-    add_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DECLINE);
+    options: DHCP_Options_Builder;
+    add_option(*options, .MESSAGE_TYPE, DHCP_Message_Type.DECLINE);
 
-    ip_length := size_of(Ipv4_Header)
-        + size_of(Udp_Header)
-        + size_of(Dhcp_Message)
+    ip_length := size_of(IPv4_Header)
+        + size_of(UDP_Header)
+        + size_of(DHCP_Message)
         + get_size(options);
 
     ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
 
-    udp: Udp_Header;
+    udp: UDP_Header;
     udp.source_port = DHCP_CLIENT_PORT;
     udp.destination_port = DHCP_SERVER_PORT;
-    udp.length = size_of(Udp_Header)
-        + size_of(Dhcp_Message)
+    udp.length = size_of(UDP_Header)
+        + size_of(DHCP_Message)
         + get_size(options);
 
     byte_swap_struct(*udp);
@@ -1739,7 +1851,7 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
 
     commit_dhcp_options(*packet, options);
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
 }
 
 transmit_dhcp_request :: (net: *Network_Connection) {
@@ -1755,25 +1867,25 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     byte_swap_struct(*eth);
     add_to_packet(*packet, eth);
 
-    options: Dhcp_Options_Builder;
-    add_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.REQUEST);
+    options: DHCP_Options_Builder;
+    add_option(*options, .MESSAGE_TYPE, DHCP_Message_Type.REQUEST);
     add_option(*options, .HOSTNAME, "JaiOS");
     add_option(*options, .SERVER_IP, net.router_ip);
     add_option(*options, .REQUEST_IP, net.our_ip);
 
-    ip_length := size_of(Ipv4_Header)
-        + size_of(Udp_Header)
-        + size_of(Dhcp_Message)
+    ip_length := size_of(IPv4_Header)
+        + size_of(UDP_Header)
+        + size_of(DHCP_Message)
         + get_size(options);
 
     ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
 
-    udp: Udp_Header;
+    udp: UDP_Header;
     udp.source_port = DHCP_CLIENT_PORT;
     udp.destination_port = DHCP_SERVER_PORT;
-    udp.length = size_of(Udp_Header)
-        + size_of(Dhcp_Message)
+    udp.length = size_of(UDP_Header)
+        + size_of(DHCP_Message)
         + get_size(options);
 
     byte_swap_struct(*udp);
@@ -1784,7 +1896,7 @@ transmit_dhcp_request :: (net: *Network_Connection) {
 
     commit_dhcp_options(*packet, options);
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
 }
 
 
@@ -1811,7 +1923,7 @@ Icmp_Request :: struct {
 
 Icmp_Packet :: struct {
     eth: Ethernet_Header;
-    ip: Ipv4_Header #align 1;
+    ip: IPv4_Header #align 1;
     using icmp: Icmp_Header #align 1;
 }
 
@@ -1842,51 +1954,53 @@ transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
 
     using pong: Icmp_Packet;
 
-    eth.destination_mac = ping.eth.source_mac;
-    eth.source_mac      = ping.eth.destination_mac;
-    eth.ethertype       = .IPv4;
+    eth.destination_mac  = ping.eth.source_mac;
+    eth.source_mac       = ping.eth.destination_mac;
+    eth.ethertype        = .IPv4;
 
     byte_swap_struct(*eth);
 
-    ip = init_ip_header(net, .ICMP, ping.ip.source_address, size_of(Ipv4_Header) + size_of(Icmp_Header));
+    ip = init_ip_header(net, .ICMP, ping.ip.source_address, size_of(IPv4_Header) + size_of(Icmp_Header));
 
     icmp.control_message = .echo_reply;
-    icmp.data = ping.icmp.data;
-    icmp.checksum = internet_checksum(icmp);
+    icmp.data            = ping.icmp.data;
+    icmp.checksum        = internet_checksum(icmp);
     add_to_packet(*packet, pong);
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
 }
 
 transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
     using ping: Icmp_Packet;
 
     eth = init_ethernet_header(net);
-    ip = init_ip_header(net, .ICMP, destination_ip, size_of(Ipv4_Header) + size_of(Icmp_Header));
+    ip  = init_ip_header(net, .ICMP, destination_ip, size_of(IPv4_Header) + size_of(Icmp_Header));
+
+    identifier := cast(u32) random_get() & 0xffff;
 
     icmp.control_message = .echo_request;
-    icmp.data = cast(u32) random_get() & 0xffff;
-    icmp.checksum = internet_checksum(icmp);
+    icmp.data            = identifier;
+    icmp.checksum        = internet_checksum(icmp);
 
     packet: Network_Packet;
     packet.data = New(Icmp_Packet,, temp);
 
     add_to_packet(*packet, ping);
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
 
     time := get_monotonic_time();
 
     array_add(*net.pings_in_flight, {
-        id = icmp.data,
+        id             = identifier,
         destination_ip = destination_ip,
-        sent_at = time,
+        sent_at        = time,
     });
 }
 
 
 
-Dns_Header :: struct {
+DNS_Header :: struct {
     transaction_id: u16;
 
     flags: enum_flags u16 {
@@ -1902,7 +2016,7 @@ Dns_Header :: struct {
 
 DNS_SERVER_PORT :: 53;
 
-transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
+transmit_dns_query :: (net: *Network_Connection, url: string) -> *DNS_Query {
     // Todo: User thread version of this.
 
     packet: Network_Packet;
@@ -1913,25 +2027,25 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     eth := init_ethernet_header(net);
     add_to_packet(*packet, eth);
 
-    ip_length := size_of(Ipv4_Header)
-        + size_of(Udp_Header)
-        + size_of(Dns_Header)
+    ip_length := size_of(IPv4_Header)
+        + size_of(UDP_Header)
+        + size_of(DNS_Header)
         + cast(u16) url.count + 6; // 6 because TYPE, CLASS, first label length, and zero terminator. Todo: hardcoded
 
     ip := init_ip_header(net, .UDP, net.router_ip, ip_length);
     add_to_packet(*packet, ip);
 
-    udp: Udp_Header;
+    udp: UDP_Header;
     udp.source_port = net.dns_client_port;
     udp.destination_port = DNS_SERVER_PORT;
-    udp.length = size_of(Udp_Header)
-        + size_of(Dns_Header)
+    udp.length = size_of(UDP_Header)
+        + size_of(DNS_Header)
         + cast(u16) url.count + 6;
 
     byte_swap_struct(*udp);
     add_to_packet(*packet, udp);
 
-    dns: Dns_Header;
+    dns: DNS_Header;
     dns.transaction_id = xid;
     dns.flags = .QR__query | .RD__recursion_desired;
     dns.questions = 1;
@@ -1952,10 +2066,10 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     }
     add_to_packet(*packet, cast(u8) 0);
 
-    add_to_packet(*packet, byte_swap(Dns_Record_Type.A));
-    add_to_packet(*packet, byte_swap(Dns_Class.IN));
+    add_to_packet(*packet, byte_swap(DNS_Record_Type.A));
+    add_to_packet(*packet, byte_swap(DNS_Class.IN));
 
-    i8254x_transmit_packet(*net.adapter, packet);
+    transmit_packet(net, packet);
 
     new_query := array_add(*net.dns_queries_in_flight);
     new_query.transaction_id = xid;
@@ -1965,32 +2079,34 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     return new_query;
 }
 
-Dns_Query :: struct {
+DNS_Query :: struct {
     transaction_id: u16;
     url: string;
     sent_at: Apollo_Time;
     complete: bool;
     answer: u32;
-    response: Dns_Response_Code;
+    response: DNS_Response_Code;
+
+    semaphore: Semaphore;
 }
 
-Dns_Packet :: struct {
+DNS_Packet :: struct {
     eth: Ethernet_Header;
-    ip: Ipv4_Header #align 1;
-    udp: Udp_Header #align 1;
-    dns: Dns_Header #align 1;
+    ip: IPv4_Header #align 1;
+    udp: UDP_Header #align 1;
+    dns: DNS_Header #align 1;
 } #no_padding
 
-Dns_Record_Type :: enum u16 {
+DNS_Record_Type :: enum u16 {
     A     :: 0x0001;
     CNAME :: 0x0005;
 }
 
-Dns_Class :: enum u16 {
+DNS_Class :: enum u16 {
     IN    :: 0x0001;
 }
 
-Dns_Response_Code :: enum {
+DNS_Response_Code :: enum {
     NOERROR   :: 0;
     FORMERR   :: 1;
     SERVFAIL  :: 2;
@@ -2004,7 +2120,7 @@ Dns_Response_Code :: enum {
 }
 
 handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
-    using packet := cast(*Dns_Packet) eth_;
+    using packet := cast(*DNS_Packet) eth_;
 
     byte_swap_struct(*packet.dns);
 
@@ -2017,10 +2133,11 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             continue;
         }
 
-        query.response = cast(Dns_Response_Code)(dns.flags & 0xf);
+        query.response = cast(DNS_Response_Code)(dns.flags & 0xf);
 
         if query.response != .NOERROR {
             query.complete = true;
+            signal(*query.semaphore);
             return;
         }
 
@@ -2039,14 +2156,16 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
         cursor := cast(*u8) (*dns + 1);
 
+        // Todo: Validate packet size.
+
         // Must cast this or it may underflow and loop for very many iterations.
         for 0..cast(s16)dns.questions-1 {
 
             // Skip all the questions.
             Skip_Name();
 
-            Read(Dns_Record_Type);
-            Read(Dns_Class);
+            Read(DNS_Record_Type);
+            Read(DNS_Class);
         }
 
         // Should now be at the answers. Find a host address.
@@ -2060,9 +2179,9 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                 Skip_Name();
             }
 
-            type := Read(Dns_Record_Type);
+            type := Read(DNS_Record_Type);
 
-            Read(Dns_Class);
+            Read(DNS_Class);
             Read(u32); // TTL
 
             data_length := Read(u16);
@@ -2070,6 +2189,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             if type == .A {
                 if data_length != 4 {
                     log_error("DNS response address is not IPv4");
+                    signal(*query.semaphore);
                     return;
                 }
 
@@ -2078,6 +2198,8 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                 log("Got DNS response regarding \"%\". IP is %", query.url, format_ip(query.answer));
 
                 query.complete = true;
+                signal(*query.semaphore);
+
                 return;
             } else {
                 cursor += data_length;
@@ -2086,6 +2208,19 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 
     log_error("Got unexpected DNS response from %.", format_ip(ip.source_address));
+}
+
+resolve_host_name :: (net: *Network_Connection, url: string, timeout_ms := 10_000) -> success: bool, ip: u32 {
+    // This should probably report the exact DNS error if the query fails.
+    // This should cache IPs in the future.
+
+    query := transmit_dns_query(net, url);
+
+    if wait_for(*query.semaphore, milliseconds_to_apollo(timeout_ms)) {
+        return query.answer != 0, query.answer;
+    }
+
+    return false, 0;
 }
 
 
@@ -2098,6 +2233,8 @@ Network_Packet :: struct {
 }
 
 add_to_packet :: (packet: *Network_Packet, data: Any) {
+    // We should set this up so you can prepend as well as append, to make the user code simpler.
+
     if data.type.type == .STRING {
         s := cast(*string) data.value_pointer;
         assert(packet.length + s.count <= MAX_PACKET_SIZE);
@@ -2112,6 +2249,14 @@ add_to_packet :: (packet: *Network_Packet, data: Any) {
 
     memcpy(packet.data + packet.length, data.value_pointer, data.type.runtime_size);
     packet.length += data.type.runtime_size;
+}
+
+add_to_packet :: (packet: *Network_Packet, $ type: Type) -> *type {
+    write_pointer := packet.data + packet.length;
+
+    packet.length += size_of(type);
+
+    return write_pointer;
 }
 
 
@@ -2138,7 +2283,7 @@ Network_Connection :: struct {
     our_ip: u32;
     router_ip: u32;
 
-    adapter: I8254x_Network_Interface_Card;
+    adapter: I8254x_Network_Interface_Card;  // Todo: This should be a pointer/ID of any kind of NIC in the future.
 
     dhcp_xid: u32;
 
@@ -2168,16 +2313,23 @@ Network_Connection :: struct {
 
     pings_in_flight: Bucket_Array(Icmp_Request, 64);
 
-    dns_queries_in_flight: Bucket_Array(Dns_Query, 64);
+    dns_queries_in_flight: Bucket_Array(DNS_Query, 64);
     dns_client_port: u16;
 
-    tcp_connections: Bucket_Array(Tcp_Connection, 64);
+    tcp_connections: Bucket_Array(TCP_Connection, 64);
+    udp_connections: Bucket_Array(UDP_Connection, 64);
     next_port: u16;
 
     work_to_do: Semaphore;
 }
 
+transmit_packet :: (net: *Network_Connection, packet: Network_Packet) {
+    assert(!!net);
+    i8254x_transmit_packet(*net.adapter, packet);
+}
+
 wait_until_connected_to_network :: (net: *Network_Connection, timeout := INFINITE_TIMEOUT) {
+    // Todo: I think this is broken.
     wait_for_condition(*net.dhcp_completed, #code net.dhcp_handshake_state != .COMPLETED, timeout);
 }
 
@@ -2261,10 +2413,10 @@ network_thread :: () #no_context {
                 continue;
             }
 
-            ip := cast(*Ipv4_Header) (eth + 1);
+            ip := cast(*IPv4_Header) (eth + 1);
             byte_swap_struct(ip);
 
-            ip_length := byte_swap(cast(u16) get(ip.*, .total_length)) - size_of(Ipv4_Header);
+            ip_length := byte_swap(cast(u16) get(ip.*, .total_length)) - size_of(IPv4_Header);
 
             // Todo: properly validate the IP packet (size, IHL, etc.)
 
@@ -2273,7 +2425,7 @@ network_thread :: () #no_context {
                 handle_icmp_packet(net, eth);
 
               case .UDP;
-                udp := cast(*Udp_Header) (ip + 1);
+                udp := cast(*UDP_Header) (ip + 1);
                 byte_swap_struct(udp);
 
                 if udp.destination_port == DHCP_CLIENT_PORT {
@@ -2291,10 +2443,25 @@ network_thread :: () #no_context {
                     continue;
                 }
 
+                for* net.udp_connections {
+                    if it.local_port != udp.destination_port {
+                        continue;
+                    }
+
+                    received_data: string;
+                    received_data.count = udp.length - size_of(UDP_Header);
+                    received_data.data  = cast(*u8) (udp + 1);
+
+                    write_ring_buffer_copy(*it.received, received_data);
+                    signal(*it.semaphore);
+
+                    continue packet;
+                }
+
                 log("UDP packet for port % unhandled.\n", udp.destination_port);
 
               case .TCP;
-                header := cast(*Tcp_Header) (ip + 1);
+                header := cast(*TCP_Header) (ip + 1);
                 byte_swap_struct(header);
 
                 for* net.tcp_connections {
@@ -2302,7 +2469,7 @@ network_thread :: () #no_context {
                         continue;
                     }
 
-                    bytes := ip_length - size_of(Tcp_Header);
+                    bytes := ip_length - size_of(TCP_Header);
 
                     receive_tcp_segment(it, header, bytes);
 
@@ -2451,7 +2618,7 @@ network_test :: () -> string {
 
             dns_query := transmit_dns_query(net, "thinkpad");
 
-            if Timeout(dns_query.complete, 1000) {
+            if !wait_for(*dns_query.semaphore, milliseconds_to_apollo(10_000)) {
                 continue;
             }
 
@@ -2468,9 +2635,7 @@ network_test :: () -> string {
 
     transmit_ping(net, ip_address);
 
-    connection := initiate_tcp_connection(net, ip_address, port);
-
-    Timeout(connection.handshake_state == .ESTABLISHED, 60_000);
+    connection := initiate_tcp_and_wait_for_handshake(net, ip_address, port);
 
     tls := establish_tls_connection(connection);
 

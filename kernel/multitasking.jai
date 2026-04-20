@@ -36,7 +36,7 @@ Process_Context :: struct {
     id: int;
     root_page_table: u64;
 
-    // Generational_Bucket_Array is a Bucket_Array with generational indices added on. Maybe all types of objects should be in a tagged union and we just have one big table.
+    // Maybe all types of objects should be in a tagged union and we just have one big table. That way you effectively get type checking on the IDs.
 
     page_frames: Generational_Bucket_Array(s32);
     semaphores:  Generational_Bucket_Array(Semaphore);
@@ -49,6 +49,9 @@ Process_Context :: struct {
     stopped: bool;
 
     arena: Physical_Memory_Arena;
+
+    virtual_memory_map: [..] Virtual_Memory_Area;
+    virtual_memory_lock: Mutex; // For now just have a big mutex for all virtual memory operations on a process. Make this more fine grained in the future.
 }
 
 Task_Priority :: enum s8 {
@@ -970,14 +973,17 @@ syscall_handler :: (data: *Syscall_Stack_Frame) #c_call {
 Virtual_Memory_Area :: struct {
     start:  int;
     end:    int;
+
+    // If it's a file mapping:
+    inode_id: int;
 }
 
 check_user_address :: (base: *void, size: int) -> invalid: bool {
     USER_LIMIT :: 0x7fff_ffff_ffff;
     invalid: bool;
 
-    invalid ||= size > USER_LIMIT;
-    invalid ||= size < 0;
+    invalid ||=  size         > USER_LIMIT;
+    invalid ||=  size         < 0;
 
     invalid ||=  base         > cast(*void) USER_LIMIT;
     invalid ||= (base + size) > cast(*void) USER_LIMIT;
@@ -1009,7 +1015,6 @@ stop_executing :: () {
 } @Syscall(2)
 
 Thread_Settings :: struct @SyscallAPI {
-    _: void;
     version := 1;
 
     stack_memory: *void; // Initial value of the stack pointer.
@@ -1632,7 +1637,8 @@ check_generation :: (using array: *Generational_Bucket_Array, locator: Bucket_Lo
     return ifx slot.generation == generation then slot else null;
 }
 
-// 8 bits for the slot index, leaves 24 for the bucket index and 32 for generation.
+// 8 bits for the slot index due to 256 bucket size, leaves 24 for the bucket index and 32 for generation.
+// Maybe we could have a type tag in here as well.
 Handle :: enum u64 {
     slot_index     :: 8;
     bucket_index   :: 24;
