@@ -81,6 +81,8 @@ Kernel_Globals :: struct {
     tsc_frequency: u64;
     lapic_frequency: u64;
 
+    network_time_state: Network_Time_State;
+
     // If future x64 CPUs all support this, plus some other TSC specific features, then we'll likely remove
     // support for HPET and the Local APIC timer, and use TSC for everything. Namely the features you would
     // need are Invariant TSC, and for the frequency to be provided by CPUID. However, Boostibot on Discord
@@ -358,7 +360,9 @@ kernel_entry :: () #no_context {
         // file_system_test(nvme_sd);
 
         assert(start_network());
-        get_ntp_consensus_time(*global.network_connection);
+        simple_create_thread(network_time_thread);
+
+        // get_ntp_consensus_time(*global.network_connection);
 
         // success, network_time := get_nist_network_time(*global.network_connection);
         // assert(success);
@@ -2620,9 +2624,9 @@ using,except(byte_swap_in_place) _ :: #import "Bit_Operations"; // We have our o
 #import "Bucket_Array";
 
 array_add :: bucket_array_add;
-array_add :: (array: *Bucket_Array) -> *array.type {
-    loc, item := bucket_array_add(array, {});
-    return item;
+array_add :: (array: *Bucket_Array) -> *array.type, Bucket_Locator {
+    locator, item := bucket_array_add(array, {});
+    return item, locator;
 }
 
 #import "Bitfield"(true);

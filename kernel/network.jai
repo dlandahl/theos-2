@@ -289,7 +289,6 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
 
     add_to_packet(*packet, reply);
     transmit_packet(net, packet);
-    log("ARP reply sent");
 
     return;
 }
@@ -315,23 +314,35 @@ UDP_Connection :: struct {
 
     received:    Ring_Buffer;
     semaphore:   Semaphore;
+
+    locator: Bucket_Locator;
 }
 
-initiate_udp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *UDP_Connection {
-    local_port := cast,trunc(u16) random_get(); // Todo
+start_udp :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *UDP_Connection {
+    local_port := allocate_port(net);
 
     // Todo: This gets called from the user thread, but this array is owned by the network thread.
-    udp := array_add(*net.udp_connections);
+    udp, locator := array_add(*net.udp_connections);
 
     udp.net         = net;
     udp.remote_port = remote_port;
     udp.remote_ip   = remote_ip;
     udp.local_port  = local_port;
+    udp.locator     = locator;
 
     allocate_ring_buffer(*udp.received, 0x1000);
     udp.semaphore.counter_max = 1;
 
     return udp;
+}
+
+stop_udp :: (net: *Network_Connection, udp: *UDP_Connection) {
+    free_ring_buffer(*udp.received);
+
+    // Todo: What if someone's looking at the semaphore.
+
+    // Todo: This gets called from the user thread, but this array is owned by the network thread.
+    bucket_array_remove(*net.udp_connections, udp.locator);
 }
 
 send_udp :: (connection: *UDP_Connection, to_send: Any) { // We could remove the extra copy of 'to_send'
@@ -433,13 +444,13 @@ TCP_Header :: struct {
 
 init_tcp_header :: (tcp: *TCP_Connection, flags: TCP_Header.Flags, payload := "") -> TCP_Header {
     h: TCP_Header;
-    h.source_port = tcp.port;
+    h.source_port      = tcp.port;
     h.destination_port = tcp.remote_port;
-    h.sequence_number = tcp.sequence_number;
-    h.ack_number = tcp.ack_number;
-    h.data_offset = 5 << 4;
-    h.flags = flags;
-    h.window = 4096 * 4;
+    h.sequence_number  = tcp.sequence_number;
+    h.ack_number       = tcp.ack_number;
+    h.data_offset      = 5 << 4;
+    h.flags            = flags;
+    h.window           = 4096 * 4;
 
     byte_swap_struct(*h);
     h.checksum = tcp_checksum(h, tcp.net.our_ip, tcp.remote_ip, payload);
@@ -463,11 +474,11 @@ tcp_checksum :: (tcp: TCP_Header, source: u32, dest: u32, payload := "") -> u16 
     }
 
     pseudo := New(Pseudo_Header,, temp);
-    pseudo.tcp = tcp;
-    pseudo.source_address = source;
+    pseudo.tcp                 = tcp;
+    pseudo.source_address      = source;
     pseudo.destination_address = dest;
-    pseudo.protocol = .TCP;
-    pseudo.tcp_length = byte_swap(cast(u16) (size_of(TCP_Header) + payload.count));
+    pseudo.protocol            = .TCP;
+    pseudo.tcp_length          = byte_swap(cast(u16) (size_of(TCP_Header) + payload.count));
 
     memcpy(pseudo.payload.data, payload.data, payload.count);
 
@@ -583,12 +594,12 @@ record_tcp_packet_for_potential_retransmission :: (tcp: *TCP_Connection, packet:
 
     info := array_add(*tcp.in_flight);
     info.last_sent_at = get_monotonic_time();
-    info.packet = packet;
+    info.packet       = packet;
 
     // The sequence number in the ACK will include the bytes transmitted in this packet, so store that.
     // The sequence number of the packet we're transmitting right now does not match this sequence number, as it describes the first byte being transmitted in that packet.
-    info.sequence = tcp.sequence_number;
-    info.flags = flags;
+    info.sequence     = tcp.sequence_number;
+    info.flags        = flags;
 }
 
 transmit_tcp_segment :: (tcp: *TCP_Connection, header_flags: TCP_Header.Flags, payload := "") {
@@ -624,20 +635,20 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
 
     log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
 
-    local_port := cast,trunc(u16) random_get(); // Todo
+    local_port := allocate_port(net);
 
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
 
     // Todo: This gets called from the user thread, but this array is owned by the network thread.
     tcp := array_add(*net.tcp_connections);
-    tcp.net = net;
-    tcp.port = local_port;
-    tcp.remote_port = remote_port;
-    tcp.remote_ip = remote_ip;
+    tcp.net             = net;
+    tcp.port            = local_port;
+    tcp.remote_port     = remote_port;
+    tcp.remote_ip       = remote_ip;
     tcp.handshake_state = .NOT_STARTED;
     tcp.sequence_number = sequence_number;
-    tcp.ack_number = 0;
+    tcp.ack_number      = 0;
 
     allocate_ring_buffer(*tcp.in\_stream, 0x1000);
     allocate_ring_buffer(*tcp.out_stream, 0x1000);
@@ -1020,7 +1031,7 @@ TLS_Client_Hello :: struct {
         signature_algorithms:  [8] u8;
         sct:                   [4] u8;
         renegotiation_info:    [5] u8;
-    } @DontByteswap
+    }
 }
 
 establish_tls_connection :: (tcp: *TCP_Connection) -> TLS_Connection {
@@ -1649,10 +1660,10 @@ update_dhcp :: (using net: *Network_Connection) {
 }
 
 DHCP_Packet :: struct {
-    eth: Ethernet_Header;
-    ip: IPv4_Header #align 1;
-    udp: UDP_Header #align 1;
-    dhcp: DHCP_Message #align 1;
+    eth:  Ethernet_Header;
+    ip:   IPv4_Header     #align 1;
+    udp:  UDP_Header      #align 1;
+    dhcp: DHCP_Message    #align 1;
 }
 
 handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
@@ -2092,9 +2103,9 @@ DNS_Query :: struct {
 
 DNS_Packet :: struct {
     eth: Ethernet_Header;
-    ip: IPv4_Header #align 1;
-    udp: UDP_Header #align 1;
-    dns: DNS_Header #align 1;
+    ip:  IPv4_Header #align 1;
+    udp: UDP_Header  #align 1;
+    dns: DNS_Header  #align 1;
 } #no_padding
 
 DNS_Record_Type :: enum u16 {
@@ -2194,8 +2205,6 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                 }
 
                 query.answer = (.*) cast(*u32) cursor;
-
-                log("Got DNS response regarding \"%\". IP is %", query.url, format_ip(query.answer));
 
                 query.complete = true;
                 signal(*query.semaphore);
@@ -2354,7 +2363,7 @@ start_network :: () -> bool {
     put_task_on_core(task, *global.processor_cores[1]);
 
     log("Waiting for DHCP handshake.");
-    if Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000) {
+    if Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000) { // Todo: Stalls.
         return false;
     }
 
@@ -2526,6 +2535,9 @@ allocate_ring_buffer :: (ring: *Ring_Buffer, size: int) {
 
 free_ring_buffer :: (ring: *Ring_Buffer) {
     free_block(*global.physical_block_allocator, ring.physical_base);
+
+    unmap_pages(ring.buffer.data, ring.buffer.count * 2 / 4096);
+
     free_block(*global.virtual_block_allocator,  cast(u64) ring.buffer.data);
     memset(ring, 0, size_of(Ring_Buffer));
 }
@@ -2547,7 +2559,7 @@ ring_buffer_finish_write :: (ring: *Ring_Buffer) {
     ring.write_reserve_size = 0;
 }
 
-ring_buffer_start_read :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int {
+ring_buffer_start_read :: (ring: *Ring_Buffer, size: int) -> [] u8 {
     wrapped := ring.read_cursor & (ring.buffer.count-1);
     base_address := ring.buffer.data + wrapped;
 
@@ -2555,7 +2567,7 @@ ring_buffer_start_read :: (ring: *Ring_Buffer, size: int) -> *u8, reserved: int 
     available := get_data_available(ring);
     ring.read_reserve_size = min(size, available);
 
-    return base_address, ring.read_reserve_size;
+    return { ring.read_reserve_size, base_address};
 }
 
 ring_buffer_finish_read :: (ring: *Ring_Buffer) {

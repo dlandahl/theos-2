@@ -776,7 +776,7 @@ debug_run_tsc_timer :: () {
 
 
 operator <= :: (a: S128, b: s64) -> bool {
-    return a.high <= b;
+    return !a.high && xx a.low <= b;
 }
 
 operator > :: (a: S128, b: s64) -> bool {
@@ -785,12 +785,36 @@ operator > :: (a: S128, b: s64) -> bool {
 
 
 
-// Description of NTP algorithms:
+Network_Time_State :: struct {
+    last_network_time:         Apollo_Time; // Updated every few minutes using NTP.
+    synchronized_at_monotonic: Apollo_Time; // Used to interpolate the above value using monotonic hardware clock.
+
+    lock: Sequence_Lock;
+}
+
+get_consensus_time :: () -> consensus: Apollo_Time, monotonic_reference: Apollo_Time {
+    using global.network_time_state;
+
+    network, monotonic_then: Apollo_Time;
+
+    sequence_read(*lock, #code {
+        network        = last_network_time;
+        monotonic_then = synchronized_at_monotonic;
+    });
+
+    monotonic_now := get_monotonic_time();
+
+    return network + (monotonic_now - monotonic_then), monotonic_now;
+}
+
+// This is only Simple NTP. Good links for descriptions of the full NTP algorithms:
 // https://www.rfc-editor.org/rfc/rfc5905#section-8
+// https://www.eecis.udel.edu/~mills/ntp/html/warp.html
+// https://handmade.network/education/ntp
 
 NTP_Timestamp :: struct {
     seconds:   u32;
-    fraction:  u32; // Each increment is 233 picoseconds.
+    fraction:  u32; // Each increment is 232.831 picoseconds.
 }
 
 NTP_Packet :: struct {
@@ -820,16 +844,22 @@ NTP_Packet :: struct {
 
 #assert size_of(NTP_Packet) == 48;
 
-get_ntp_consensus_time :: (net: *Network_Connection) -> success: bool, time := APOLLO_TIME_INVALID {
+network_time_thread :: () {
     log_category("NTP");
+
+    net := *global.network_connection;
+
+    while true {
+        synchronize_ntp(net);
+
+        sleep(10, .seconds);
+    }
+}
+
+synchronize_ntp :: (net: *Network_Connection) -> success: bool {
 
     HOST_NAME   :: "pool.ntp.org";
     SERVER_PORT :: 123;
-
-    if net.dhcp_handshake_state != .COMPLETED {
-        log_error("No network.");
-        return success = false;
-    }
 
     success, ip_address := resolve_host_name(net, HOST_NAME);
 
@@ -838,28 +868,54 @@ get_ntp_consensus_time :: (net: *Network_Connection) -> success: bool, time := A
         return success = false;
     }
 
-    udp := initiate_udp_connection(net, ip_address, remote_port=SERVER_PORT);
+    udp := start_udp(net, ip_address, remote_port=SERVER_PORT);
+
+    t1 := get_consensus_time();
 
     ntp: NTP_Packet;
     set(*ntp, .mode,           NTP_Packet.CLIENT_MODE);
     set(*ntp, .version_number, NTP_Packet.VERSION);
-    ntp.transmit_timestamp = apollo_to_ntp(get_monotonic_time());
+    ntp.transmit_timestamp = apollo_to_ntp(t1);
 
     byte_swap_struct(*ntp);
-
     send_udp(udp, ntp);
 
     wait_for(*udp.semaphore);
+    t4, monotonic_reference := get_consensus_time();
 
-    received := cast(*NTP_Packet) ring_buffer_start_read(*udp.received, size_of(NTP_Packet));
-    byte_swap_struct(received);
+    received := ring_buffer_start_read(*udp.received, size_of(NTP_Packet));
 
-    apollo := ntp_to_apollo(received.transmit_timestamp);
-    return true, apollo;
+    if received.count < size_of(NTP_Packet) {
+        log_error("Short packet.");
+        return success = false;
+    }
+
+    ntp = (.*) cast(*NTP_Packet) received.data;
+    byte_swap_struct(*ntp);
+
+    ring_buffer_finish_read(*udp.received);
+    stop_udp(net, udp);
+
+    t2 := ntp_to_apollo(ntp.receive\_timestamp);
+    t3 := ntp_to_apollo(ntp.transmit_timestamp);
+
+    round_trip_delay :=  (t4 - t1) - (t3 - t2);
+    clock_offset     := ((t2 - t1) + (t3 - t4)) / 2;
+
+    log("Server: %, Round trip: %us, Clock offset: %us", format_ip(ip_address), to_microseconds(round_trip_delay), to_microseconds(clock_offset));
+
+    state := *global.network_time_state;
+
+    sequence_write(*state.lock, #code {
+        state.last_network_time         = t4 + clock_offset;
+        state.synchronized_at_monotonic = monotonic_reference;
+    });
+
+    return success = true;
 }
 
-NTP_EPOCH    : Apollo_Time : #run calendar_to_apollo({ year = 1900 });
-NTP_FRACTION : Apollo_Time : {233_000, 0}; // The apollo time delta represented by each step of the NTP timestamp fractional component.
+NTP_EPOCH    : Apollo_Time : #run calendar_to_apollo({ year = 1900 }); // Todo: This will need to be dynamically calculated because the NTP timestamp overflows every 136 years.
+NTP_FRACTION : Apollo_Time : {232_831, 0}; // The apollo time delta represented by each step of the NTP timestamp fractional component.
 
 ntp_to_apollo :: (ts: NTP_Timestamp) -> Apollo_Time {
     apollo := NTP_EPOCH;
